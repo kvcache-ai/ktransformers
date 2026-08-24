@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-67b9005c.js";
+            window.path_to_searchindex_js = "searchindex-d417b258.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-16789068.js"></script>
+        <script src="toc-18b9e882.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -197,6 +197,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="kt-kernel/README.html">Inference</a> and <a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
 <li><strong>June 21, 2026</strong>: MiniMax-M3 Day0 Support! (<a href="doc/en/kt-kernel/MiniMax-M3-Tutorial.html">Tutorial</a>)</li>
 <li><strong>June 17, 2026</strong>: GLM-5.2 Day0 Support! (<a href="doc/en/kt-kernel/GLM-5.2-Tutorial.html">Tutorial</a>)</li>
 <li><strong>May 6, 2026</strong>: KTransformers at <a href="https://paris2026.gosim.org/zh/schedule/">GOSIM Paris 2026</a> — “Agentic AI on Edge” track. We’ll present KT’s inference performance on consumer hardware.</li>
@@ -269,16 +270,16 @@ pip install .
 </div>
 <p>👉 <strong><a href="kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
-<h3 id="-sft---fine-tuning-with-llama-factory"><a class="header" href="#-sft---fine-tuning-with-llama-factory">🎓 <a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a> - Fine-Tuning with LLaMA-Factory</a></h3>
-<p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"><span class="img-wrapper"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"></span></label></p>
+<h3 id="-sft---fine-tuning-with-llamafactory"><a class="header" href="#-sft---fine-tuning-with-llamafactory">🎓 <a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">SFT</a> - Fine-Tuning with LlamaFactory</a></h3>
+<p>KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"><span class="img-wrapper"><img src="doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"></span></label></p>
 <p><strong>Key Features:</strong></p>
 <ul>
 <li><strong>Multi-Backend Support</strong>: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization</li>
 <li><strong>Ultra-Large MoE Support</strong>: Fine-tune models like DeepSeek-V3/R1 on limited GPU memory</li>
 <li><strong>Faster than ZeRO-Offload</strong>: 6-12x training speedup in benchmarked MoE SFT workloads</li>
 <li><strong>Lower CPU Memory</strong>: About half the CPU memory of the previous KT SFT path in the benchmarked setup</li>
-<li><strong>LLaMA-Factory Integration</strong>: Seamless integration with popular fine-tuning framework</li>
+<li><strong>LlamaFactory Integration</strong>: Seamless integration with the popular fine-tuning framework</li>
 </ul>
 <div class="table-wrapper">
 <table>
@@ -294,14 +295,16 @@ pip install .
 </div>
 <p><strong>Quick Start:</strong></p>
 <pre><code class="language-bash">cd /path/to/LLaMA-Factory
-pip install -e .
-pip install -r requirements/ktransformers.txt
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
   src/train.py \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
+<p>👉 <strong><a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">Easy-to-Use Fine-Tuning Cookbook (中文) →</a></strong>
+👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
 👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
@@ -1347,6 +1350,7 @@ chunk_size: 8192
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="ktransformers-sft-docs"><a class="header" href="#ktransformers-sft-docs">KTransformers SFT Docs</a></h1>
 <ul>
+<li><a href="#ktransformers--llamafactory-moe-微调-cookbook">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook (中文)</a></li>
 <li><a href="en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">v0.6.1 Quick Start</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">Fine-Tuning User Guide</a></li>
 <li><a href="#qwen35-moe-kt-lora-serving-with-sglang-kt">KT-FT Fine-Tuning and Inference Loop</a></li>
@@ -1354,6 +1358,339 @@ chunk_size: 8192
 <li><a href="#dpo-training-with-llama-factory">DPO Tutorial</a></li>
 <li><a href="#tutorial-inject-operator-step-by-step">Injection Tutorial</a></li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ktransformers--llamafactory-moe-微调-cookbook"><a class="header" href="#ktransformers--llamafactory-moe-微调-cookbook">KTransformers × LlamaFactory MoE 微调 Cookbook</a></h1>
+<p>从  Qwen3.5 到 DeepSeek-V4、Kimi-K3、GLM-5.2，每一次超大模型的开源都带来性能与规模上的巨大跃升。然而，多数研究者与开发者受限于昂贵的显卡，难以在资源受限条件下微调超大模型。面对这种差距，我们提出了一种更具可行性的方案：通过 KTransformers 与 LlamaFactory 的结合，仅需1~4张RTX 4090与较高内存CPU，便可微调 DeepSeek-V3&amp;V4系列/Kimi-K2.5/GLM-5.2等1T规模的 MoE（Mixture of Experts，混合专家）模型。</p>
+<p>为给大家提供便捷高效的使用方式，KTransformers 与 LlamaFactory 合作，保持您的工作流不受影响，最大化支持矩阵。如下图所示，LlamaFactory 是整个微调流程的统一调度与配置框架，负责数据处理、训练调度、LoRA 插入与推理接口管理；GPU 运行 Attention、Shared Expert 等模块，KTransformers 接管位于 CPU 与大内存中的 Routed Experts，实现 GPU+CPU 异构协同。</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory 与 KTransformers MoE 微调架构"><span class="img-wrapper"><img src="assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory 与 KTransformers MoE 微调架构"></span></label></p>
+<p>**技术简介：**如下图，KTransformers 通过将 Attention、共享模块等计算密集部分放在 GPU，将体积大但每次只激活少量的 Routed Experts 放入 CPU 内存。避免了大量专家权重在 PCIe 上面反复传输，通过 GPU+CPU 协同计算的方式，最大化性能。CPU 则根据权重格式和硬件能力自动适配了各种后端。</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/ktransformers-moe-hardware-overview.png" alt="KTransformers MoE 模型与异构硬件映射"><span class="img-wrapper"><img src="assets/ktransformers-moe-hardware-overview.png" alt="KTransformers MoE 模型与异构硬件映射"></span></label></p>
+<p>**指南简介：**首次上手建议直接选择 <strong>原精度 BF16（16 位浮点）+ LoRA/全量 + <code>kt_backend: auto</code></strong>：无需转换权重，修改两份 YAML 配置文件即可启动。模型提供原生 FP8 checkpoint 且选择 LoRA 时，可直接使用原生 FP8 Expert 权重降低主机内存占用。仅在系统内存仍然紧张且已准备好 KT 转换权重时，再考虑 INT8 或 AMXINT4 量化方案。</p>
+<h2 id="阅读导航"><a class="header" href="#阅读导航">阅读导航</a></h2>
+<ul>
+<li><a href="#1-硬件检查与安装">硬件检查与安装</a></li>
+<li><a href="#2-选择微调方案">选择微调方案</a></li>
+<li><a href="#3-custom-yaml高级参数">Custom YAML：高级参数</a></li>
+<li><a href="#4-性能与资源估算">性能与资源估算</a></li>
+<li><a href="#附录">附录：完整配置与 Q&amp;A</a></li>
+</ul>
+<h2 id="1-硬件检查与安装"><a class="header" href="#1-硬件检查与安装">1. 硬件检查与安装</a></h2>
+<h3 id="11-检查硬件资源"><a class="header" href="#11-检查硬件资源">1.1 检查硬件资源</a></h3>
+<p>先检查 CPU 指令集，确认可用的加速后端：</p>
+<pre><code class="language-bash">lscpu | grep -i -E 'Model name|Socket|NUMA|avx512|amx'
+</code></pre>
+<p>再检查 GPU 显存、系统内存与磁盘空间：</p>
+<pre><code class="language-bash">nvidia-smi
+free -h
+df -h /data
+</code></pre>
+<p>根据检查结果确认两件事：</p>
+<ul>
+<li><strong>指令集匹配：</strong> 原生 FP8 需要具备 AVX512F、AVX512_BF16、AVX512_VNNI、AVX512_VBMI 的兼容 AMD/x86 CPU；INT8 可由 <code>auto</code> 在 AMX-INT8 与 AVX512-VNNI 实现之间选择；AMXINT4 需要 AMX 与匹配的转换权重；原生 BF16 在支持 AMX 时性能最佳。</li>
+<li><strong>容量充足：</strong> 系统内存要容纳 Expert 权重，同时为 activation（激活值）、梯度和 optimizer state（优化器状态）留出空间；磁盘还要容纳 checkpoint 与临时文件。</li>
+</ul>
+<h3 id="12-安装环境"><a class="header" href="#12-安装环境">1.2 安装环境</a></h3>
+<p>推荐使用干净的 Python 3.11 环境。先固定 PyTorch 2.9.1，再安装 LlamaFactory；KT 依赖必须最后安装，避免标准版 <code>transformers</code> 或 <code>accelerate</code> 覆盖 KT 定制版本：</p>
+<pre><code class="language-bash">conda create -n kt-sft python=3.11 -y
+conda activate kt-sft
+
+git clone --depth 1 https://github.com/hiyouga/LlamaFactory.git
+cd LlamaFactory
+
+python -m pip install torch==2.9.1 torchaudio==2.9.1 torchvision==0.24.1
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
+</code></pre>
+<p>安装完成后检查依赖关系，并核对实际导入版本：</p>
+<pre><code class="language-bash">python -m pip check
+
+python - &lt;&lt;'PY'
+from importlib.metadata import version
+
+import accelerate
+import ktransformers
+import kt_kernel
+import torch
+import transformers
+
+for name, module in {
+    "torch": torch,
+    "transformers": transformers,
+    "accelerate": accelerate,
+    "kt_kernel": kt_kernel,
+    "ktransformers": ktransformers,
+}.items():
+    print(f"{name:14s} {getattr(module, '__version__', 'unknown')}")
+
+print(f"{'sglang-kt':14s} {version('sglang-kt')}")
+print(f"{'transformers-kt':14s} {version('transformers-kt')}")
+print(f"{'accelerate-kt':14s} {version('accelerate-kt')}")
+
+from accelerate.utils.dataclasses import KTransformersPlugin  # noqa: F401
+PY
+</code></pre>
+<p>当前兼容版本的输出应包括：</p>
+<pre><code class="language-text">No broken requirements found.
+torch          2.9.1
+transformers   5.6.0
+accelerate     1.14.0
+kt_kernel      0.7.0
+ktransformers  0.7.0
+sglang-kt      0.7.0
+transformers-kt 5.6.0.post2
+accelerate-kt  1.14.0.post2
+</code></pre>
+<h2 id="2-选择微调方案"><a class="header" href="#2-选择微调方案">2. 选择微调方案</a></h2>
+<p>先确定 Expert 权重格式，再决定使用 LoRA 还是全量微调。选定后，直接使用本节对应的训练 YAML 和 Accelerate YAML 基础配置。</p>
+<h3 id="21-选择-expert-权重格式"><a class="header" href="#21-选择-expert-权重格式">2.1 选择 Expert 权重格式</a></h3>
+<p>“原精度”与“量化”描述 Expert 权重格式；AMX（Advanced Matrix Extensions）与 AVX512（Advanced Vector Extensions 512-bit）描述 CPU 后端指令集，两者不是同一个维度。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>权重方案</th><th>适合情况</th><th>前提与取舍</th></tr>
+</thead>
+<tbody>
+<tr><td>原生 BF16 checkpoint</td><td>系统内存充足，希望优先获得稳定、直接的训练体验</td><td>无需转换权重；CPU 支持 AMX 时，<code>auto</code> 会优先选择当前最快的 AMXBF16</td></tr>
+<tr><td>原生 FP8（8-bit Floating Point，8 位浮点）</td><td>模型本身提供原生 FP8 checkpoint，并希望保留其原生权重格式</td><td>当前用于冻结基座 Expert 的 LoRA；需要完整的 AVX512 FP8 扩展组合，AMX 不支持该原生 FP8 路径</td></tr>
+<tr><td>KT 转换后的 INT8</td><td>系统内存不足以容纳原精度 Expert 权重，希望降低内存占用</td><td>必须准备相互匹配的 INT8 Routed Expert 权重与 BF16 non-expert cache；<code>auto</code> 可选择 AMX-INT8 或 AVX512-VNNI 实现</td></tr>
+<tr><td>KT 转换后的 AMXINT4</td><td>内存约束比 INT8 更严格，并且可以接受更高的精度风险</td><td>CPU 需要支持 AMX；必须准备匹配的 AMXINT4 权重，并在代表性验证集上检查效果</td></tr>
+</tbody>
+</table>
+</div>
+<p>系统内存允许时优先选择原生 BF16 或原生 FP8。只有已经准备好匹配的转换权重，并且确实需要降低 Expert 内存占用时，再选择 INT8 或 AMXINT4。</p>
+<h3 id="22-选择-lora-或全量微调"><a class="header" href="#22-选择-lora-或全量微调">2.2 选择 LoRA 或全量微调</a></h3>
+<p>Expert 权重格式与参数更新范围是两个配置维度，但当前可用组合有明确边界。原生 BF16 支持 LoRA 与全量微调；原生 FP8、INT8 和 AMXINT4 配方用于冻结基座 Expert 的 LoRA。全量微调使用 BF16。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>微调方式</th><th>适合情况</th><th>资源与输出</th></tr>
+</thead>
+<tbody>
+<tr><td>LoRA（Low-Rank Adaptation，低秩适配）</td><td>默认推荐；适合快速适配新任务、反复实验或资源受限的训练</td><td>显存、系统内存和磁盘开销较低；输出 LoRA adapter 与 KT Expert LoRA 文件</td></tr>
+<tr><td>全量微调</td><td>确实需要更新全部目标参数，并且能够承担更高训练与保存成本</td><td>需要更多显存、系统内存和磁盘；输出完整模型 checkpoint</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="23-两份-yaml-的分工"><a class="header" href="#23-两份-yaml-的分工">2.3 两份 YAML 的分工</a></h3>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/llamafactory-accelerate-kt.svg" alt="训练 YAML、Accelerate YAML 与 KTransformers 执行关系"><span class="img-wrapper"><img src="assets/llamafactory-accelerate-kt.svg" alt="训练 YAML、Accelerate YAML 与 KTransformers 执行关系"></span></label></p>
+<p>一次训练使用两份 YAML。训练 YAML 描述训练任务并持有全部 KTransformers 设置；Accelerate YAML 只描述分布式与 FSDP2 运行方式。当前 LlamaFactory 会拒绝 Accelerate YAML 中的 <code>kt_config</code>。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>文件</th><th>负责什么</th><th>常改字段</th></tr>
+</thead>
+<tbody>
+<tr><td>训练 YAML</td><td>模型、数据、LoRA 或全量微调、batch、序列长度、输出目录及全部 KT 设置</td><td><code>model_name_or_path</code>、<code>dataset</code>、<code>finetuning_type</code>、<code>lora_*</code>、<code>cutoff_len</code>、<code>output_dir</code>、<code>use_kt</code>、<code>kt_cpu_activation</code>、<code>kt_weight_path</code>、<code>kt_non_expert_weight_path</code>、<code>kt_config</code></td></tr>
+<tr><td>Accelerate YAML</td><td>GPU 进程、FSDP2（Fully Sharded Data Parallel 2，全分片数据并行）和全局混合精度</td><td><code>num_processes</code>、<code>mixed_precision</code>、<code>fsdp_config</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>启动前核对三个关系：</p>
+<ol>
+<li><code>CUDA_VISIBLE_DEVICES</code> 中的 GPU 数必须等于 <code>num_processes</code>；</li>
+<li>手动设置训练 YAML 中的 <code>kt_config.kt_model_max_length</code> 时，它必须覆盖 <code>cutoff_len</code>，并为运行时额外 token 留出余量；</li>
+<li>LoRA rank 只写训练 YAML 顶层，LlamaFactory 会派生 KT 内部字段；全量微调删除 LoRA 专用字段。</li>
+</ol>
+<h3 id="24-四种方案的基础-yaml"><a class="header" href="#24-四种方案的基础-yaml">2.4 四种方案的基础 YAML</a></h3>
+<p>先从附录 A.1 和 A.2 复制完整配置，再按所选方案替换下面的字段。每个代码块用注释区分训练 YAML 与 Accelerate YAML；<code>kt_config</code> 始终放在训练 YAML。</p>
+<h4 id="241-原生-bf16--lora"><a class="header" href="#241-原生-bf16--lora">2.4.1 原生 BF16 + LoRA</a></h4>
+<pre><code class="language-yaml"># 文件 1：训练 YAML
+model_name_or_path: /data/models/Your-BF16-Model
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# 原生 BF16 不设置 kt_weight_path
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: bf16
+
+# 文件 2：Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="242-原生-fp8--lora"><a class="header" href="#242-原生-fp8--lora">2.4.2 原生 FP8 + LoRA</a></h4>
+<pre><code class="language-yaml"># 文件 1：训练 YAML
+model_name_or_path: /data/models/Your-Native-FP8-Model
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# 原生 FP8 不设置 kt_weight_path
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: fp8
+
+# 文件 2：Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="243-int8--amxint4--lora"><a class="header" href="#243-int8--amxint4--lora">2.4.3 INT8 / AMXINT4 + LoRA</a></h4>
+<pre><code class="language-yaml"># 文件 1：训练 YAML
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# INT8 方案
+kt_weight_path: /data/models/Your-Routed-Experts-INT8
+kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: int8
+  kt_weight_lifecycle: persistent
+
+# AMXINT4 方案改为匹配的权重目录，并将上面的 kt_config 替换为：
+# kt_weight_path: /data/models/Your-Model-AMXINT4
+# kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16
+# kt_config:
+#   kt_backend: AMXINT4
+
+# 文件 2：Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="244-原生-bf16--全量微调"><a class="header" href="#244-原生-bf16--全量微调">2.4.4 原生 BF16 + 全量微调</a></h4>
+<pre><code class="language-yaml"># 文件 1：训练 YAML
+finetuning_type: full
+learning_rate: 1.0e-5
+use_kt: true
+# 删除 lora_rank、lora_alpha、lora_dropout、lora_target 等 LoRA 字段
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: bf16
+
+# 文件 2：Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h3 id="25-启动"><a class="header" href="#25-启动">2.5 启动</a></h3>
+<pre><code class="language-bash">CUDA_VISIBLE_DEVICES=0,1 accelerate launch --main_process_port 0 --config_file qwen35_fsdp2_2gpu.yaml src/train.py qwen35_397b_bf16_lora.yaml
+</code></pre>
+<h2 id="3-custom-yaml高级参数"><a class="header" href="#3-custom-yaml高级参数">3. Custom YAML：高级参数</a></h2>
+<p>基础方案能够启动后，再按训练目标和资源瓶颈调整下面的参数。没有明确需求时保留推荐值，不要同时修改多组参数。</p>
+<p><strong>（1）LoRA 容量：<code>lora_rank</code>、<code>lora_alpha</code>、<code>lora_target</code>、<code>lora_dropout</code></strong></p>
+<p>这四项只在训练 YAML 顶层修改，LlamaFactory 会自动派生 KTransformers 内部使用的 rank、alpha 和 dropout；不要在 <code>kt_config</code> 或 Accelerate YAML 中重复填写。建议从 <code>lora_rank: 8</code>、<code>lora_alpha: 16</code>、<code>lora_target: all</code>、<code>lora_dropout: 0.0</code> 开始。</p>
+<p>任务适配不足时依次把 rank 提高到 16、32，并让 alpha 保持约为 rank 的两倍。小数据集出现明显过拟合时，再把 dropout 提高到 <code>0.05</code>。</p>
+<p><strong>（2）序列长度：<code>cutoff_len</code></strong></p>
+<p>在训练 YAML 中设置，建议按大多数样本的有效 token 长度选择，不要为了少量超长样本直接采用数据集最大长度。序列越长，中间激活值和 KT 缓冲区占用越高，也就是需要的内存和显存越高。</p>
+<p>系统会根据 <code>cutoff_len</code> 生成 KT 的模型长度容量。需要手动扩大时，在训练 YAML 的 <code>kt_config</code> 中设置 <code>kt_model_max_length</code>，并让它大于 <code>cutoff_len</code>、保留额外 token 的运行余量。</p>
+<p><strong>（3）Batch：<code>per_device_train_batch_size</code>、<code>gradient_accumulation_steps</code></strong></p>
+<p>这两项在训练 YAML 中修改。超大 MoE 模型优先使用 <code>per_device_train_batch_size: 1</code>；确认显存和内存均仍有余量后再增加 micro batch，显存不足时则保持为 1，通过梯度累积扩大有效 batch。</p>
+<pre><code class="language-text">有效 batch size = per_device_train_batch_size × GPU 数量 × gradient_accumulation_steps
+</code></pre>
+<p><strong>（4）Activation 重计算与 CPU Activation Reuse：<code>disable_gradient_checkpointing</code>、<code>kt_cpu_activation</code></strong></p>
+<p>训练 YAML 中设置 <code>disable_gradient_checkpointing: false</code> 会启用 gradient checkpointing，以额外计算换取更低的 activation 内存；设为 <code>true</code> 会保留更多中间结果，速度可能更高，但内存占用也更大。</p>
+<p>主机内存充足时，还可以在同一份训练 YAML 顶层设置：</p>
+<pre><code class="language-yaml">kt_cpu_activation: retain
+</code></pre>
+<p>该选项在 checkpoint 重计算期间保留 CPU Expert activation，以增加主机内存占用换取更少的 CPU 重复计算。启用 gradient checkpointing 且未填写该字段时，CPU 与 GPU activation 默认重计算。<code>kt_cpu_activation</code> 与 <code>disable_gradient_checkpointing</code> 分别控制 CPU Expert activation 保留和整体 checkpoint 重计算，不要将两者合并成一个开关。</p>
+<p><strong>（5）CPU Expert 复用与线程：<code>kt_share_backward_bb</code>、<code>kt_num_threads</code></strong></p>
+<p>这两项位于训练 YAML 的 <code>kt_config</code>。保持 <code>kt_share_backward_bb: true</code>，复用 CPU Expert 反向计算所需的缓冲；它不等同于 <code>kt_cpu_activation</code>。除非当前模型的配置说明明确要求，否则不要关闭。</p>
+<p><code>kt_num_threads</code> 填写本次作业实际可用的物理 CPU 核数，不要直接填写包含超线程的逻辑核总数。若数据预处理也使用同一批 CPU，需为 DataLoader 和系统进程预留部分核心。</p>
+<p><code>kt_threadpool_count</code> 与 NUMA 拓扑由系统生成；只有确认 CPU socket 和 NUMA 划分后才手动修改。</p>
+<p><strong>（6）断点续训：<code>resume_from_checkpoint</code></strong></p>
+<p>在训练 YAML 中设置，值指向需要恢复的 <code>checkpoint-*</code> 目录；新训练不填写。<code>output_dir</code> 应继续指向本次任务的输出目录，不得与 base model 目录重叠，并保留 <code>overwrite_output_dir: false</code>，避免覆盖已有结果。</p>
+<h2 id="4-性能与资源估算"><a class="header" href="#4-性能与资源估算">4. 性能与资源估算</a></h2>
+<p>下表统一采用 2K context（sequence length = 2048）、每卡 batch size 1、梯度累积 1，并只统计完成真实 LoRA 训练的 KTransformers BF16 结果。吞吐量包含 forward、loss、backward 和 optimizer。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>模型与权重</th><th style="text-align: right">GPU 数</th><th style="text-align: right">全局 batch size</th><th style="text-align: right">单卡显存最低参考</th><th style="text-align: right">系统内存最低参考</th><th style="text-align: right">微调吞吐量（tokens/s）</th></tr>
+</thead>
+<tbody>
+<tr><td>Qwen3-235B-2507 BF16 LoRA</td><td style="text-align: right">2</td><td style="text-align: right">2</td><td style="text-align: right">≥ 27.14 GiB</td><td style="text-align: right">≥ 545.36 GiB</td><td style="text-align: right">147.91</td></tr>
+<tr><td>Qwen3.5-397B BF16 LoRA</td><td style="text-align: right">8</td><td style="text-align: right">8</td><td style="text-align: right">≥ 20.37 GiB</td><td style="text-align: right">≥ 1075.68 GiB</td><td style="text-align: right">215.25</td></tr>
+</tbody>
+</table>
+</div>
+<p>显存列取该次运行中占用最高的单卡峰值；系统内存列取训练进程树 CPU RSS 峰值，并统一换算为 GiB。它们是已测配置的最低容量参考，不是安全余量：正式训练还要为数据加载、缓存、保存 checkpoint 和系统进程预留空间。</p>
+<p>不同 GPU 数的结果不能直接用来判断线性扩展效率。增大 <code>cutoff_len</code>、batch size 或 KT cache 深度都会增加资源占用；全量微调还需要额外容纳梯度、master weight、optimizer state 与完整 checkpoint。</p>
+<h2 id="附录"><a class="header" href="#附录">附录</a></h2>
+<h3 id="a1-qwen35-397b-bf16-lora-训练-yaml"><a class="header" href="#a1-qwen35-397b-bf16-lora-训练-yaml">A.1 Qwen3.5-397B BF16 LoRA 训练 YAML</a></h3>
+<p>保存为 <code>qwen35_397b_bf16_lora.yaml</code>：</p>
+<pre><code class="language-yaml">### model
+model_name_or_path: /data/models/Qwen3.5-397B-A17B
+trust_remote_code: true
+disable_gradient_checkpointing: false
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target: all
+
+### dataset
+dataset: your_dataset
+template: qwen3_5
+cutoff_len: 2048
+packing: false
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /data/output/qwen35-bf16-lora
+logging_steps: 10
+save_strategy: steps
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: false
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+
+### ktransformers
+use_kt: true
+# kt_cpu_activation: retain  # 可选：以更多主机内存减少 CPU Expert 重计算
+# kt_weight_path: /data/models/Your-Routed-Experts-INT8  # 转换 INT8 Routed Experts
+# kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16  # 与上面权重匹配
+kt_config:
+  kt_expert_weight_format: bf16
+  kt_backend: auto
+  kt_num_threads: 64
+  kt_tp_enabled: true
+  kt_threadpool_count: 2
+  kt_max_cache_depth: 2
+  kt_share_backward_bb: true
+</code></pre>
+<h3 id="a2-fsdp2-accelerate-yaml"><a class="header" href="#a2-fsdp2-accelerate-yaml">A.2 FSDP2 Accelerate YAML</a></h3>
+<p>保存为 <code>qwen35_fsdp2_2gpu.yaml</code>：</p>
+<pre><code class="language-yaml">compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_version: 2
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+use_cpu: false
+</code></pre>
+<h3 id="a3-qa"><a class="header" href="#a3-qa">A.3 Q&amp;A</a></h3>
+<h4 id="a31-原生-fp8-为什么不能选择-int8-转换权重配置"><a class="header" href="#a31-原生-fp8-为什么不能选择-int8-转换权重配置">A.3.1 原生 FP8 为什么不能选择 INT8 转换权重配置</a></h4>
+<p>两者的权重格式和加载方式不同。原生 FP8 保留 checkpoint 中的 FP8 权重与 scale，使用 AVX512 原精度后端；INT8 配方读取相互匹配的 Routed Expert INT8 权重与 BF16 non-expert cache，并由 <code>auto</code> 选择 AMX-INT8 或 AVX512-VNNI 实现。不要把原生 FP8 checkpoint 填入 <code>kt_weight_path</code>。</p>
+<h4 id="a32-auto-没有选择预期后端"><a class="header" href="#a32-auto-没有选择预期后端">A.3.2 <code>auto</code> 没有选择预期后端</a></h4>
+<p>保存 <code>lscpu</code> 输出和启动日志，确认容器或虚拟化环境没有屏蔽指令集。原生 BF16 可在支持 AMX 时选择 AMXBF16；原生 FP8 应选择 AVX512。不要强制指定本机或权重格式不支持的后端。</p>
+<h4 id="a33-cpu-系统内存不足"><a class="header" href="#a33-cpu-系统内存不足">A.3.3 CPU 系统内存不足</a></h4>
+<p>优先降低并发数据加载、序列长度和 cache 深度，并确认没有重复加载两份 Expert 权重。若仍不足，再考虑准备 INT8 / AMXINT4 转换权重。全量微调还要单独估算梯度、master weight 与 optimizer state。</p>
+<h4 id="a34-gpu-oom"><a class="header" href="#a34-gpu-oom">A.3.4 GPU OOM</a></h4>
+<p>OOM（Out of Memory）表示显存或系统内存不足。先降低 <code>cutoff_len</code>、每卡 batch size 和 activation 占用，再增加 <code>gradient_accumulation_steps</code> 维持全局 batch size。<code>num_processes</code>、可见 GPU 数与模型实际放置必须一致。</p>
+<h4 id="a35-kt_model_max_length-与-cutoff_len-不一致"><a class="header" href="#a35-kt_model_max_length-与-cutoff_len-不一致">A.3.5 <code>kt_model_max_length</code> 与 <code>cutoff_len</code> 不一致</a></h4>
+<p>增大 <code>cutoff_len</code> 时同步提高 <code>kt_model_max_length</code>，并按分布式运行时的有效序列长度留出余量。值过小会导致 buffer 或 shape 错误，过大会增加系统内存占用。</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="qwen35-moe-kt-lora-serving-with-sglang-kt"><a class="header" href="#qwen35-moe-kt-lora-serving-with-sglang-kt">Qwen3.5 MoE KT LoRA Serving with SGLang-KT</a></h1>
 <p>Last updated: 2026-06-23</p>

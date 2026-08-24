@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-67b9005c.js";
+            window.path_to_searchindex_js = "searchindex-d417b258.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-16789068.js"></script>
+        <script src="toc-18b9e882.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -198,6 +198,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="./kt-kernel/README.html">Inference</a> and <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
 <li><strong>June 21, 2026</strong>: MiniMax-M3 Day0 Support! (<a href="./doc/en/kt-kernel/MiniMax-M3-Tutorial.html">Tutorial</a>)</li>
 <li><strong>June 17, 2026</strong>: GLM-5.2 Day0 Support! (<a href="./doc/en/kt-kernel/GLM-5.2-Tutorial.html">Tutorial</a>)</li>
 <li><strong>May 6, 2026</strong>: KTransformers at <a href="https://paris2026.gosim.org/zh/schedule/">GOSIM Paris 2026</a> — “Agentic AI on Edge” track. We’ll present KT’s inference performance on consumer hardware.</li>
@@ -270,16 +271,16 @@ pip install .
 </div>
 <p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
-<h3 id="-sft---fine-tuning-with-llama-factory"><a class="header" href="#-sft---fine-tuning-with-llama-factory">🎓 <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a> - Fine-Tuning with LLaMA-Factory</a></h3>
-<p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"><span class="img-wrapper"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"></span></label></p>
+<h3 id="-sft---fine-tuning-with-llamafactory"><a class="header" href="#-sft---fine-tuning-with-llamafactory">🎓 <a href="./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">SFT</a> - Fine-Tuning with LlamaFactory</a></h3>
+<p>KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="./doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"><span class="img-wrapper"><img src="./doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"></span></label></p>
 <p><strong>Key Features:</strong></p>
 <ul>
 <li><strong>Multi-Backend Support</strong>: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization</li>
 <li><strong>Ultra-Large MoE Support</strong>: Fine-tune models like DeepSeek-V3/R1 on limited GPU memory</li>
 <li><strong>Faster than ZeRO-Offload</strong>: 6-12x training speedup in benchmarked MoE SFT workloads</li>
 <li><strong>Lower CPU Memory</strong>: About half the CPU memory of the previous KT SFT path in the benchmarked setup</li>
-<li><strong>LLaMA-Factory Integration</strong>: Seamless integration with popular fine-tuning framework</li>
+<li><strong>LlamaFactory Integration</strong>: Seamless integration with the popular fine-tuning framework</li>
 </ul>
 <div class="table-wrapper">
 <table>
@@ -295,14 +296,16 @@ pip install .
 </div>
 <p><strong>Quick Start:</strong></p>
 <pre><code class="language-bash">cd /path/to/LLaMA-Factory
-pip install -e .
-pip install -r requirements/ktransformers.txt
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
   src/train.py \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
+<p>👉 <strong><a href="./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">Easy-to-Use Fine-Tuning Cookbook (中文) →</a></strong>
+👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
 👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
