@@ -18,6 +18,9 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 ## 🔥 更新
 
 * **2026 年 8 月 25 日**：上传了全新的易用版 [KTransformers × LlamaFactory MoE 微调 Cookbook](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md)，覆盖硬件检查、环境安装、BF16/FP8/INT8 配置、LoRA 与全量微调、资源规划及故障排查。
+* **2026 年 8 月 17 日**：LoRA 微调支持兼容 AVX512 的 x86 CPU，包括 AMD 服务器，无需依赖 AMX。（[v0.7.0 Release Notes](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0)）
+* **2026 年 8 月 5 日**：新增原生 block-FP8 LoRA 微调，可直接加载 checkpoint 中的 FP8 Routed Expert 权重，无需生成完整的 BF16 权重副本。（[PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141)）
+* **2026 年 7 月 23 日**：新增面向 MoE 模型的端到端 BF16 全量微调，并支持保存完整 checkpoint。（[PR #2094](https://github.com/kvcache-ai/ktransformers/pull/2094)）
 * **2026 年 4 月 30 日**：KTransformers v0.6.1 更新 kt-kernel 推理和 SFT 文档，提供独立的[推理](./kt-kernel/README.md)和 [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)入口。
 * **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)）
 * **2025 年 11 月 6 日**：支持 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking.md)）和微调（[教程](./doc/en/SFT_Installation_Guide_KimiK2.md)）
