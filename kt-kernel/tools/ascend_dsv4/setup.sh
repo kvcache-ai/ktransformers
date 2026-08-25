@@ -2,15 +2,20 @@
 # Build and install everything the server needs. See
 # doc/en/DeepSeek-V4-Flash_tutorial_for_Ascend_NPU.md for the walkthrough.
 #
+#   setup.sh probe        report what this image already provides
 #   setup.sh all          deps -> kt-kernel -> sgl-kernel -> cann-ops -> gguf -> check
 #   setup.sh <step>       run one step
 #
+#   probe       report what the image ships and which steps will be skipped
 #   deps        SGLang NPU runtime dependencies
 #   kt-kernel   build kt-kernel, produce a wheel
 #   sgl-kernel  build sgl_kernel_npu, deep_ep, attentions, torch_memory_saver
 #   cann-ops    build the customize / custom_ops / custom_transformer packages
 #   gguf        convert the checkpoint to the per-layer MXFP4 GGUF set
 #   check       verify the environment; exit 0 means safe to launch
+#
+# sgl-kernel and cann-ops return early when the image already provides them.
+# Set DSV4_FORCE_SGL_KERNEL=1 / DSV4_FORCE_CANN_OPS=1 to build anyway.
 set -euo pipefail
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -207,6 +212,11 @@ PY
 
 
 step_sgl_kernel() {
+if [ "${DSV4_FORCE_SGL_KERNEL:-0}" != "1" ] \
+   && "${DSV4_PYTHON}" -c 'import sgl_kernel_npu, deep_ep, attentions' >/dev/null 2>&1; then
+  log "already provided by this image; skipping (DSV4_FORCE_SGL_KERNEL=1 to build anyway)"
+  return 0
+fi
 REPO="${SGL_KERNEL_NPU_REPO:-${DSV4_WORKSPACE}/sgl-kernel-npu}"
 URL="${SGL_KERNEL_NPU_URL:-https://github.com/sgl-project/sgl-kernel-npu.git}"
 TAG="${SGL_KERNEL_NPU_TAG:-2026.6.2}"
@@ -258,6 +268,13 @@ log "done."
 
 
 step_cann_ops() {
+if [ "${1:-all}" = "all" ] && [ "${DSV4_FORCE_CANN_OPS:-0}" != "1" ] \
+   && [ -d "${CANN_VENDORS_DIR}/customize" ] \
+   && [ -d "${CANN_VENDORS_DIR}/custom_transformer" ] \
+   && "${DSV4_PYTHON}" -c 'import torch, torch_npu, custom_ops' >/dev/null 2>&1; then
+  log "already provided by this image; skipping (DSV4_FORCE_CANN_OPS=1 to build anyway)"
+  return 0
+fi
 umask 0022
 
 mkdir -p "${DSV4_ARTIFACT_DIR}/vendor_packages" "${DSV4_ARTIFACT_DIR}/wheels"
@@ -337,7 +354,8 @@ case "${1:-all}" in
   *) die "unknown step '${1}' (expected: all | customize | custom_ops | transformer)" ;;
 esac
 
-log "done. Re-source dsv4_env.sh so ASCEND_CUSTOM_OPP_PATH picks up the new vendors."
+dsv4_export_vendor_paths
+log "done."
 }
 
 
@@ -385,6 +403,59 @@ log "  export DSV4_GGUF_TEMPLATE='${DSV4_GGUF_DIR}/dsv4_layer{layer_idx}_mxfp4.g
 log "  (single quotes are required — in double quotes bash eats the first '}')"
 }
 
+
+step_probe() {
+have() { printf '  \033[32mhave\033[0m   %s\n' "$*"; }
+need() { printf '  \033[33mbuild\033[0m  %s\n' "$*"; }
+sec()  { printf '\n%s\n' "$*"; }
+
+_imp() { "${DSV4_PYTHON}" -c "import $1" >/dev/null 2>&1; }
+
+_SGL_MISS=""
+for m in sgl_kernel_npu deep_ep attentions; do
+  _imp "${m}" || _SGL_MISS="${_SGL_MISS} ${m}"
+done
+_SGL_OPT=""
+_imp torch_memory_saver || _SGL_OPT=" torch_memory_saver (only needed for --enable-memory-saver)"
+
+_OPS_MISS=""
+"${DSV4_PYTHON}" -c 'import torch, torch_npu, custom_ops' >/dev/null 2>&1 \
+  || _OPS_MISS="${_OPS_MISS} custom_ops"
+[ -d "${CANN_VENDORS_DIR}/customize" ]          || _OPS_MISS="${_OPS_MISS} vendors/customize"
+[ -d "${CANN_VENDORS_DIR}/custom_transformer" ] || _OPS_MISS="${_OPS_MISS} vendors/custom_transformer"
+
+sec "Image"
+have "CANN ${CANN_ROOT##*/} at ${CANN_ROOT}"
+have "python $("${DSV4_PYTHON}" -V 2>&1 | awk '{print $2}'), torch $("${DSV4_PYTHON}" -c 'import torch;print(torch.__version__)' 2>/dev/null || echo '?')"
+
+sec "SGLang NPU kernels           (setup.sh sgl-kernel)"
+if [ -z "${_SGL_MISS}" ]; then have "sgl_kernel_npu deep_ep attentions"
+else need "missing:${_SGL_MISS}"; fi
+if [ -n "${_SGL_OPT}" ]; then printf '  \033[2mskip\033[0m  not installed:%s\n' "${_SGL_OPT}"; fi
+
+sec "AscendC custom operators     (setup.sh cann-ops)"
+if [ -z "${_OPS_MISS}" ]; then have "custom_ops, ${CANN_VENDORS_DIR}/{customize,custom_transformer}"
+else need "missing:${_OPS_MISS}"; fi
+
+sec "KT-Kernel                    (setup.sh kt-kernel)"
+if "${DSV4_PYTHON}" -c 'from kt_kernel import kt_kernel_ext; import sys; sys.exit(0 if hasattr(kt_kernel_ext,"init_ascend_callback_worker") else 1)' >/dev/null 2>&1
+then have "kt_kernel with the Ascend backend"
+else need "no Ascend-enabled kt_kernel — always built from this repo"; fi
+
+sec "MXFP4 GGUF experts           (setup.sh gguf)"
+_n=$(ls -1 "${DSV4_GGUF_DIR}"/dsv4_layer*_mxfp4.gguf 2>/dev/null | wc -l)
+if [ "${_n}" -gt 0 ]; then have "${_n} files in ${DSV4_GGUF_DIR}"
+else need "none in ${DSV4_GGUF_DIR}"; fi
+
+sec "Verdict"
+if [ -z "${_SGL_MISS}" ] && [ -z "${_OPS_MISS}" ]; then
+  printf '  This image already ships the operator stack. "setup.sh all" will skip\n'
+  printf '  sgl-kernel and cann-ops, leaving kt-kernel + gguf + check.\n'
+else
+  printf '  This image does not ship the full operator stack. "setup.sh all" will\n'
+  printf '  build what is missing.\n'
+fi
+}
 
 step_check() {
 FAIL=0
@@ -575,7 +646,7 @@ exit "${FAIL}"
 
 # --- dispatch ---------------------------------------------------------------
 usage() {
-  sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+  sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^#$//' -e 's/^# //'
   exit "${1:-0}"
 }
 
@@ -583,6 +654,7 @@ _cmd="${1:-}"
 [ $# -gt 0 ] && shift
 
 case "${_cmd}" in
+  probe)       _STEP="probe";       step_probe "$@" ;;
   deps)        _STEP="deps";        step_deps "$@" ;;
   kt-kernel)   _STEP="kt-kernel";   step_kt_kernel "$@" ;;
   sgl-kernel)  _STEP="sgl-kernel";  step_sgl_kernel "$@" ;;

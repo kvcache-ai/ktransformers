@@ -125,13 +125,31 @@ _dsv4_source_if_readable "${ASCEND_INSTALL_ROOT}/ascend-toolkit/set_env.sh"
 _dsv4_source_if_readable "${ASCEND_INSTALL_ROOT}/nnal/atb/set_env.sh"
 _dsv4_source_if_readable "${CANN_ROOT}/share/info/ascendnpu-ir/bin/set_env.sh"
 
-for _vendor in customize custom_transformer; do
-  _dsv4_source_if_readable "${CANN_VENDORS_DIR}/${_vendor}/bin/set_env.bash"
-  if [ -d "${CANN_VENDORS_DIR}/${_vendor}" ]; then
-    export ASCEND_CUSTOM_OPP_PATH="${CANN_VENDORS_DIR}/${_vendor}:${ASCEND_CUSTOM_OPP_PATH}"
-    export LD_LIBRARY_PATH="${CANN_VENDORS_DIR}/${_vendor}/op_api/lib:${CANN_VENDORS_DIR}/${_vendor}/op_proto/lib/linux/$(uname -m):${LD_LIBRARY_PATH}"
-  fi
-done
+export ASCEND_CUSTOM_OPP_PATH="${ASCEND_CUSTOM_OPP_PATH:-}"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
+# Idempotent, and callable again: on a bare image the vendors do not exist yet when
+# this file is first sourced, and `setup.sh all` installs them mid-run.
+dsv4_export_vendor_paths() {
+  local _vendor _dir
+  for _vendor in customize custom_transformer; do
+    _dir="${CANN_VENDORS_DIR}/${_vendor}"
+    [ -d "${_dir}" ] || continue
+    case ":${ASCEND_CUSTOM_OPP_PATH}:" in *":${_dir}:"*) continue ;; esac
+    # the vendor's own set_env.bash usually prepends the same entry; only add it
+    # ourselves if it did not
+    _dsv4_source_if_readable "${_dir}/bin/set_env.bash"
+    case ":${ASCEND_CUSTOM_OPP_PATH}:" in
+      *":${_dir}:"*) ;;
+      *) export ASCEND_CUSTOM_OPP_PATH="${_dir}:${ASCEND_CUSTOM_OPP_PATH}" ;;
+    esac
+    case ":${LD_LIBRARY_PATH}:" in
+      *":${_dir}/op_api/lib:"*) ;;
+      *) export LD_LIBRARY_PATH="${_dir}/op_api/lib:${_dir}/op_proto/lib/linux/$(uname -m):${LD_LIBRARY_PATH}" ;;
+    esac
+  done
+}
+dsv4_export_vendor_paths
 
 if [ -z "${DSV4_NO_USER_SITE}" ]; then
   if "${DSV4_PYTHON}" -c 'import os,site,sys; sys.exit(0 if os.access(site.getsitepackages()[0], os.W_OK) else 1)' 2>/dev/null; then

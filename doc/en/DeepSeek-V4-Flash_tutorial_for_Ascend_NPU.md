@@ -16,15 +16,36 @@ MXFP4 and are computed by KT-Kernel's `LLAMAFILE` MoE. Follow the steps in order
 | CANN toolkit | 9.0.0 |
 | Driver | 25.5.1 |
 | Python | 3.11 |
-| torch / torch_npu | 2.9.1 / 2.9.1 |
+| torch / torch_npu | must match each other; verified on 2.9.1 / 2.9.1 and 2.10.0 / 2.10.0 |
 | GCC at `/usr/bin/gcc` | ≥ 11 |
 | System packages | `libhwloc-dev`, `libnuma-dev`, `pkg-config`, `cmake`, `patchelf` |
+
+KT-Kernel's own extension links no libtorch symbols, and Step 5 installs its wheel with
+`--no-deps`, so it does not constrain the image's torch. Use whatever torch the image ships,
+as long as `torch_npu` matches it.
 
 Disk: about 570 GB for the three weight artifacts.
 
 ## Step 1: Start the Container
 
 Skip this on a native install.
+
+Two kinds of image work. They differ only in how much Step 5 has to build:
+
+| | What it ships | Step 5 builds |
+|---|---|---|
+| **Full image** — an August 2026 or newer `quay.io/ascend/sglang` NPU build | CANN 9.0.0, torch, `sgl_kernel_npu`, `deep_ep`, `attentions`, the `custom_ops` wheel, and the `customize` + `custom_transformer` operator vendors | KT-Kernel, and the GGUF set if you do not already have it |
+| **Bare image** — a clean CANN image, or an sglang image from before those operators were bundled | CANN 9.0.0 and torch; `opp/vendors` is empty and there is no `custom_ops` wheel | everything |
+
+`main-cann9.0.0-910b` is a **moving tag** — the same tag pulled at different times gives
+different contents, so do not decide from the tag alone. Step 5 probes the image and skips
+what is already there, so the commands below are the same either way.
+
+Neither family ships `libhwloc-dev`, `patchelf` or `sudo`, so Step 2 still applies to both.
+
+Both paths in this guide were run on `quay.io/ascend/sglang:main-cann9.0.0-910b`: the full one
+on `sha256:138569f9…` (sglang 0.5.19.dev355), the bare one on an earlier pull of the same tag
+(sglang 0.5.13.post2.dev499), which is why the tag alone tells you nothing.
 
 ```bash
 docker run -d --name dsv4 \
@@ -63,10 +84,14 @@ git submodule update --init --progress third_party/llama.cpp third_party/pybind1
 Install the system packages if they are missing:
 
 ```bash
-sudo apt-get install -y build-essential cmake git libhwloc-dev libhwloc15 \
-                        libnuma-dev patchelf pkg-config
+apt-get update
+apt-get install -y build-essential cmake git libhwloc-dev libhwloc15 \
+                   libnuma-dev patchelf pkg-config
 # openEuler / CentOS: dnf install -y hwloc-devel numactl-devel pkgconfig
 ```
+
+Prefix both with `sudo` outside a container. The `quay.io/ascend/sglang` images run as root
+and do not ship `sudo`.
 
 ## Step 3: Configure
 
@@ -114,32 +139,55 @@ huggingface-cli download deepseek-ai/DeepSeek-V4-Flash \
 | Official checkpoint | `DSV4_NATIVE_CKPT` | ~150 GB | source for the GGUF conversion only |
 | 43 per-layer MXFP4 GGUF | `DSV4_GGUF_DIR` | ~138 GiB | `--kt-weight-path`: the CPU experts, produced in Step 5 |
 
+`DSV4_GGUF_DIR` defaults to `${DSV4_MODEL_ROOT}/cache`. If the GGUF set lives somewhere else —
+a separate volume, or a copy someone already converted — point at it instead and Step 5 will
+reuse it:
+
+```bash
+echo 'export DSV4_GGUF_DIR=/workspace/gguf' >> ~/dsv4.env
+```
+
 ## Step 5: Build and Convert
+
+First ask what this image already provides:
+
+```bash
+source ~/dsv4.env
+bash "$DSV4_TOOLS/setup.sh" probe
+```
+
+It reports each component as `have` or `build` and ends with a one-line verdict. Then run the
+build — the same command on both image families, because the steps the image already satisfies
+return immediately:
 
 ```bash
 source ~/dsv4.env
 bash "$DSV4_TOOLS/setup.sh" all
 ```
 
-That runs six steps in order. Each is separately invocable as `setup.sh <step>`, and a vendor
-image already satisfies some of them:
+| Step | What it does | Full image | Bare image |
+|---|---|---|---|
+| `deps` | SGLang's NPU runtime dependencies | minutes | minutes |
+| `kt-kernel` | build KT-Kernel, install the wheel, check it is an Ascend build | 10–30 min | 10–30 min |
+| `sgl-kernel` | build `sgl_kernel_npu`, `deep_ep`, `attentions`, `torch_memory_saver` | **skipped** | 20–40 min |
+| `cann-ops` | build the `customize`, `custom_ops` and `custom_transformer` packages | **skipped** | 40–90 min |
+| `gguf` | convert the checkpoint to the per-layer MXFP4 GGUF set | hours | hours |
+| `check` | verify the environment; exit 0 means safe to launch | seconds | seconds |
 
-| Step | What it does | Time |
-|---|---|---|
-| `deps` | SGLang's NPU runtime dependencies | minutes |
-| `kt-kernel` | build KT-Kernel, install the wheel, check it is an Ascend build | 10–30 min |
-| `sgl-kernel` | build `sgl_kernel_npu`, `deep_ep`, `attentions`, `torch_memory_saver` | 20–40 min |
-| `cann-ops` | build the `customize`, `custom_ops` and `custom_transformer` packages | 40–90 min |
-| `gguf` | convert the checkpoint to the per-layer MXFP4 GGUF set | hours |
-| `check` | verify the environment; exit 0 means safe to launch | seconds |
+No image ships `kt_kernel`; it is always built from this repository. Each step is also
+separately invocable as `setup.sh <step>`.
 
-Check what is already present before spending the time:
+The `sgl-kernel` skip tests for `sgl_kernel_npu`, `deep_ep` and `attentions` — the three the
+server loads. `torch_memory_saver` is not part of that test: it is only needed for
+`--enable-memory-saver`, which this deployment does not use, and the full image does not ship
+it either.
+
+A step that was skipped can be forced — after a CANN upgrade, or when the bundled operators
+turn out to be too old:
 
 ```bash
-source ~/dsv4.env
-ls "${CANN_VENDORS_DIR}"                                  # want: customize  custom_transformer
-python3 -c "import torch, torch_npu, custom_ops; print('custom_ops ok')"
-python3 -c "import sgl_kernel_npu; print('sgl_kernel_npu ok')"
+DSV4_FORCE_SGL_KERNEL=1 bash "$DSV4_TOOLS/setup.sh" sgl-kernel
+DSV4_FORCE_CANN_OPS=1   bash "$DSV4_TOOLS/setup.sh" cann-ops
 ```
 
 The `cann-ops` step builds from two pinned upstream commits:
@@ -313,7 +361,9 @@ expert reads, not by KV growth.
 
 | Symptom | Fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'sgl_kernel_npu'` | `bash "$DSV4_TOOLS/setup.sh" sgl-kernel` |
+| `ModuleNotFoundError: No module named 'sgl_kernel_npu'` | `DSV4_FORCE_SGL_KERNEL=1 bash "$DSV4_TOOLS/setup.sh" sgl-kernel` |
+| `setup.sh probe` says `build` for operators you expected the image to ship | the tag moved; either pull a newer image or let `setup.sh all` build them |
+| Startup fails inside `npu_hc_pre` or on `aclnnSparseAttnSharedkv` | the image's bundled operators are too old: `DSV4_FORCE_CANN_OPS=1 bash "$DSV4_TOOLS/setup.sh" cann-ops` |
 | `import custom_ops` fails with `libc10.so: cannot open shared object file` | import torch first: `python3 -c "import torch, torch_npu, custom_ops"` |
 | `invalid feature modifier 'bf16'` during the build | `/usr/bin/gcc` is older than 10; install GCC ≥ 11 |
 | Startup: `Raise --mem-fraction-static above …` | streaming prefill needs a higher `DSV4_MEM_FRACTION`, see the table above |

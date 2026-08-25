@@ -14,10 +14,11 @@ export DSV4_MODEL_ROOT=/path/to/models
 export DSV4_NPU_DEVICE_ID=0
 
 bash dsv4_env.sh --show      # 1. check the detected configuration
-bash setup.sh all            # 2. build and convert everything
-bash serve.sh                # 3. launch
-bash verify.sh               # 4. acceptance checks
-bash verify.sh chat          # 5. talk to it
+bash setup.sh probe          # 2. see what the image already provides
+bash setup.sh all            # 3. build and convert what is missing
+bash serve.sh                # 4. launch
+bash verify.sh               # 5. acceptance checks
+bash verify.sh chat          # 6. talk to it
 ```
 
 ## Files
@@ -25,7 +26,7 @@ bash verify.sh chat          # 5. talk to it
 | File | What it does |
 |---|---|
 | `dsv4_env.sh` | Configuration and environment. Sourced by everything else. `--show` prints the resolved values without changing your shell. |
-| `setup.sh` | `deps`, `kt-kernel`, `sgl-kernel`, `cann-ops`, `gguf`, `check`, or `all`. Run with no arguments for the list. |
+| `setup.sh` | `probe`, `deps`, `kt-kernel`, `sgl-kernel`, `cann-ops`, `gguf`, `check`, or `all`. Run with no arguments for the list. `sgl-kernel` and `cann-ops` return early when the image already provides them; `DSV4_FORCE_SGL_KERNEL=1` / `DSV4_FORCE_CANN_OPS=1` build anyway. |
 | `serve.sh` | Launches the server. `--foreground` stays attached. |
 | `verify.sh` | Acceptance checks against a running server. `chat [port]` opens an interactive client. |
 
