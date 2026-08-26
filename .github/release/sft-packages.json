@@ -8,8 +8,8 @@
     },
     "transformers-kt": {
       "repository": "kvcache-ai/transformers",
-      "ref": "10ce56d76c2096ce544b567ada476594873d2bc1",
-      "version": "5.6.0.post2"
+      "ref": "3f97700f4b1b2ebed23ba6c41bed95c6f5cb65e5",
+      "version": "5.6.0.post3"
     }
   }
 }

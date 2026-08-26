@@ -23,6 +23,8 @@
 - [Makefile Usage](en/makefile_usage.md) -->
 - [kt-kernel part](en/kt-kernel/README.md)
   - [kt-cli](en/kt-kernel/kt-cli.md)
+  - [GLM-5.3-flash Tutorial](en/kt-kernel/GLM-5.3-Flash-Tutorial.md)
+  - [GLM-5.3-flash 教程（中文）](zh/GLM-5.3-Flash-Tutorial_zh.md)
   - [AVX2 Backend Tutorial](en/kt-kernel/AVX2-Tutorial.md)
   - [AVX2 后端教程（中文）](zh/AVX2-Tutorial_zh.md)
   - [SYCL GPTQ INT4 后端教程（中文）](zh/SYCL-GPTQ-INT4-Tutorial_zh.md)
