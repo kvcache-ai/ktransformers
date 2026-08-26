@@ -38,17 +38,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RELEASE_ROOT/final-dist-v5/release"
+          cd "$RELEASE_ROOT/final-dist-v7/release"
           sha256sum --check <<'EOF'
-          7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1  ktransformers-0.7.0.post2-py3-none-any.whl
-          f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa  sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl
-          0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f  sgl_kernel_kt_payload_1-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
-          b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78  sgl_kernel_kt_payload_2-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
-          d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33  sgl_kernel_kt_payload_3-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
-          42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420  sgl_kernel_kt_payload_4-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
-          64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009  sgl_kernel_kt_payload_5-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
-          7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0  sglang_kt-0.7.0.post2-py3-none-any.whl
-          1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488  transformers_kt-5.6.0.post4-py3-none-any.whl
+          88149a0b79d94bf5e084fc32efaacca8077357902ffed803c46eadc48d0fa36a  ktransformers-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl
+          90918ca7b5154d882e13c1792a2a626c145033f05c2ab3366f8424f388010053  sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl
+          824c6991e9ed3eefacf9207524189234a9ad75f35364791d3c7408d4c1b5ef4b  sglang_kt-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl
+          d82eba7e8c391d3d6d973e33aeec2f828e5652e35d64d019b91ea4bba8e915b5  transformers_kt-5.6.0.post4-py3-none-manylinux_2_35_x86_64.whl
           EOF
 
       - name: Confirm existing files match the frozen release
@@ -81,22 +76,17 @@ jobs:
             echo "$package==$version already contains the frozen wheel"
           }
 
-          verify_or_unused ktransformers 0.7.0.post2 7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1
-          verify_or_unused sglang-kt 0.7.0.post2 7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0
-          verify_or_unused sgl-kernel-kt 0.3.21.post2 f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa
-          verify_or_unused sgl-kernel-kt-payload-1 0.3.21.post2 0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f
-          verify_or_unused sgl-kernel-kt-payload-2 0.3.21.post2 b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78
-          verify_or_unused sgl-kernel-kt-payload-3 0.3.21.post2 d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33
-          verify_or_unused sgl-kernel-kt-payload-4 0.3.21.post2 42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420
-          verify_or_unused sgl-kernel-kt-payload-5 0.3.21.post2 64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009
-          verify_or_unused transformers-kt 5.6.0.post4 1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488
+          verify_or_unused ktransformers 0.7.0.post2 88149a0b79d94bf5e084fc32efaacca8077357902ffed803c46eadc48d0fa36a
+          verify_or_unused sglang-kt 0.7.0.post2 824c6991e9ed3eefacf9207524189234a9ad75f35364791d3c7408d4c1b5ef4b
+          verify_or_unused sgl-kernel-kt 0.3.21.post2 90918ca7b5154d882e13c1792a2a626c145033f05c2ab3366f8424f388010053
+          verify_or_unused transformers-kt 5.6.0.post4 d82eba7e8c391d3d6d973e33aeec2f828e5652e35d64d019b91ea4bba8e915b5
 
       - name: Install publisher and validate metadata
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade twine
-          python -m twine check "$RELEASE_ROOT/final-dist-v5/release/"*.whl
+          python -m twine check "$RELEASE_ROOT/final-dist-v7/release/"*.whl
 
       - name: Publish exact tested wheels to PyPI
         shell: bash
@@ -120,17 +110,14 @@ jobs:
             return 1
           }
 
-          for wheel in "$RELEASE_ROOT/final-dist-v5/release/"sgl_kernel_kt_payload_*.whl; do
-            upload_with_retry "$wheel"
-          done
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v5/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl"
+            "$RELEASE_ROOT/final-dist-v7/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl"
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v5/release/transformers_kt-5.6.0.post4-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v7/release/transformers_kt-5.6.0.post4-py3-none-manylinux_2_35_x86_64.whl"
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v5/release/sglang_kt-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v7/release/sglang_kt-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl"
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v5/release/ktransformers-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v7/release/ktransformers-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl"
 
       - name: Verify exact PyPI files
         shell: bash
@@ -161,12 +148,7 @@ jobs:
             rm -f "$response"
           }
 
-          verify_exact ktransformers 0.7.0.post2 7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1
-          verify_exact sglang-kt 0.7.0.post2 7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0
-          verify_exact sgl-kernel-kt 0.3.21.post2 f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa
-          verify_exact sgl-kernel-kt-payload-1 0.3.21.post2 0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f
-          verify_exact sgl-kernel-kt-payload-2 0.3.21.post2 b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78
-          verify_exact sgl-kernel-kt-payload-3 0.3.21.post2 d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33
-          verify_exact sgl-kernel-kt-payload-4 0.3.21.post2 42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420
-          verify_exact sgl-kernel-kt-payload-5 0.3.21.post2 64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009
-          verify_exact transformers-kt 5.6.0.post4 1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488
+          verify_exact ktransformers 0.7.0.post2 88149a0b79d94bf5e084fc32efaacca8077357902ffed803c46eadc48d0fa36a
+          verify_exact sglang-kt 0.7.0.post2 824c6991e9ed3eefacf9207524189234a9ad75f35364791d3c7408d4c1b5ef4b
+          verify_exact sgl-kernel-kt 0.3.21.post2 90918ca7b5154d882e13c1792a2a626c145033f05c2ab3366f8424f388010053
+          verify_exact transformers-kt 5.6.0.post4 d82eba7e8c391d3d6d973e33aeec2f828e5652e35d64d019b91ea4bba8e915b5
