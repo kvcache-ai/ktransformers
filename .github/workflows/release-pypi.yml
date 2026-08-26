@@ -51,23 +51,45 @@ jobs:
           1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488  transformers_kt-5.6.0.post4-py3-none-any.whl
           EOF
 
-      - name: Confirm versions are unused
+      - name: Confirm existing files match the frozen release
         shell: bash
         run: |
           set -euo pipefail
-          for url in \
-            https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
-            https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-1/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-2/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-3/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-4/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-5/0.3.21.post2/json \
-            https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
-            status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
-            test "$status" = "404"
-          done
+          verify_or_unused() {
+            local package="$1" version="$2" expected="$3" response status
+            response="$(mktemp)"
+            status="$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+              "https://pypi.org/pypi/$package/$version/json")"
+            if [ "$status" = "404" ]; then
+              rm -f "$response"
+              echo "$package==$version is unused"
+              return 0
+            fi
+            test "$status" = "200"
+            python - "$response" "$expected" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              payload = json.load(handle)
+          expected = sys.argv[2]
+          hashes = {item["digests"]["sha256"] for item in payload["urls"]}
+          if hashes != {expected}:
+              raise SystemExit(f"unexpected PyPI hashes: {sorted(hashes)}")
+          PY
+            rm -f "$response"
+            echo "$package==$version already contains the frozen wheel"
+          }
+
+          verify_or_unused ktransformers 0.7.0.post2 7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1
+          verify_or_unused sglang-kt 0.7.0.post2 7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0
+          verify_or_unused sgl-kernel-kt 0.3.21.post2 f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa
+          verify_or_unused sgl-kernel-kt-payload-1 0.3.21.post2 0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f
+          verify_or_unused sgl-kernel-kt-payload-2 0.3.21.post2 b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78
+          verify_or_unused sgl-kernel-kt-payload-3 0.3.21.post2 d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33
+          verify_or_unused sgl-kernel-kt-payload-4 0.3.21.post2 42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420
+          verify_or_unused sgl-kernel-kt-payload-5 0.3.21.post2 64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009
+          verify_or_unused transformers-kt 5.6.0.post4 1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488
 
       - name: Install publisher and validate metadata
         shell: bash
@@ -84,38 +106,67 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TWINE_PASSWORD"
+          upload_with_retry() {
+            local wheel="$1"
+            for attempt in 1 2 3 4 5 6; do
+              if python -m twine upload --non-interactive --skip-existing "$wheel"; then
+                sleep 30
+                return 0
+              fi
+              echo "Upload attempt $attempt failed; waiting before retry"
+              sleep $((attempt * 30))
+            done
+            echo "Failed to upload $wheel after 6 attempts" >&2
+            return 1
+          }
+
           for wheel in "$RELEASE_ROOT/final-dist-v5/release/"sgl_kernel_kt_payload_*.whl; do
-            python -m twine upload --non-interactive "$wheel"
+            upload_with_retry "$wheel"
           done
-          python -m twine upload --non-interactive \
+          upload_with_retry \
             "$RELEASE_ROOT/final-dist-v5/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl"
-          python -m twine upload --non-interactive \
+          upload_with_retry \
             "$RELEASE_ROOT/final-dist-v5/release/transformers_kt-5.6.0.post4-py3-none-any.whl"
-          python -m twine upload --non-interactive \
+          upload_with_retry \
             "$RELEASE_ROOT/final-dist-v5/release/sglang_kt-0.7.0.post2-py3-none-any.whl"
-          python -m twine upload --non-interactive \
+          upload_with_retry \
             "$RELEASE_ROOT/final-dist-v5/release/ktransformers-0.7.0.post2-py3-none-any.whl"
 
-      - name: Verify PyPI visibility
+      - name: Verify exact PyPI files
         shell: bash
         run: |
           set -euo pipefail
-          for url in \
-            https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
-            https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-1/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-2/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-3/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-4/0.3.21.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt-payload-5/0.3.21.post2/json \
-            https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
+          verify_exact() {
+            local package="$1" version="$2" expected="$3" response status
+            response="$(mktemp)"
             for attempt in $(seq 1 30); do
-              status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
-              if [ "$status" = "200" ]; then
-                break
-              fi
+              status="$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+                "https://pypi.org/pypi/$package/$version/json")"
+              [ "$status" = "200" ] && break
               test "$attempt" -lt 30
               sleep 10
             done
-          done
+            test "$status" = "200"
+            python - "$response" "$expected" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              payload = json.load(handle)
+          expected = sys.argv[2]
+          hashes = {item["digests"]["sha256"] for item in payload["urls"]}
+          if hashes != {expected}:
+              raise SystemExit(f"unexpected PyPI hashes: {sorted(hashes)}")
+          PY
+            rm -f "$response"
+          }
+
+          verify_exact ktransformers 0.7.0.post2 7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1
+          verify_exact sglang-kt 0.7.0.post2 7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0
+          verify_exact sgl-kernel-kt 0.3.21.post2 f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa
+          verify_exact sgl-kernel-kt-payload-1 0.3.21.post2 0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f
+          verify_exact sgl-kernel-kt-payload-2 0.3.21.post2 b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78
+          verify_exact sgl-kernel-kt-payload-3 0.3.21.post2 d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33
+          verify_exact sgl-kernel-kt-payload-4 0.3.21.post2 42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420
+          verify_exact sgl-kernel-kt-payload-5 0.3.21.post2 64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009
+          verify_exact transformers-kt 5.6.0.post4 1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488
