@@ -38,15 +38,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RELEASE_ROOT/final-dist-v4/release"
+          cd "$RELEASE_ROOT/final-dist-v5/release"
           sha256sum --check <<'EOF'
           7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1  ktransformers-0.7.0.post2-py3-none-any.whl
-          8d67ab0736eb1afc9f1d4e2cc6c8abee69d62f58c63633ba1743fcdc8ce62d5c  sgl_kernel_kt-0.3.21.post2-cp310-abi3-linux_x86_64.whl
-          7b0336240bd2e2edeb16bf3112bd3ca4ba60cb223444fa878a1eac785326019f  sgl_kernel_kt_payload_1-0.3.21.post2-py3-none-linux_x86_64.whl
-          eb70e08863f16283df459fd3637504446a229735757ba48cc4c5846a4878abd1  sgl_kernel_kt_payload_2-0.3.21.post2-py3-none-linux_x86_64.whl
-          1480d68b4f157fc0d7a7022f2929a4df3731ba63b74eae1bb7c7be1685a689e3  sgl_kernel_kt_payload_3-0.3.21.post2-py3-none-linux_x86_64.whl
-          8d722475e4b1528c48d165662fd68a14a02f25f5f44830501083fa2de439e965  sgl_kernel_kt_payload_4-0.3.21.post2-py3-none-linux_x86_64.whl
-          050d7c93de6d33eb0ee252e19b28da0f96b9a3bfe607ef5e47b9caf47fde8875  sgl_kernel_kt_payload_5-0.3.21.post2-py3-none-linux_x86_64.whl
+          f64bd1dd2a6e9fd612f1e87e4f90e3924862314fbe4bb4d58d57d32267904faa  sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl
+          0d15b7b482f56aacc789dee81ee2d8db8f337f737ca3e0c81879cd6562e70c9f  sgl_kernel_kt_payload_1-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
+          b72df16d4665197697302c3017606ffe4e98585c08f843e1ff797e4a95847b78  sgl_kernel_kt_payload_2-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
+          d5689d730f78520f011ed30fed0a0342b5bbaf99fa0c10c1cd8ee1733d369f33  sgl_kernel_kt_payload_3-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
+          42d8f840407ce686524685537fb2a7680944dede4579796dd4da16b0120f3420  sgl_kernel_kt_payload_4-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
+          64e02d0d34e5e97c12b21291aa2d3912dae4d35a5899ccef198c707c195f6009  sgl_kernel_kt_payload_5-0.3.21.post2-py3-none-manylinux_2_35_x86_64.whl
           7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0  sglang_kt-0.7.0.post2-py3-none-any.whl
           1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488  transformers_kt-5.6.0.post4-py3-none-any.whl
           EOF
@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade twine
-          python -m twine check "$RELEASE_ROOT/final-dist-v4/release/"*.whl
+          python -m twine check "$RELEASE_ROOT/final-dist-v5/release/"*.whl
 
       - name: Publish exact tested wheels to PyPI
         shell: bash
@@ -84,17 +84,17 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TWINE_PASSWORD"
-          for wheel in "$RELEASE_ROOT/final-dist-v4/release/"sgl_kernel_kt_payload_*.whl; do
-            python -m twine upload --verbose --non-interactive "$wheel"
+          for wheel in "$RELEASE_ROOT/final-dist-v5/release/"sgl_kernel_kt_payload_*.whl; do
+            python -m twine upload --non-interactive "$wheel"
           done
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v4/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-linux_x86_64.whl"
+            "$RELEASE_ROOT/final-dist-v5/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-manylinux_2_35_x86_64.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v4/release/transformers_kt-5.6.0.post4-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v5/release/transformers_kt-5.6.0.post4-py3-none-any.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v4/release/sglang_kt-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v5/release/sglang_kt-0.7.0.post2-py3-none-any.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v4/release/ktransformers-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v5/release/ktransformers-0.7.0.post2-py3-none-any.whl"
 
       - name: Verify PyPI visibility
         shell: bash
