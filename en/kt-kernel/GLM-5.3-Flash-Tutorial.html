@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>For kt-sft - Ktransformers</title>
+        <title>GLM-5.3-flash Tutorial - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -146,7 +146,7 @@
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
                         </a>
 
@@ -180,279 +180,100 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <ul>
-<li><a href="#introduction">Introduction</a>
+                        <h1 id="glm-53-flash-native-ktransformers-support-for-1m-context"><a class="header" href="#glm-53-flash-native-ktransformers-support-for-1m-context">GLM-5.3-flash: Native KTransformers Support for 1M Context</a></h1>
+<h2 id="1-1m-context-and-native-multimodality"><a class="header" href="#1-1m-context-and-native-multimodality">1. 1M Context and Native Multimodality</a></h2>
+<p>GLM-5.3-flash natively supports <strong>a context window of up to 1M tokens</strong>. A single request can process a large codebase, a long document, or a long-running agent task without repeatedly splitting the context.</p>
+<p>The model also supports <strong>images, video, reasoning, and tool calling</strong>, and can be used directly by coding agents through an OpenAI-compatible API. GLM-5.3-flash has approximately 321B parameters. Its 45 layers comprise 34 Linear Attention layers and 11 DSA layers.</p>
+<h2 id="2-native-precision-ktransformers-support"><a class="header" href="#2-native-precision-ktransformers-support">2. Native-Precision KTransformers Support</a></h2>
+<p>KTransformers (KT) reads the official GLM-5.3-flash FP8 weights directly. No model conversion or additional quantization of expert weights is required.</p>
+<p>The FP8 model occupies approximately 306 GiB. Reserve at least 350 GB of available system memory. The current implementation supports:</p>
 <ul>
-<li><a href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></li>
+<li>NVIDIA SM89 and SM120 GPUs (RTX 40 and 50 series)</li>
+<li>The AVX-512 FP8 CPU expert kernel</li>
+<li>Heterogeneous CPU-GPU expert inference and Layerwise Prefill</li>
+<li>A context window of up to 1M tokens</li>
+<li>Multimodality: text, multiple images, video</li>
+<li>Tool calling</li>
 </ul>
-</li>
-<li><a href="#quick-to-start">Quick to Start</a>
-<ul>
-<li><a href="#environment-setup">Environment Setup</a></li>
-<li><a href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></li>
-<li><a href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></li>
-<li><a href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></li>
-</ul>
-</li>
-<li><a href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a>
-<ul>
-<li><a href="#end-to-end-performance">End-to-End Performance</a></li>
-<li><a href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></li>
-</ul>
-</li>
-<li><a href="#conclusion">Conclusion</a></li>
-</ul>
-<h1 id="ktransformers-fine-tuning--llama-factory-integration--user-guide"><a class="header" href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></h1>
-<p><strong>MadSys Lab, KVCache-AI Team, Approaching AI, LLaMA-Factory Team</strong></p>
-<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
-<p>From <strong>DeepSeek-V3/R1</strong> to <strong>Qwen3-MoE</strong> and <strong>Kimi-K2</strong>, each wave of open-sourced large models brings leaps in performance and scale. However, many researchers and developers are constrained by expensive GPUs and models with tens or even hundreds of billions of parameters, making it <strong>hard to fine-tune very large models under limited resources</strong>. To bridge this gap, we propose a practical approach: combining <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong>. With just <strong>2–4 RTX 4090s</strong> and a high-memory CPU, you can fine-tune ultra-large MoE models like DeepSeek-671B.</p>
-<p>Our goal is to give resource-constrained researchers a <strong>local path to explore fine-tuning ultra-large models</strong>, and also a fast way to customize smaller models (e.g., 14B/30B) for specific scenarios. We validate the setup using <strong>stylized dialogue</strong>, <strong>Westernized translation tone</strong>, and <strong>medical Q&amp;A</strong> as representative tasks, showing that <strong>personalized adaptation can be achieved within hours</strong>.</p>
-<p>As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. <strong>KTransformers</strong> acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient <strong>GPU+CPU heterogeneous cooperation</strong>.</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../assets/image-20251011010558909.png" alt="image-20251011010558909"><span class="img-wrapper"><img src="../../assets/image-20251011010558909.png" alt="image-20251011010558909"></span></label></p>
-<p>Within LLaMA-Factory, we compared LoRA fine-tuning with <strong>HuggingFace</strong>, <strong>Unsloth</strong>, and <strong>KTransformers</strong> backends. KTransformers is the <strong>only workable 4090-class solution</strong> for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Under LoRA (BF16) + <a href="https://github.com/mindsRiverPonder/LLM-practice">NekoQA-10K stylized dialogue</a></th><th>HuggingFace Backend</th><th>Unsloth Backend</th><th>KTransformers Backend</th></tr>
-</thead>
-<tbody>
-<tr><td>[14B-DeepSeekV2-Lite] LoRA fine-tuning throughput</td><td>303.58 token/s</td><td>455.37 token/s</td><td>530.38 token/s</td></tr>
-<tr><td>[14B-DeepSeekV2-Lite] GPU memory</td><td>32.12 GB</td><td>9.64 GB</td><td>6.08 GB</td></tr>
-<tr><td>[671B-DeepSeekV3] LoRA fine-tuning throughput</td><td><font color="red">Too Huge to run</font></td><td><font color="red">NOT SUPPORT</font></td><td>40.35 token/s</td></tr>
-<tr><td>[671B-DeepSeekV3] GPU memory (sum across GPUs)</td><td>theoretical 1400 GB †</td><td><font color="red">NOT SUPPORT</font></td><td>70 GB †</td></tr>
-</tbody>
-</table>
-</div>
-<p>† <strong>1400 GB</strong> is a <strong>theoretical</strong> FP16 full-parameter resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT strategy (Attention on GPU + layered MoE offload).</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../assets/image-compare_model.png" alt="按照模型划分的对比图_02"><span class="img-wrapper"><img src="../../assets/image-compare_model.png" alt="按照模型划分的对比图_02"></span></label></p>
-<h3 id="fine-tuning-results-examples"><a class="header" href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></h3>
-<h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
-<p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. Goal: improve style consistency and recognizability.</p>
-<p>The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of <strong>style-transfer fine-tuning</strong>.</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../assets/image-20251016175046882.png" alt="image-20251016175046882"><span class="img-wrapper"><img src="../../assets/image-20251016175046882.png" alt="image-20251016175046882"></span></label></p>
-<h4 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h4>
-<p>We use:</p>
-<p>(1) <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>, which asks for an exaggerated, Westernized translation tone—clear, stylized customization.</p>
-<p>(2) <a href="https://aclanthology.org/2025.acl-long.96/">AfriMed-QA</a> (ACL 2025), a medical dataset for African contexts with strong domain specificity, including multiple-choice and short-answer sub-tasks—well-suited for vertical fine-tuning evaluation.</p>
-<p>The tables show metrics before vs. after LoRA fine-tuning. We observe <strong>large improvements</strong> across metrics, verifying fine-tuning effectiveness:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Translational-Style dataset</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr>
-</thead>
-<tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>20.66</td><td>8.33</td><td>4.54</td><td>2.89</td><td>22.71</td><td>4.52</td><td>19.19</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.41</strong></td><td><strong>22.44</strong></td><td><strong>15.42</strong></td><td><strong>11.18</strong></td><td><strong>42.03</strong></td><td><strong>18.38</strong></td><td><strong>33.10</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>8.49</td><td>3.34</td><td>1.62</td><td>0.96</td><td>15.91</td><td>2.55</td><td>10.07</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>37.02</strong></td><td><strong>23.70</strong></td><td><strong>16.21</strong></td><td><strong>11.49</strong></td><td><strong>43.43</strong></td><td><strong>18.96</strong></td><td><strong>34.54</strong></td></tr>
-</tbody>
-</table>
-</div>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>AfriMed-QA (short answer)</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr>
-</thead>
-<tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>13.58</td><td>11.12</td><td>9.10</td><td>7.23</td><td>22.48</td><td>7.81</td><td>11.73</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.90</strong></td><td><strong>27.63</strong></td><td><strong>22.99</strong></td><td><strong>19.15</strong></td><td><strong>35.25</strong></td><td><strong>17.50</strong></td><td><strong>28.44</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>12.75</td><td>10.27</td><td>8.05</td><td>5.99</td><td>20.33</td><td>5.65</td><td>10.11</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>42.42</strong></td><td><strong>34.12</strong></td><td><strong>28.95</strong></td><td><strong>24.54</strong></td><td><strong>41.97</strong></td><td><strong>22.37</strong></td><td><strong>33.28</strong></td></tr>
-</tbody>
-</table>
-</div>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>AfriMed-QA (multiple choice)</th><th>Accuracy</th></tr>
-</thead>
-<tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>0.0645</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>0.4812</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>0.5833</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>0.7930</strong></td></tr>
-</tbody>
-</table>
-</div>
-<p>Even for ultra-large MoE models, <strong>KTransformers-backed fine-tuning</strong> achieves strong task performance quickly.</p>
-<h2 id="quick-to-start"><a class="header" href="#quick-to-start">Quick to Start</a></h2>
-<p>This section shows how to install and use <strong>LLaMA-Factory + KTransformers</strong> for fine-tuning and inference:</p>
-<ul>
-<li>Environment setup</li>
-<li>Fine-tune ultra-large MoE models with KTransformers backend</li>
-<li>Load the fine-tuned model (base + LoRA adapter) for chat/inference</li>
-<li>Batch inference and metric evaluation</li>
-</ul>
-<h3 id="environment-setup"><a class="header" href="#environment-setup">Environment Setup</a></h3>
-<p>According to the following example, install both the <strong>KTransformers</strong> and <strong>LLaMA-Factory</strong> environments simultaneously.
-This time, to simplify the installation process of KTransformers, use the PyPI packages to avoid local compilation.
-The detailed installation steps are as follows:
-(Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, and <strong>CUDA version</strong> are compatible with the installed packages.)</p>
-<pre><code class="language-shell"># 1. Create a conda environment
-conda create -n Kllama python=3.12 # choose from : [3.11, 3.12, 3.13]
-conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
-conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
-
-# 2. Install the LLaMA-Factory environment
-git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
-cd LLaMA-Factory
-pip install -e .
-
-# 3. Install the KTransformers SFT packages
-pip install "ktransformers[sft]"
-
-# 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install flash-attn --no-build-isolation
-# abi=True/False can find from below
-# import torch
-# print(torch._C._GLIBCXX_USE_CXX11_ABI)
-
-# 5. (Optional) If you want to use flash_infer (otherwise it defaults to triton)
-git clone https://github.com/kvcache-ai/custom_flashinfer.git
-pip install custom_flashinfer/
+<h2 id="3-installation"><a class="header" href="#3-installation">3. Installation</a></h2>
+<p>Use a clean Python 3.11 environment and run:</p>
+<pre><code class="language-bash">pip install "ktransformers[sglang]"
 </code></pre>
-<p><strong>Usage tip:</strong> In LLaMA-Factory YAML, set <code>use_kt: true</code> and pick a <code>kt_optimize_rule</code> file to have KTransformers handle the core compute. The features below show typical configs.</p>
-<h3 id="core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models"><a class="header" href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></h3>
-<p>Run the command: <code>USE_KT=1 ACCELERATE_USE_KT=true accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml</code>.</p>
-<p>Note: You <strong>must</strong> provide a <strong>BF16</strong> model. DeepSeek-V3-671B is released in FP8 by default; convert with <a href="https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py">DeepSeek-V3/inference/fp8_cast_bf16.py</a>.</p>
-<pre><code class="language-yaml">### model
-model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-trust_remote_code: true
+<p>This command installs compatible versions of KT Kernel, SGLang-KT, and Transformers-KT.</p>
+<h2 id="4-launch"><a class="header" href="#4-launch">4. Launch</a></h2>
+<p>Replace <code>/path/to/GLM-5.3-flash</code> with the model directory. The configurations below enable Layerwise Prefill, multimodal input, and decode CUDA Graphs by default. The model supports up to 1M context; the examples use the validated <code>501025</code>-token configuration.</p>
+<h3 id="41-four-gpu-launch"><a class="header" href="#41-four-gpu-launch">4.1 Four-GPU Launch</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
 
-### method
-stage: sft
-do_train: true
-finetuning_type: lora
-lora_rank: 8
-lora_target: all
-
-### dataset
-dataset: identity
-template: deepseek
-cutoff_len: 2048
-max_samples: 100000
-overwrite_cache: true
-preprocessing_num_workers: 16
-dataloader_num_workers: 4
-
-### output
-output_dir: saves/Kllama_deepseekV3
-logging_steps: 10
-save_steps: 500
-plot_loss: true
-overwrite_output_dir: true
-save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-
-### train
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 1.0e-4
-num_train_epochs: 3.0
-lr_scheduler_type: cosine
-warmup_ratio: 0.1
-bf16: true
-ddp_timeout: 180000000
-resume_from_checkpoint: null
-
-### ktransformers
-use_kt: true # use KTransformers as LoRA sft backend
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 4 \
+  --context-length 501025 \
+  --mem-fraction-static 0.60 \
+  --chunked-prefill-size 4096 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 40 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
 </code></pre>
-<p><code>kt_optimize_rule</code> controls <strong>placement strategy</strong>. See also <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">ktransformers/optimize_rules</a>. Naming hints (<code>*</code> = wildcard):</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Pattern</th><th>Meaning</th></tr>
-</thead>
-<tbody>
-<tr><td>DeepSeek-V2-Lite-Chat-* / DeepSeek-V3-Chat-*</td><td>Target model variants</td></tr>
-<tr><td><em>-sft-</em></td><td>Strategy for fine-tuning; others are for inference</td></tr>
-<tr><td><em>-amx-</em></td><td>Use AMX on CPU; otherwise use <strong>llamafile</strong></td></tr>
-<tr><td><em>-multi-gpu-X</em></td><td>Model parallel on X GPUs (X omitted → default 2 GPUs)</td></tr>
-</tbody>
-</table>
-</div>
-<p>Example: <code>DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml</code> = V3-Chat fine-tuning with AMX and 2-GPU model parallel.</p>
-<p>We recommend <strong>AMX acceleration</strong> where available (<code>lscpu | grep amx</code>). AMX supports BF16/INT8. Example:</p>
-<pre><code class="language-yaml">- match:
-    name: "^model\\.layers\\..*\\.mlp\\.experts$"
-  replace:
-    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert parallelism
-    kwargs:
-      prefill_device: "cpu"
-      prefill_op: "KExpertsTorch"
-      generate_device: "cpu"
-      generate_op: "KSFTExpertsCPU"
-      out_device: "cuda"
-      backend: "AMXInt8" # or "AMXBF16" or "llamafile" (default)
-</code></pre>
-<p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../assets/image-20251016171537997.png" alt="image-20251016171537997"><span class="img-wrapper"><img src="../../assets/image-20251016171537997.png" alt="image-20251016171537997"></span></label></p>
-<h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>llamafactory-cli chat examples/inference/qwen3_lora_sft.yaml</code>.</p>
-<p>Use the safetensors adapter trained with KT for inference.</p>
-<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-adapter_name_or_path: saves/Kllama_deepseekV3
-template: deepseek
-infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
-trust_remote_code: true
+<h3 id="42-single-gpu-launch"><a class="header" href="#42-single-gpu-launch">4.2 Single-GPU Launch</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
 
-use_kt: true # use KTransformers as LoRA sft backend to inference
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
+CUDA_VISIBLE_DEVICES=0 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 1 \
+  --context-length 501025 \
+  --mem-fraction-static 0.65 \
+  --chunked-prefill-size 2048 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 0 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
 </code></pre>
-<p>We also support <strong>GGUF</strong> adapters: for safetensors, set the <strong>directory</strong>; for GGUF, set the <strong>file path</strong> in <code>adapter_name_or_path</code>.</p>
-<p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
-<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="../../assets/image-20251016171526210.png" alt="image-20251016171526210"><span class="img-wrapper"><img src="../../assets/image-20251016171526210.png" alt="image-20251016171526210"></span></label></p>
-<h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/qwen3_lora_sft.yaml</code>.
-Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>
-<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-adapter_name_or_path: saves/Kllama_deepseekV3
-template: deepseek
-infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
-trust_remote_code: true
-
-use_kt: true # use KTransformers as LoRA sft backend to inference
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
+<p>When Layerwise Prefill is enabled for GLM-5.3-flash, the current implementation normalizes the resident GPU expert count to zero. The <code>--kt-num-gpu-experts 40</code> setting in the four-GPU example therefore does not keep 40 experts resident during Layerwise Prefill.</p>
+<p>The server listens on <code>http://localhost:30000</code> by default. Check the endpoint after startup:</p>
+<pre><code class="language-bash">curl http://localhost:30000/v1/models
 </code></pre>
-<h2 id="kt-fine-tuning-speed-user-side-view"><a class="header" href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></h2>
-<h3 id="end-to-end-performance"><a class="header" href="#end-to-end-performance">End-to-End Performance</a></h3>
-<p><strong>Definitions</strong></p>
+<p>The OpenAI-compatible endpoint is:</p>
+<pre><code class="language-text">http://localhost:30000/v1/chat/completions
+</code></pre>
+<h2 id="5-multimodal-request-boundaries"><a class="header" href="#5-multimodal-request-boundaries">5. Multimodal Request Boundaries</a></h2>
 <ul>
-<li><code>step_time</code>: wall-clock time for a full optimization step (tensor movement + Attention + MoE + other compute).</li>
-<li><code>tokens_per_step = GAS × qlen</code>; <code>token/s = tokens_per_step / step_time</code>.</li>
+<li>A request may contain text only, or text with up to eight images.</li>
+<li>A request may instead contain text with one video.</li>
+<li>Images and video cannot appear in the same request.</li>
+<li>Video uses the regular mixed-prefill path rather than Layerwise Prefill. Decode CUDA Graphs remain supported.</li>
 </ul>
-<p><strong>Settings:</strong> <code>GAS=16</code>, <code>qlen=512</code> (→ <code>tokens_per_step = 8192</code>); LoRA (<code>r=8, alpha=32, dropout=0.1</code>); <strong>AMX</strong> enabled; GPU: RTX 4090, CPU: Intel Xeon Platinum 8488C.</p>
-<p><strong>Measured</strong></p>
-<ul>
-<li><strong>DeepSeek-V3-671B:</strong> <code>step_time = 203 s</code> → <code>token/s ≈ 8192 / 203 ≈ 40.35</code></li>
-<li><strong>DeepSeek-V2-Lite-14B:</strong> <code>step_time = 36 s</code> → <code>token/s ≈ 8192 / 36 ≈ 227.6</code></li>
-</ul>
-<h3 id="gpucpu-memory-footprint"><a class="header" href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></h3>
-<ul>
-<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU VRAM (multi-GPU), ~<strong>1.2–1.3 TB</strong> CPU RAM.</li>
-<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU VRAM, ~<strong>30 GB</strong> CPU RAM.</li>
-</ul>
-<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
-<p>By integrating <strong>KTransformers LoRA fine-tuning</strong> into <strong>LLaMA-Factory</strong>, we provide a practical guide for efficient training and deployment of MoE LLMs. KT brings cutting-edge optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization under very low GPU memory. LLaMA-Factory offers a friendly, unified interface.</p>
-<p>This integration (akin to Unsloth-style speedups) means even models with tens to hundreds of billions of parameters can be fine-tuned and deployed with low latency on commodity hardware. You get <strong>memory savings, speed-ups, and usability</strong> together. We encourage you to try LLaMA-Factory + KT for your next MoE project and follow this guide. Feedback is welcome!</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../../en/kt-kernel/kt-kernel_intro.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../../en/kt-kernel/kt-cli.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../../en/SFT/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../zh/GLM-5.3-Flash-Tutorial_zh.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -462,11 +283,11 @@ chunk_size: 8192
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../../en/kt-kernel/kt-kernel_intro.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../../en/kt-kernel/kt-cli.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../../en/SFT/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../zh/GLM-5.3-Flash-Tutorial_zh.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

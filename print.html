@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e3313d7c.js";
+            window.path_to_searchindex_js = "searchindex-61c5991f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-bc069f9d.js"></script>
+        <script src="toc-78d73750.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -197,6 +197,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="kt-kernel/README.html">Inference</a> and <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Aug 26, 2026</strong>: Added native support for <strong>GLM-5.3-flash</strong>, bringing 1M-token context and multimodal input to consumer GPUs. (<a href="doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
 <li><strong>Aug 17, 2026</strong>: LoRA fine-tuning now supports compatible AVX512 x86 CPUs, including AMD servers, without requiring AMX. (<a href="https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0">v0.7.0 Release Notes</a>)</li>
 <li><strong>Aug 5, 2026</strong>: Introduced native block-FP8 LoRA fine-tuning, loading FP8 routed-expert weights directly from the checkpoint without materializing a complete BF16 copy. (<a href="https://github.com/kvcache-ai/ktransformers/pull/2141">PR #2141</a>)</li>
@@ -3017,6 +3018,175 @@ chunk_size: 8192
 </tbody>
 </table>
 </div>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="glm-53-flash-native-ktransformers-support-for-1m-context"><a class="header" href="#glm-53-flash-native-ktransformers-support-for-1m-context">GLM-5.3-flash: Native KTransformers Support for 1M Context</a></h1>
+<h2 id="1-1m-context-and-native-multimodality"><a class="header" href="#1-1m-context-and-native-multimodality">1. 1M Context and Native Multimodality</a></h2>
+<p>GLM-5.3-flash natively supports <strong>a context window of up to 1M tokens</strong>. A single request can process a large codebase, a long document, or a long-running agent task without repeatedly splitting the context.</p>
+<p>The model also supports <strong>images, video, reasoning, and tool calling</strong>, and can be used directly by coding agents through an OpenAI-compatible API. GLM-5.3-flash has approximately 321B parameters. Its 45 layers comprise 34 Linear Attention layers and 11 DSA layers.</p>
+<h2 id="2-native-precision-ktransformers-support"><a class="header" href="#2-native-precision-ktransformers-support">2. Native-Precision KTransformers Support</a></h2>
+<p>KTransformers (KT) reads the official GLM-5.3-flash FP8 weights directly. No model conversion or additional quantization of expert weights is required.</p>
+<p>The FP8 model occupies approximately 306 GiB. Reserve at least 350 GB of available system memory. The current implementation supports:</p>
+<ul>
+<li>NVIDIA SM89 and SM120 GPUs (RTX 40 and 50 series)</li>
+<li>The AVX-512 FP8 CPU expert kernel</li>
+<li>Heterogeneous CPU-GPU expert inference and Layerwise Prefill</li>
+<li>A context window of up to 1M tokens</li>
+<li>Multimodality: text, multiple images, video</li>
+<li>Tool calling</li>
+</ul>
+<h2 id="3-installation"><a class="header" href="#3-installation">3. Installation</a></h2>
+<p>Use a clean Python 3.11 environment and run:</p>
+<pre><code class="language-bash">pip install "ktransformers[sglang]"
+</code></pre>
+<p>This command installs compatible versions of KT Kernel, SGLang-KT, and Transformers-KT.</p>
+<h2 id="4-launch"><a class="header" href="#4-launch">4. Launch</a></h2>
+<p>Replace <code>/path/to/GLM-5.3-flash</code> with the model directory. The configurations below enable Layerwise Prefill, multimodal input, and decode CUDA Graphs by default. The model supports up to 1M context; the examples use the validated <code>501025</code>-token configuration.</p>
+<h3 id="41-four-gpu-launch"><a class="header" href="#41-four-gpu-launch">4.1 Four-GPU Launch</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 4 \
+  --context-length 501025 \
+  --mem-fraction-static 0.60 \
+  --chunked-prefill-size 4096 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 40 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
+</code></pre>
+<h3 id="42-single-gpu-launch"><a class="header" href="#42-single-gpu-launch">4.2 Single-GPU Launch</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
+
+CUDA_VISIBLE_DEVICES=0 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 1 \
+  --context-length 501025 \
+  --mem-fraction-static 0.65 \
+  --chunked-prefill-size 2048 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 0 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
+</code></pre>
+<p>When Layerwise Prefill is enabled for GLM-5.3-flash, the current implementation normalizes the resident GPU expert count to zero. The <code>--kt-num-gpu-experts 40</code> setting in the four-GPU example therefore does not keep 40 experts resident during Layerwise Prefill.</p>
+<p>The server listens on <code>http://localhost:30000</code> by default. Check the endpoint after startup:</p>
+<pre><code class="language-bash">curl http://localhost:30000/v1/models
+</code></pre>
+<p>The OpenAI-compatible endpoint is:</p>
+<pre><code class="language-text">http://localhost:30000/v1/chat/completions
+</code></pre>
+<h2 id="5-multimodal-request-boundaries"><a class="header" href="#5-multimodal-request-boundaries">5. Multimodal Request Boundaries</a></h2>
+<ul>
+<li>A request may contain text only, or text with up to eight images.</li>
+<li>A request may instead contain text with one video.</li>
+<li>Images and video cannot appear in the same request.</li>
+<li>Video uses the regular mixed-prefill path rather than Layerwise Prefill. Decode CUDA Graphs remain supported.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="glm-53-flash1m-长上下文ktransformers-原生支持"><a class="header" href="#glm-53-flash1m-长上下文ktransformers-原生支持">GLM-5.3-flash：1M 长上下文，KTransformers 原生支持</a></h1>
+<h2 id="1-1m-长上下文与原生多模态"><a class="header" href="#1-1m-长上下文与原生多模态">1. 1M 长上下文与原生多模态</a></h2>
+<p>GLM-5.3-flash 原生支持最高 1M tokens 上下文，可以在一次请求中处理大型代码库、长篇文档和长程 Agent 任务，减少频繁切分上下文带来的信息损失。</p>
+<p>模型还原生支持图片、视频、Reasoning 和 Tool Calling，可以直接接入使用 OpenAI 兼容接口的 Coding Agent。GLM-5.3-flash 约 321B 参数；45 层网络中包含 34 层 Linear Attention 和 11 层 DSA。</p>
+<h2 id="2-ktransformers-原精度支持"><a class="header" href="#2-ktransformers-原精度支持">2. KTransformers 原精度支持</a></h2>
+<p>KTransformers（KT）直接读取 GLM-5.3-flash 的官方 FP8 权重，不需要转换模型，也不会对 Expert 权重再次量化。</p>
+<p>FP8 模型约占 306 GiB，建议至少预留 350 GB 可用系统内存。当前实现支持：</p>
+<ul>
+<li>NVIDIA SM89 和 SM120 GPU（RTX 40、50 系列）</li>
+<li>TP1、TP2、TP4 和 TP8</li>
+<li>AVX-512 FP8 CPU Expert Kernel</li>
+<li>CPU-GPU Expert 异构推理和 Layerwise Prefill</li>
+<li>文本、多图、单视频、Reasoning 和 Tool Calling</li>
+</ul>
+<h2 id="3-安装"><a class="header" href="#3-安装">3. 安装</a></h2>
+<p>建议使用全新的 Python 3.11 环境，然后执行：</p>
+<pre><code class="language-bash">pip install "ktransformers[sglang]"
+</code></pre>
+<p>该命令会自动安装匹配的 KT Kernel、SGLang-KT 和 Transformers-KT，无需克隆源码仓库。</p>
+<h2 id="4-启动"><a class="header" href="#4-启动">4. 启动</a></h2>
+<p>将 <code>/path/to/GLM-5.3-flash</code> 替换为模型目录。下面的配置默认开启 Layerwise Prefill、多模态和 Decode CUDA Graph。模型支持最高 1M 上下文；示例使用已经过验收的 <code>501025</code> tokens 配置。</p>
+<h3 id="41-四卡启动"><a class="header" href="#41-四卡启动">4.1 四卡启动</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 4 \
+  --context-length 501025 \
+  --mem-fraction-static 0.60 \
+  --chunked-prefill-size 4096 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 40 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
+</code></pre>
+<h3 id="42-单卡启动"><a class="header" href="#42-单卡启动">4.2 单卡启动</a></h3>
+<pre><code class="language-bash">MODEL_PATH=/path/to/GLM-5.3-flash
+
+CUDA_VISIBLE_DEVICES=0 \
+python -m sglang.launch_server \
+  --model-path "$MODEL_PATH" \
+  --kt-weight-path "$MODEL_PATH" \
+  --served-model-name GLM-5.3-flash \
+  --host 0.0.0.0 \
+  --tp-size 1 \
+  --context-length 501025 \
+  --mem-fraction-static 0.65 \
+  --chunked-prefill-size 2048 \
+  --kt-method FP8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 0 \
+  --kt-gpu-prefill-token-threshold 2048 \
+  --cuda-graph-bs 1 2 4 \
+  --limit-mm-data-per-request '{"image":8,"video":1}' \
+  --mm-process-config '{"image":{"max_pixels":1254400}}' \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45
+</code></pre>
+<p>当 GLM-5.3-flash 开启 Layerwise Prefill 时，当前实现会将 resident GPU experts 归一为 0；因此四卡示例中的 <code>--kt-num-gpu-experts 40</code> 不会在 Layerwise 阶段常驻 40 个 GPU experts。</p>
+<p>服务默认监听 <code>http://localhost:30000</code>。启动完成后可检查接口：</p>
+<pre><code class="language-bash">curl http://localhost:30000/v1/models
+</code></pre>
+<p>OpenAI 兼容接口为：</p>
+<pre><code class="language-text">http://localhost:30000/v1/chat/completions
+</code></pre>
+<h2 id="5-多模态边界"><a class="header" href="#5-多模态边界">5. 多模态边界</a></h2>
+<ul>
+<li>单个请求可以包含纯文本，或纯文本加最多 8 张图片。</li>
+<li>单个请求也可以包含纯文本加 1 个视频。</li>
+<li>图片和视频不能出现在同一个请求中。</li>
+<li>视频使用普通混合预填充，不走 Layerwise Prefill；解码仍支持 CUDA Graph。</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="running-ktransformers-on-avx2-cpus"><a class="header" href="#running-ktransformers-on-avx2-cpus">Running KTransformers on AVX2 CPUs</a></h1>
 <p>This tutorial explains how to run KTransformers on machines that only support AVX2 (without AVX512 or AMX).</p>
