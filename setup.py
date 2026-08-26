@@ -11,11 +11,12 @@ _version_file = Path(__file__).resolve().parent / "version.py"
 _ns = {}
 exec(_version_file.read_text(), _ns)
 _v = _ns["__version__"]
+_kernel_v = "0.7.0.post1"
 
 setup(
     version=_v,
     install_requires=[
-        f"kt-kernel=={_v}",
+        f"kt-kernel=={_kernel_v}",
     ],
     extras_require={
         "sft": [
