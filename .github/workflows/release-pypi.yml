@@ -85,7 +85,7 @@ jobs:
           set -euo pipefail
           test -n "$TWINE_PASSWORD"
           for wheel in "$RELEASE_ROOT/final-dist-v4/release/"sgl_kernel_kt_payload_*.whl; do
-            python -m twine upload --non-interactive "$wheel"
+            python -m twine upload --verbose --non-interactive "$wheel"
           done
           python -m twine upload --non-interactive \
             "$RELEASE_ROOT/final-dist-v4/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-linux_x86_64.whl"
