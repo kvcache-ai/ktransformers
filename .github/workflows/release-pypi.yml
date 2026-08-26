@@ -40,8 +40,8 @@ jobs:
           set -euo pipefail
           cd "$RELEASE_ROOT"
           test "$(sha256sum final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl | cut -d' ' -f1)" = "7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1"
-          test "$(sha256sum final-dist-clean/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl | cut -d' ' -f1)" = "b7e21694219654fdbb0fa5702406ea1a7cbf46dac27d306e819ae938aa3672aa"
-          test "$(sha256sum dist/sgl-kernel/sgl_kernel-0.3.21.post1-cp310-abi3-linux_x86_64.whl | cut -d' ' -f1)" = "c429373efdbc2c4323021a374aefb76c021398a2d13c83a2fb1f33220eb8ecdd"
+          test "$(sha256sum final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl | cut -d' ' -f1)" = "508dda6c70647d4f99614d1c06c653e7112ccda369eb42af0cafa3d827f8ef18"
+          test "$(sha256sum final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl | cut -d' ' -f1)" = "ad9d602da216b3a49f384d56b50db73315523dd5d584d3d3ea95aee85e7c5fdc"
           test "$(sha256sum dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl | cut -d' ' -f1)" = "1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488"
 
       - name: Confirm versions are unused
@@ -51,7 +51,7 @@ jobs:
           for url in \
             https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
             https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel/0.3.21.post1/json \
+            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post1/json \
             https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
             status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
             test "$status" = "404"
@@ -64,8 +64,8 @@ jobs:
           python -m pip install --upgrade twine
           python -m twine check \
             "$RELEASE_ROOT/final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl" \
-            "$RELEASE_ROOT/final-dist-clean/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl" \
-            "$RELEASE_ROOT/dist/sgl-kernel/sgl_kernel-0.3.21.post1-cp310-abi3-linux_x86_64.whl" \
+            "$RELEASE_ROOT/final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl" \
+            "$RELEASE_ROOT/final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl" \
             "$RELEASE_ROOT/dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl"
 
       - name: Publish exact tested wheels to PyPI
@@ -77,11 +77,11 @@ jobs:
           set -euo pipefail
           test -n "$TWINE_PASSWORD"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/dist/sgl-kernel/sgl_kernel-0.3.21.post1-cp310-abi3-linux_x86_64.whl"
+            "$RELEASE_ROOT/final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl"
           python -m twine upload --non-interactive \
             "$RELEASE_ROOT/dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-clean/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl"
           python -m twine upload --non-interactive \
             "$RELEASE_ROOT/final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl"
 
@@ -92,7 +92,7 @@ jobs:
           for url in \
             https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
             https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel/0.3.21.post1/json \
+            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post1/json \
             https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
             for attempt in $(seq 1 30); do
               status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
