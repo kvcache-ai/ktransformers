@@ -38,11 +38,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RELEASE_ROOT"
-          test "$(sha256sum final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl | cut -d' ' -f1)" = "7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1"
-          test "$(sha256sum final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl | cut -d' ' -f1)" = "508dda6c70647d4f99614d1c06c653e7112ccda369eb42af0cafa3d827f8ef18"
-          test "$(sha256sum final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl | cut -d' ' -f1)" = "ad9d602da216b3a49f384d56b50db73315523dd5d584d3d3ea95aee85e7c5fdc"
-          test "$(sha256sum dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl | cut -d' ' -f1)" = "1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488"
+          cd "$RELEASE_ROOT/final-dist-v4/release"
+          sha256sum --check <<'EOF'
+          7f406b65125ee7f78a4d1042e6c8d55fb71e2130d8cce7676062c979541df2d1  ktransformers-0.7.0.post2-py3-none-any.whl
+          8d67ab0736eb1afc9f1d4e2cc6c8abee69d62f58c63633ba1743fcdc8ce62d5c  sgl_kernel_kt-0.3.21.post2-cp310-abi3-linux_x86_64.whl
+          7b0336240bd2e2edeb16bf3112bd3ca4ba60cb223444fa878a1eac785326019f  sgl_kernel_kt_payload_1-0.3.21.post2-py3-none-linux_x86_64.whl
+          eb70e08863f16283df459fd3637504446a229735757ba48cc4c5846a4878abd1  sgl_kernel_kt_payload_2-0.3.21.post2-py3-none-linux_x86_64.whl
+          1480d68b4f157fc0d7a7022f2929a4df3731ba63b74eae1bb7c7be1685a689e3  sgl_kernel_kt_payload_3-0.3.21.post2-py3-none-linux_x86_64.whl
+          8d722475e4b1528c48d165662fd68a14a02f25f5f44830501083fa2de439e965  sgl_kernel_kt_payload_4-0.3.21.post2-py3-none-linux_x86_64.whl
+          050d7c93de6d33eb0ee252e19b28da0f96b9a3bfe607ef5e47b9caf47fde8875  sgl_kernel_kt_payload_5-0.3.21.post2-py3-none-linux_x86_64.whl
+          7746606bc002462cf8143370325b3637f7f51f09f497dad29ced843c14a5dde0  sglang_kt-0.7.0.post2-py3-none-any.whl
+          1b13a6f99d0d18c20c68454dcba10133f28f0173d6d18e054b4631d0d76ca488  transformers_kt-5.6.0.post4-py3-none-any.whl
+          EOF
 
       - name: Confirm versions are unused
         shell: bash
@@ -51,7 +58,12 @@ jobs:
           for url in \
             https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
             https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post1/json \
+            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-1/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-2/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-3/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-4/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-5/0.3.21.post2/json \
             https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
             status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
             test "$status" = "404"
@@ -62,11 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade twine
-          python -m twine check \
-            "$RELEASE_ROOT/final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl" \
-            "$RELEASE_ROOT/final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl" \
-            "$RELEASE_ROOT/final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl" \
-            "$RELEASE_ROOT/dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl"
+          python -m twine check "$RELEASE_ROOT/final-dist-v4/release/"*.whl
 
       - name: Publish exact tested wheels to PyPI
         shell: bash
@@ -76,14 +84,17 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TWINE_PASSWORD"
+          for wheel in "$RELEASE_ROOT/final-dist-v4/release/"sgl_kernel_kt_payload_*.whl; do
+            python -m twine upload --non-interactive "$wheel"
+          done
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v2/sgl-kernel-kt/sgl_kernel_kt-0.3.21.post1-cp310-abi3-linux_x86_64.whl"
+            "$RELEASE_ROOT/final-dist-v4/release/sgl_kernel_kt-0.3.21.post2-cp310-abi3-linux_x86_64.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/dist/transformers-kt/transformers_kt-5.6.0.post4-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v4/release/transformers_kt-5.6.0.post4-py3-none-any.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist-v3/sglang-kt/sglang_kt-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v4/release/sglang_kt-0.7.0.post2-py3-none-any.whl"
           python -m twine upload --non-interactive \
-            "$RELEASE_ROOT/final-dist/ktransformers/ktransformers-0.7.0.post2-py3-none-any.whl"
+            "$RELEASE_ROOT/final-dist-v4/release/ktransformers-0.7.0.post2-py3-none-any.whl"
 
       - name: Verify PyPI visibility
         shell: bash
@@ -92,7 +103,12 @@ jobs:
           for url in \
             https://pypi.org/pypi/ktransformers/0.7.0.post2/json \
             https://pypi.org/pypi/sglang-kt/0.7.0.post2/json \
-            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post1/json \
+            https://pypi.org/pypi/sgl-kernel-kt/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-1/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-2/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-3/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-4/0.3.21.post2/json \
+            https://pypi.org/pypi/sgl-kernel-kt-payload-5/0.3.21.post2/json \
             https://pypi.org/pypi/transformers-kt/5.6.0.post4/json; do
             for attempt in $(seq 1 30); do
               status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$url")"
