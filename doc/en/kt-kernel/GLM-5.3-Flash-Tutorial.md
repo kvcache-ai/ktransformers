@@ -2,9 +2,9 @@
 
 ## 1. 1M Context and Native Multimodality
 
-GLM-5.3-flash natively supports a context window of up to 1M tokens. A single request can process a large codebase, a long document, or a long-running agent task without repeatedly splitting the context.
+GLM-5.3-flash natively supports **a context window of up to 1M tokens**. A single request can process a large codebase, a long document, or a long-running agent task without repeatedly splitting the context.
 
-The model also supports images, video, reasoning, and tool calling, and can be used directly by coding agents through an OpenAI-compatible API. GLM-5.3-flash has approximately 321B parameters. Its 45 layers comprise 34 Linear Attention layers and 11 DSA layers.
+The model also supports **images, video, reasoning, and tool calling**, and can be used directly by coding agents through an OpenAI-compatible API. GLM-5.3-flash has approximately 321B parameters. Its 45 layers comprise 34 Linear Attention layers and 11 DSA layers.
 
 ## 2. Native-Precision KTransformers Support
 
@@ -12,11 +12,12 @@ KTransformers (KT) reads the official GLM-5.3-flash FP8 weights directly. No mod
 
 The FP8 model occupies approximately 306 GiB. Reserve at least 350 GB of available system memory. The current implementation supports:
 
-- NVIDIA SM86, SM89, and SM120 GPUs (RTX 30, 40, and 50 series)
-- TP1, TP2, TP4, and TP8
+- NVIDIA SM89 and SM120 GPUs (RTX 40 and 50 series)
 - The AVX-512 FP8 CPU expert kernel
 - Heterogeneous CPU-GPU expert inference and Layerwise Prefill
-- Text, multiple images, one video, reasoning, and tool calling
+- A context window of up to 1M tokens
+- Multimodality: text, multiple images, video
+- Tool calling
 
 ## 3. Installation
 
@@ -26,7 +27,7 @@ Use a clean Python 3.11 environment and run:
 pip install "ktransformers[sglang]"
 ```
 
-This command installs compatible versions of KT Kernel, SGLang-KT, and Transformers-KT. Cloning the source repositories is not required.
+This command installs compatible versions of KT Kernel, SGLang-KT, and Transformers-KT.
 
 ## 4. Launch
 

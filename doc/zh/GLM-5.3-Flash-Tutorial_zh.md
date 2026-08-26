@@ -12,7 +12,7 @@ KTransformers（KT）直接读取 GLM-5.3-flash 的官方 FP8 权重，不需要
 
 FP8 模型约占 306 GiB，建议至少预留 350 GB 可用系统内存。当前实现支持：
 
-- NVIDIA SM86、SM89 和 SM120 GPU（RTX 30、40、50 系列）
+- NVIDIA SM89 和 SM120 GPU（RTX 40、50 系列）
 - TP1、TP2、TP4 和 TP8
 - AVX-512 FP8 CPU Expert Kernel
 - CPU-GPU Expert 异构推理和 Layerwise Prefill
