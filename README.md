@@ -16,6 +16,7 @@
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md).
 
 ## 🔥 Updates
+* **Aug 26, 2026**: Added native support for **GLM-5.3-flash**, bringing 1M-token context and multimodal input to consumer GPUs. ([Tutorial](./doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md))
 * **Aug 25, 2026**: Uploaded a new easy-to-use [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md), covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.
 * **Aug 17, 2026**: LoRA fine-tuning now supports compatible AVX512 x86 CPUs, including AMD servers, without requiring AMX. ([v0.7.0 Release Notes](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0))
 * **Aug 5, 2026**: Introduced native block-FP8 LoRA fine-tuning, loading FP8 routed-expert weights directly from the checkpoint without materializing a complete BF16 copy. ([PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141))

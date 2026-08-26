@@ -363,23 +363,25 @@ def _create_inference_wrapper(
         raise NotImplementedError(f"Unsupported inference method: {method}")
 
     # Create and return backend instance.
-    # `swiglu_limit != 0` is meaningful only on the MXFP4 path. NativeMoEWrapper
-    # also serves RAWINT4 / FP8 / BF16 / FP8_PERCHANNEL / GPTQ_INT4, so a
+    # `swiglu_limit != 0` is validated for block-FP8, MXFP4, and MXFP8.
+    # NativeMoEWrapper also serves RAWINT4 / BF16 / FP8_PERCHANNEL / GPTQ_INT4, so a
     # `backend_cls is NativeMoEWrapper` test would silently forward a stale
     # 10.0 (e.g., from a leftover SGLANG_DSV4_2604_SUBMODE=2604B in the env)
     # into a non-MXFP4 backend; act_fn would then clamp gate/up to ±10 with
     # no warning. Gate strictly on method instead. Origin: kt-sglang 耦合.
     extra_kwargs = {}
-    if method in ("MXFP4", "MXFP8"):
+    if method in ("FP8", "MXFP4", "MXFP8"):
         extra_kwargs["swiglu_limit"] = swiglu_limit
         extra_kwargs["swiglu_alpha"] = swiglu_alpha
     elif swiglu_limit != 0.0:
         raise ValueError(
-            f"swiglu_limit={swiglu_limit} is only supported on method='MXFP4'/'MXFP8', "
+            f"swiglu_limit={swiglu_limit} is only supported on "
+            "method='FP8'/'MXFP4'/'MXFP8', "
             f"got method={method!r} (backend={backend_cls.__name__}). This "
             f"usually means SGLANG_DSV4_2604_SUBMODE=2604B is set in the "
             f"environment while the current launch does not actually use "
-            f"MXFP4/MXFP8 weights — either unset the env or pass --kt-method MXFP4/MXFP8."
+            "FP8/MXFP4/MXFP8 weights — either unset the env or select a "
+            "matching --kt-method."
         )
     return backend_cls(
         layer_idx=layer_idx,
