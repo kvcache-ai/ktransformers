@@ -11,7 +11,7 @@ _version_file = Path(__file__).resolve().parent / "version.py"
 _ns = {}
 exec(_version_file.read_text(), _ns)
 _v = _ns["__version__"]
-_kernel_v = "0.7.0.post1"
+_kernel_v = "0.7.0.post2"
 
 setup(
     version=_v,
