@@ -2,8 +2,10 @@
 # These dependencies will be automatically installed when running `pip install .`
 # You can skip this file if you already have these packages installed
 
-# Core dependencies (minimum versions)
-torch>=2.9.1,<2.11
+# Core dependencies
+# torch is pinned, not a range, and must stay in step with pyproject.toml -- see the
+# comment there.
+torch==2.9.1
 safetensors>=0.4.0
 numpy>=1.24.0
 triton>=2.0.0; platform_machine == "x86_64"
