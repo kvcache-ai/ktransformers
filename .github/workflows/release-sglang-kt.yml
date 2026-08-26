@@ -20,10 +20,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ktransformers-pypi-release
+  cancel-in-progress: false
+
 jobs:
   build-sglang-kt:
     name: Build sglang-kt wheel
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
+    outputs:
+      transformers_version: ${{ steps.verify.outputs.transformers_version }}
 
     steps:
       - name: Checkout repository
@@ -32,14 +38,14 @@ jobs:
           submodules: recursive
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build wheel setuptools
+          pip install build packaging wheel setuptools
 
       - name: Build sglang-kt wheel
         working-directory: third_party/sglang/python
@@ -50,14 +56,70 @@ jobs:
           echo "Building sglang-kt v${KT_VERSION} wheel..."
           python -m build --wheel -v
 
-      - name: Verify wheel
+      - name: Verify wheel metadata
+        id: verify
         working-directory: third_party/sglang/python
         run: |
-          echo "Generated wheel:"
-          ls -lh dist/
-          # Verify the wheel has the correct package name
-          ls dist/ | grep -q "sglang_kt" || (echo "ERROR: Wheel name does not contain sglang_kt" && exit 1)
-          echo "Wheel name verified."
+          python - <<'PY'
+          import email
+          import glob
+          import json
+          import os
+          import zipfile
+          from pathlib import Path
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          manifest = json.loads(
+              (workspace / ".github/release/sft-packages.json").read_text()
+          )
+          transformers_version = manifest["packages"]["transformers-kt"]["version"]
+          version_ns = {}
+          exec((workspace / "version.py").read_text(), version_ns)
+          expected_version = version_ns["__version__"]
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one sglang-kt wheel, got {wheels}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_path = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_path))
+
+          if canonicalize_name(metadata["Name"]) != "sglang-kt":
+              raise SystemExit(f"Expected sglang-kt, got {metadata['Name']}")
+          if metadata["Version"] != expected_version:
+              raise SystemExit(
+                  f"Expected sglang-kt {expected_version}, got {metadata['Version']}"
+              )
+
+          requirements = [
+              Requirement(value)
+              for value in metadata.get_all("Requires-Dist", [])
+          ]
+          transformers_requirements = [
+              requirement for requirement in requirements
+              if canonicalize_name(requirement.name) == "transformers-kt"
+          ]
+          expected_specifier = f"=={transformers_version}"
+          if len(transformers_requirements) != 1:
+              raise SystemExit(
+                  "sglang-kt must declare exactly one transformers-kt dependency"
+              )
+          if expected_specifier not in str(transformers_requirements[0].specifier):
+              raise SystemExit(
+                  "sglang-kt contains a stale transformers-kt requirement: "
+                  f"{transformers_requirements[0]}"
+              )
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output_file:
+              output_file.write(f"transformers_version={transformers_version}\n")
+          print(f"Verified sglang-kt=={expected_version}")
+          print(f"Verified transformers-kt=={transformers_version}")
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -69,7 +131,7 @@ jobs:
   publish-pypi:
     name: Publish sglang-kt to PyPI
     needs: [build-sglang-kt]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     environment: prod
     permissions:
@@ -77,24 +139,56 @@ jobs:
       contents: read
 
     steps:
+      - name: Check transformers-kt dependency availability
+        id: dependency
+        env:
+          TEST_PYPI: ${{ github.event.inputs.test_pypi }}
+          TRANSFORMERS_VERSION: ${{ needs.build-sglang-kt.outputs.transformers_version }}
+        run: |
+          if [ "$TEST_PYPI" = "true" ]; then
+            json_base=https://test.pypi.org/pypi
+            index_name=TestPyPI
+          else
+            json_base=https://pypi.org/pypi
+            index_name=PyPI
+          fi
+          if curl --fail --silent --show-error \
+            "$json_base/transformers-kt/$TRANSFORMERS_VERSION/json" \
+            >/dev/null; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## sglang-kt publication deferred"
+              echo
+              echo "transformers-kt==$TRANSFORMERS_VERSION is not on $index_name yet."
+              echo "The unified KTransformers release workflow will publish it first."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Download wheel artifact
+        if: steps.dependency.outputs.ready == 'true'
         uses: actions/download-artifact@v4
         with:
           name: sglang-kt-wheel
           path: dist/
 
       - name: Display wheels
+        if: steps.dependency.outputs.ready == 'true'
         run: |
           echo "Wheels to publish:"
           ls -lh dist/
 
       - name: Install twine
+        if: steps.dependency.outputs.ready == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install twine
 
       - name: Publish to TestPyPI (if requested)
-        if: github.event.inputs.test_pypi == 'true'
+        if: >-
+          steps.dependency.outputs.ready == 'true' &&
+          github.event.inputs.test_pypi == 'true'
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
@@ -106,7 +200,9 @@ jobs:
             dist/*.whl
 
       - name: Publish to PyPI
-        if: github.event.inputs.test_pypi != 'true'
+        if: >-
+          steps.dependency.outputs.ready == 'true' &&
+          github.event.inputs.test_pypi != 'true'
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
@@ -117,13 +213,16 @@ jobs:
             dist/*.whl
 
       - name: Create release summary
+        if: steps.dependency.outputs.ready == 'true'
         run: |
-          echo "## sglang-kt Published to PyPI" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Installation" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "pip install sglang-kt" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "This is the kvcache-ai fork of SGLang with kt-kernel support." >> $GITHUB_STEP_SUMMARY
-          echo "PyPI link: https://pypi.org/project/sglang-kt/" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## sglang-kt Published to PyPI"
+            echo
+            echo "### Installation"
+            echo '```bash'
+            echo "pip install sglang-kt"
+            echo '```'
+            echo
+            echo "This is the kvcache-ai fork of SGLang with kt-kernel support."
+            echo "PyPI link: https://pypi.org/project/sglang-kt/"
+          } >> "$GITHUB_STEP_SUMMARY"

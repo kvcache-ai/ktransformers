@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="770" viewBox="0 0 1600 770" role="img" aria-labelledby="title desc">
+  <title id="title">LLaMA-Factory、Transformers Trainer、Accelerate 与 KTransformers-FT 的关系</title>
+  <desc id="desc">LLaMA-Factory YAML 配置进入 Transformers Trainer，Trainer 使用 Accelerate 进行分布式训练封装；下层分别展示 FSDP2 分布式策略和由 GPU 与 KTransformers-FT CPU experts 共同组成的模型执行。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#2f3441"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#344054" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .font { font-family: Inter, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+      .title { font-size: 38px; font-weight: 700; fill: #101828; }
+      .name { font-size: 27px; font-weight: 700; fill: #101828; }
+      .text { font-size: 20px; fill: #344054; }
+      .label { font-size: 18px; font-weight: 700; fill: #667085; letter-spacing: 1px; }
+      .arrow { stroke: #2f3441; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .line { stroke: #2f3441; stroke-width: 3; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="860" fill="#ffffff"/>
+  <text x="800" y="58" text-anchor="middle" class="font title">LLaMA-Factory × KTransformers 微调架构</text>
+
+  <!-- Configuration -->
+  <text x="1215" y="108" text-anchor="middle" class="font label">用户配置</text>
+  <rect x="1020" y="130" width="390" height="108" rx="18" fill="#fbe5e3" stroke="#ce6b66" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="1215" y="177" text-anchor="middle" class="font name">LLaMA-Factory YAML</text>
+  <text x="1215" y="211" text-anchor="middle" class="font text">模型 · 数据 · LoRA · 训练参数</text>
+
+  <!-- Trainer -->
+  <text x="685" y="108" text-anchor="middle" class="font label">训练框架</text>
+  <rect x="490" y="130" width="390" height="108" rx="18" fill="#fff3cf" stroke="#d6a634" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="685" y="177" text-anchor="middle" class="font name">Transformers Trainer</text>
+  <text x="685" y="211" text-anchor="middle" class="font text">执行训练、更新参数并保存进度</text>
+
+  <path d="M1020 184H885" class="arrow"/>
+
+  <!-- Accelerate -->
+  <path d="M685 238V288" class="arrow"/>
+  <text x="685" y="320" text-anchor="middle" class="font label">分布式训练封装</text>
+  <rect x="490" y="342" width="390" height="108" rx="18" fill="#e5f3e3" stroke="#68a35e" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="685" y="389" text-anchor="middle" class="font name">Accelerate</text>
+  <text x="685" y="423" text-anchor="middle" class="font text">协调单卡或多卡训练</text>
+
+  <!-- Split -->
+  <path d="M685 450V500" class="line"/>
+  <path d="M320 500H970" class="line"/>
+  <path d="M320 500V550" class="arrow"/>
+  <path d="M970 500V550" class="arrow"/>
+
+  <!-- Distributed strategy -->
+  <text x="320" y="585" text-anchor="middle" class="font label">分布式训练策略</text>
+  <rect x="110" y="607" width="420" height="125" rx="18" fill="#eee7f7" stroke="#8b68aa" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="320" y="657" text-anchor="middle" class="font name">FSDP2</text>
+  <text x="320" y="694" text-anchor="middle" class="font text">将训练任务拆分到多张 GPU</text>
+
+  <!-- Model execution -->
+  <text x="970" y="585" text-anchor="middle" class="font label">模型执行</text>
+  <rect x="620" y="607" width="700" height="125" rx="18" fill="#f8f5fc" stroke="#76519a" stroke-width="2.5" filter="url(#shadow)"/>
+
+  <rect x="650" y="632" width="275" height="75" rx="13" fill="#e8f1ff" stroke="#3b76c5" stroke-width="2"/>
+  <text x="787" y="663" text-anchor="middle" class="font name" font-size="24">GPU</text>
+  <text x="787" y="691" text-anchor="middle" class="font text" font-size="17">执行模型中的高强度计算</text>
+
+  <text x="970" y="680" text-anchor="middle" class="font name" fill="#76519a">+</text>
+
+  <rect x="1015" y="632" width="275" height="75" rx="13" fill="#f3e9f8" stroke="#76519a" stroke-width="2"/>
+  <text x="1152" y="663" text-anchor="middle" class="font name" font-size="23">KTransformers-FT</text>
+  <text x="1152" y="684" text-anchor="middle" class="font text" font-size="16">使用 CPU 执行</text>
+  <text x="1152" y="704" text-anchor="middle" class="font text" font-size="16">大型 MoE Experts</text>
+
+</svg>

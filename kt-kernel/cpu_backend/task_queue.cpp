@@ -51,11 +51,17 @@ void TaskQueue::enqueue(std::function<void()> task) {
 }
 
 void TaskQueue::sync(size_t allow_n_pending) {
-  std::unique_lock<std::mutex> lock(mtx);
-  cv.wait(lock, [&] {
-    return pending.load(std::memory_order_acquire) <= allow_n_pending
-        || done.load(std::memory_order_acquire);
-  });
+  std::exception_ptr task_exception;
+  {
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [&] {
+      return pending.load(std::memory_order_acquire) <= allow_n_pending
+          || done.load(std::memory_order_acquire);
+    });
+    task_exception = first_exception;
+    first_exception = nullptr;
+  }
+  if (task_exception) std::rethrow_exception(task_exception);
 }
 
 void TaskQueue::worker() {
@@ -63,14 +69,22 @@ void TaskQueue::worker() {
   while (!done.load(std::memory_order_acquire)) {
     Node* next = curr->next.load(std::memory_order_acquire);
     if (next) {
+      std::exception_ptr task_exception;
       if (next->task) {
-        next->task();
+        try {
+          next->task();
+        } catch (...) {
+          task_exception = std::current_exception();
+        }
       }
       delete curr;
       curr = next;
       head.store(curr, std::memory_order_release);
       {
         std::lock_guard<std::mutex> lock(mtx);
+        if (task_exception && !first_exception) {
+          first_exception = task_exception;
+        }
         pending.fetch_sub(1, std::memory_order_acq_rel);
       }
       cv.notify_all();

@@ -36,7 +36,7 @@ MLP::MLP(MLPConfig config) {
   shared_mem_buffer.alloc(this, mem_requests);
 }
 
-MLP::~MLP() {}
+MLP::~MLP() { shared_mem_buffer.dealloc(this); }
 
 void MLP::warm_up(WorkerPool* backend) {
   std::vector<float> input_fp32(config_.hidden_size);

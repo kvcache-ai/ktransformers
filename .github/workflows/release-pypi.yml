@@ -8,28 +8,233 @@ on:
       - "version.py"
   workflow_dispatch:
     inputs:
-      test_pypi:
-        description: 'Publish to TestPyPI instead of PyPI (for testing)'
-        required: false
-        default: 'false'
+      target:
+        description: "Build only, publish to TestPyPI, or publish to PyPI"
+        required: true
+        default: build-only
         type: choice
         options:
-          - 'true'
-          - 'false'
+          - build-only
+          - testpypi
+          - pypi
 
 permissions:
   contents: read
 
+concurrency:
+  group: ktransformers-pypi-release
+  cancel-in-progress: false
+
+env:
+  SFT_RELEASE_MANIFEST: .github/release/sft-packages.json
+
 jobs:
-  # ── sglang-kt (must be on PyPI before users can pip install kt-kernel) ──
-  build-and-publish-sglang-kt:
-    name: Build & publish sglang-kt
-    runs-on: [self-hosted, linux, x64]
+  runner-preflight:
+    name: Validate release and runner
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
-    environment: prod
-    permissions:
-      id-token: write
-      contents: read
+    runs-on: [self-hosted, linux, x64, gpu]
+    outputs:
+      target: ${{ steps.release.outputs.target }}
+      kt_version: ${{ steps.release.outputs.kt_version }}
+      accelerate_repository: ${{ steps.release.outputs.accelerate_repository }}
+      accelerate_ref: ${{ steps.release.outputs.accelerate_ref }}
+      accelerate_version: ${{ steps.release.outputs.accelerate_version }}
+      transformers_repository: ${{ steps.release.outputs.transformers_repository }}
+      transformers_ref: ${{ steps.release.outputs.transformers_ref }}
+      transformers_version: ${{ steps.release.outputs.transformers_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate runner prerequisites
+        run: |
+          nvidia-smi
+          nvcc --version
+          for command in cmake curl git jq pkg-config; do
+            command -v "$command" >/dev/null || {
+              echo "ERROR: $command is missing on the release runner"
+              exit 1
+            }
+          done
+          curl --fail --silent --show-error --retry 3 \
+            https://pypi.org/pypi/pip/json >/dev/null
+
+      - name: Validate release manifest
+        id: release
+        env:
+          RELEASE_TARGET: ${{ github.event_name == 'push' && 'pypi' || inputs.target }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["SFT_RELEASE_MANIFEST"]).read_text())
+          if manifest.get("schema_version") != 1:
+              raise SystemExit("Unsupported SFT release manifest schema")
+
+          packages = manifest.get("packages", {})
+          expected_packages = {"accelerate-kt", "transformers-kt"}
+          if set(packages) != expected_packages:
+              raise SystemExit(
+                  f"Expected manifest packages {sorted(expected_packages)}, "
+                  f"got {sorted(packages)}"
+              )
+
+          version_ns = {}
+          exec(Path("version.py").read_text(), version_ns)
+          kt_version = version_ns["__version__"]
+          setup_text = Path("setup.py").read_text()
+
+          for package_name, package in packages.items():
+              if not re.fullmatch(r"[0-9a-f]{40}", package["ref"]):
+                  raise SystemExit(f"{package_name} ref must be a full commit SHA")
+              if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", package["repository"]):
+                  raise SystemExit(f"Invalid repository for {package_name}")
+              expected_pin = f'"{package_name}=={package["version"]}"'
+              if expected_pin not in setup_text:
+                  raise SystemExit(
+                      f"setup.py does not contain the release pin {expected_pin}"
+                  )
+
+          target = os.environ["RELEASE_TARGET"]
+          if target not in {"build-only", "testpypi", "pypi"}:
+              raise SystemExit(f"Unsupported release target: {target}")
+
+          outputs = {
+              "target": target,
+              "kt_version": kt_version,
+              "accelerate_repository": packages["accelerate-kt"]["repository"],
+              "accelerate_ref": packages["accelerate-kt"]["ref"],
+              "accelerate_version": packages["accelerate-kt"]["version"],
+              "transformers_repository": packages["transformers-kt"]["repository"],
+              "transformers_ref": packages["transformers-kt"]["ref"],
+              "transformers_version": packages["transformers-kt"]["version"],
+          }
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output_file:
+              for name, value in outputs.items():
+                  output_file.write(f"{name}={value}\n")
+
+          print(json.dumps(outputs, indent=2))
+          PY
+
+  build-sft-packages:
+    name: Build accelerate-kt and transformers-kt
+    needs: runner-preflight
+    runs-on: [self-hosted, linux, x64, gpu]
+
+    steps:
+      - name: Checkout Accelerate-KT source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.runner-preflight.outputs.accelerate_repository }}
+          ref: ${{ needs.runner-preflight.outputs.accelerate_ref }}
+          path: sources/accelerate
+
+      - name: Checkout Transformers-KT source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.runner-preflight.outputs.transformers_repository }}
+          ref: ${{ needs.runner-preflight.outputs.transformers_ref }}
+          path: sources/transformers
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build packaging twine
+
+      - name: Build SFT integration packages
+        run: |
+          mkdir -p release-dist/accelerate-kt release-dist/transformers-kt
+          python -m build --outdir release-dist/accelerate-kt sources/accelerate
+          python -m build --outdir release-dist/transformers-kt sources/transformers
+          python -m twine check --strict release-dist/accelerate-kt/*
+          python -m twine check --strict release-dist/transformers-kt/*
+
+      - name: Verify SFT package metadata
+        env:
+          ACCELERATE_VERSION: ${{ needs.runner-preflight.outputs.accelerate_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
+        run: |
+          python - <<'PY'
+          import email
+          import glob
+          import os
+          import zipfile
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          def wheel_metadata(directory, expected_name, expected_version):
+              wheels = glob.glob(f"release-dist/{directory}/*.whl")
+              if len(wheels) != 1:
+                  raise SystemExit(f"Expected one wheel for {expected_name}, got {wheels}")
+              with zipfile.ZipFile(wheels[0]) as archive:
+                  metadata_path = next(
+                      name for name in archive.namelist()
+                      if name.endswith(".dist-info/METADATA")
+                  )
+                  metadata = email.message_from_bytes(archive.read(metadata_path))
+              if canonicalize_name(metadata["Name"]) != canonicalize_name(expected_name):
+                  raise SystemExit(f"Expected {expected_name}, got {metadata['Name']}")
+              if metadata["Version"] != expected_version:
+                  raise SystemExit(
+                      f"Expected {expected_name} {expected_version}, got {metadata['Version']}"
+                  )
+              return metadata
+
+          wheel_metadata("accelerate-kt", "accelerate-kt", os.environ["ACCELERATE_VERSION"])
+          transformers_metadata = wheel_metadata(
+              "transformers-kt", "transformers-kt", os.environ["TRANSFORMERS_VERSION"]
+          )
+          requirements = [
+              Requirement(value)
+              for value in transformers_metadata.get_all("Requires-Dist", [])
+          ]
+          accelerate_requirements = [
+              requirement for requirement in requirements
+              if canonicalize_name(requirement.name) == "accelerate-kt"
+          ]
+          if not accelerate_requirements:
+              raise SystemExit(
+                  "transformers-kt must declare an accelerate-kt dependency"
+              )
+          required_version = os.environ["ACCELERATE_VERSION"]
+          expected_specifier = f">={required_version}"
+          stale_requirements = [
+              str(requirement)
+              for requirement in accelerate_requirements
+              if expected_specifier not in str(requirement.specifier)
+          ]
+          if stale_requirements:
+              raise SystemExit(
+                  "transformers-kt contains stale accelerate-kt requirements: "
+                  f"{stale_requirements}"
+              )
+          PY
+
+      - name: Upload SFT package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sft-package-dists
+          path: release-dist/*
+          retention-days: 7
+
+  build-sglang-kt:
+    name: Build sglang-kt
+    needs: runner-preflight
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Checkout repository
@@ -38,48 +243,88 @@ jobs:
           submodules: recursive
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build wheel setuptools twine
+          python -m pip install build packaging twine
 
       - name: Build sglang-kt wheel
+        env:
+          SGLANG_KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
         working-directory: third_party/sglang/python
         run: |
-          KT_VERSION=$(python3 -c "exec(open('${{ github.workspace }}/version.py').read()); print(__version__)")
-          export SGLANG_KT_VERSION="$KT_VERSION"
-          echo "Building sglang-kt v${KT_VERSION} wheel..."
-          python -m build --wheel -v
-          ls dist/ | grep -q "sglang_kt" || (echo "ERROR: Wheel name does not contain sglang_kt" && exit 1)
+          mkdir -p "${GITHUB_WORKSPACE}/release-dist/sglang-kt"
+          python -m build --wheel --outdir "${GITHUB_WORKSPACE}/release-dist/sglang-kt"
+          # The upstream SGLang package currently has no long_description.
+          # PyPI accepts the wheel; hard release metadata is validated below.
+          python -m twine check "${GITHUB_WORKSPACE}"/release-dist/sglang-kt/*
 
-      - name: Publish sglang-kt to PyPI
-        if: github.event.inputs.test_pypi != 'true'
+      - name: Verify sglang-kt metadata
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          EXPECTED_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
         run: |
-          python -m twine upload --skip-existing --verbose third_party/sglang/python/dist/*.whl
+          python - <<'PY'
+          import email
+          import glob
+          import os
+          import zipfile
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
 
-      - name: Publish sglang-kt to TestPyPI (if requested)
-        if: github.event.inputs.test_pypi == 'true'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          python -m twine upload --repository testpypi --skip-existing --verbose third_party/sglang/python/dist/*.whl
+          wheels = glob.glob("release-dist/sglang-kt/*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one sglang-kt wheel, got {wheels}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_path = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_path))
+          if canonicalize_name(metadata["Name"]) != "sglang-kt":
+              raise SystemExit(f"Expected sglang-kt, got {metadata['Name']}")
+          if metadata["Version"] != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit(
+                  f"Expected version {os.environ['EXPECTED_VERSION']}, "
+                  f"got {metadata['Version']}"
+              )
 
-  # ── kt-kernel ──
+          transformers_requirements = [
+              Requirement(value)
+              for value in metadata.get_all("Requires-Dist", [])
+              if canonicalize_name(Requirement(value).name) == "transformers-kt"
+          ]
+          expected_specifier = f"=={os.environ['TRANSFORMERS_VERSION']}"
+          if len(transformers_requirements) != 1:
+              raise SystemExit(
+                  "sglang-kt must declare exactly one transformers-kt dependency"
+              )
+          if expected_specifier not in str(transformers_requirements[0].specifier):
+              raise SystemExit(
+                  "sglang-kt contains a stale transformers-kt requirement: "
+                  f"{transformers_requirements[0]}"
+              )
+          PY
+
+      - name: Upload sglang-kt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sglang-kt-dist
+          path: release-dist/sglang-kt/*
+          retention-days: 7
+
   build-kt-kernel:
     name: Build kt-kernel (Python ${{ matrix.python-version }})
+    needs: runner-preflight
     runs-on: [self-hosted, linux, x64, gpu]
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout repository
@@ -88,267 +333,422 @@ jobs:
           submodules: recursive
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Verify CUDA availability
-        run: |
-          nvidia-smi || (echo "ERROR: GPU not available" && exit 1)
-          nvcc --version || (echo "ERROR: CUDA toolkit not found" && exit 1)
-
       - name: Install dependencies
         run: |
-          # System packages (cmake/libhwloc-dev/pkg-config/libnuma-dev) are expected to be
-          # preinstalled on self-hosted runners. Skip apt-get to avoid sudo dependency.
-          for pkg in cmake pkg-config; do command -v $pkg >/dev/null || { echo "ERROR: $pkg missing on runner"; exit 1; }; done
           python -m pip install --upgrade pip
-          pip install build wheel setuptools
-          pip install torch --index-url https://download.pytorch.org/whl/cu128
+          python -m pip install build packaging wheel setuptools
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 
       - name: Build kt-kernel wheel
         working-directory: kt-kernel
         env:
-          CPUINFER_BUILD_ALL_VARIANTS: '1'
-          CPUINFER_ENABLE_CPPTRACE: '0'
-          CPUINFER_USE_CUDA: '1'
-          CPUINFER_CUDA_ARCHS: '80;86;89;90;120'
-          CPUINFER_CUDA_STATIC_RUNTIME: '1'
-          CPUINFER_BUILD_TYPE: 'Release'
-          CPUINFER_PARALLEL: '4'
-          CPUINFER_FORCE_REBUILD: '1'
-          CUDA_HOME: '/usr/local/cuda-12.8'
-        run: |
-          echo "Building kt-kernel with:"
-          echo "  - CUDA support (SM 80, 86, 89, 90, 120)"
-          echo "  - CPU multi-variant (AMX, AVX512, AVX2)"
-          python -m build --wheel -v
+          CPUINFER_BUILD_ALL_VARIANTS: "1"
+          CPUINFER_ENABLE_CPPTRACE: "0"
+          CPUINFER_USE_CUDA: "1"
+          CPUINFER_CUDA_ARCHS: "80;86;89;90;120"
+          CPUINFER_CUDA_STATIC_RUNTIME: "1"
+          CPUINFER_BUILD_TYPE: Release
+          CPUINFER_PARALLEL: "4"
+          CPUINFER_FORCE_REBUILD: "1"
+          CUDA_HOME: /usr/local/cuda-12.8
+        run: python -m build --wheel -v
 
-      - name: Verify wheel
+      - name: Verify kt-kernel wheel
         working-directory: kt-kernel
         run: |
-          echo "Generated wheel:"
-          ls -lh dist/
-
-          # Install and test
           pip install dist/*.whl
-          python -c "import kt_kernel; print(f'✓ Version: {kt_kernel.__version__}')"
-          python -c "import kt_kernel; print(f'✓ CPU variant: {kt_kernel.__cpu_variant__}')"
-
-          # Verify CUDA support
-          python -c "
+          python -c "import kt_kernel; print(f'Version: {kt_kernel.__version__}')"
+          python -c "import kt_kernel; print(f'CPU variant: {kt_kernel.__cpu_variant__}')"
+          python - <<'PY'
           from kt_kernel import kt_kernel_ext
+
           cpu_infer = kt_kernel_ext.CPUInfer(4)
-          methods = dir(cpu_infer)
-          has_cuda = 'submit_with_cuda_stream' in methods
-          print(f'✓ CUDA support: {has_cuda}')
-          "
+          if "submit_with_cuda_stream" not in dir(cpu_infer):
+              raise SystemExit("kt-kernel wheel does not expose CUDA support")
+          PY
 
-          # Verify CPU multi-variant support
-          echo "Checking CPU variants in wheel..."
-          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_" || echo "Warning: No variant .so files found"
-          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_amx.cpython" && echo "✓ AMX variant found" || echo "Note: AMX variant missing"
-          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx512" && echo "✓ AVX512 variants found" || echo "Note: AVX512 variants missing"
-          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "Note: AVX2 variant missing"
+          listing=$(python -m zipfile -l dist/*.whl)
+          grep -q "_kt_kernel_ext_amx.cpython" <<<"$listing"
+          grep -q "_kt_kernel_ext_avx512" <<<"$listing"
+          grep -q "_kt_kernel_ext_avx2.cpython" <<<"$listing"
 
-          # Verify static linking (should NOT depend on libcudart.so).
-          # Use $RUNNER_TEMP (honors TMPDIR redirect to /mnt) — /tmp is the
-          # system disk on self-hosted runners and can be tight.
-          CHECK_DIR="${RUNNER_TEMP:-/tmp}/check"
-          rm -rf "$CHECK_DIR"
-          unzip -q dist/*.whl -d "$CHECK_DIR"
-          if ldd "$CHECK_DIR"/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
-            echo "ERROR: Dynamic cudart found, should be statically linked"
+          check_dir="${RUNNER_TEMP:-/tmp}/kt-wheel-check-${{ matrix.python-version }}"
+          rm -rf "$check_dir"
+          mkdir -p "$check_dir"
+          unzip -q dist/*.whl -d "$check_dir"
+          if ldd "$check_dir"/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
+            echo "ERROR: dynamic cudart found; CUDA runtime must be statically linked"
             exit 1
-          else
-            echo "✓ CUDA runtime statically linked"
           fi
 
       - name: Repair wheel for manylinux
         working-directory: kt-kernel
         run: |
-          pip install auditwheel patchelf
+          python -m pip install auditwheel patchelf
           mkdir -p wheelhouse
           for wheel in dist/*.whl; do
-            auditwheel repair "$wheel" --plat manylinux_2_35_x86_64 --exclude libcuda.so.1 -w wheelhouse/
+            auditwheel repair "$wheel" \
+              --plat manylinux_2_35_x86_64 \
+              --exclude libcuda.so.1 \
+              -w wheelhouse/
           done
-          rm -f dist/*.whl && cp wheelhouse/*.whl dist/
+          rm -f dist/*.whl
+          cp wheelhouse/*.whl dist/
 
-      - name: Upload artifact
+      - name: Verify repaired wheel metadata
+        working-directory: kt-kernel
+        env:
+          EXPECTED_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+        run: |
+          python - <<'PY'
+          import email
+          import glob
+          import os
+          import zipfile
+          from packaging.utils import canonicalize_name
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one repaired wheel, got {wheels}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_path = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_path))
+          if canonicalize_name(metadata["Name"]) != "kt-kernel":
+              raise SystemExit(f"Expected kt-kernel, got {metadata['Name']}")
+          if metadata["Version"] != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit(
+                  f"Expected version {os.environ['EXPECTED_VERSION']}, "
+                  f"got {metadata['Version']}"
+              )
+          PY
+
+      - name: Upload kt-kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kt-kernel-wheels-py${{ matrix.python-version }}
+          name: kt-kernel-wheel-py${{ matrix.python-version }}
           path: kt-kernel/dist/*.whl
           retention-days: 7
 
-  publish-pypi:
-    name: Publish kt-kernel to PyPI
-    needs: [build-and-publish-sglang-kt, build-kt-kernel]
-    runs-on: [self-hosted, linux, x64]
-    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
-    environment: prod
-    permissions:
-      id-token: write  # For trusted publishing (OIDC)
-      contents: read
-
-    steps:
-      - name: Download all wheel artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
-      - name: Organize wheels into dist/
-        run: |
-          mkdir -p dist/
-          find artifacts/ -name "*.whl" -exec cp {} dist/ \;
-          echo "Wheels to publish:"
-          ls -lh dist/
-
-      - name: Get version from wheel
-        id: get_version
-        run: |
-          # Extract version from first wheel filename
-          wheel_name=$(ls dist/*.whl | head -1 | xargs basename)
-          # Extract version (format: kt_kernel-X.Y.Z[.postN]-...)
-          version=$(echo "$wheel_name" | sed 's/^kt_kernel-\([^-]*\)-.*/\1/')
-          echo "VERSION=$version" >> $GITHUB_OUTPUT
-          echo "Publishing version: $version"
-
-      - name: Install twine
-        run: |
-          python -m pip install --upgrade pip
-          pip install twine
-
-      - name: Publish to TestPyPI (if requested)
-        if: github.event.inputs.test_pypi == 'true'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          python -m twine upload \
-            --repository testpypi \
-            --skip-existing \
-            --verbose \
-            dist/*.whl
-
-      - name: Publish to PyPI
-        if: github.event.inputs.test_pypi != 'true'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          python -m twine upload \
-            --skip-existing \
-            --verbose \
-            dist/*.whl
-
-      - name: Create release summary
-        run: |
-          echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Installation" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY
-          echo "Total: $(ls -1 dist/*.whl | wc -l) wheels (Python 3.10, 3.11, 3.12)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Features" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**CPU Multi-Variant Support:**" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ AMX (Intel Sapphire Rapids+, 2023)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ AVX512 Base/VNNI/VBMI/BF16 (Intel Skylake-X/Ice Lake/Cascade Lake, 2017+)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ AVX2 (Maximum compatibility, 2013+)" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔧 Runtime CPU detection: Automatically selects optimal variant" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**CUDA Support:**" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ SM 80 (Ampere: A100, RTX 3000 series)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ SM 86 (Ampere: RTX 3060-3090)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ SM 89 (Ada Lovelace: RTX 4000 series)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ SM 90 (Hopper: H100)" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔧 Static CUDA runtime: Compatible with CUDA 11.8+ and 12.x drivers" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔧 Works on CPU-only systems (CUDA features disabled gracefully)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Requirements:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Python 3.10, 3.11, or 3.12" >> $GITHUB_STEP_SUMMARY
-          echo "- Linux x86-64 (manylinux_2_17 compatible)" >> $GITHUB_STEP_SUMMARY
-          echo "- For CUDA features: NVIDIA driver with CUDA 11.8+ or 12.x support" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "PyPI link: https://pypi.org/project/kt-kernel/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
-
-  # ── ktransformers shell package ──
-  build-and-publish-ktransformers:
-    name: Build & publish ktransformers shell sdist
-    needs: [build-and-publish-sglang-kt, publish-pypi]
-    runs-on: [self-hosted, linux, x64]
-    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
-    environment: prod
-    permissions:
-      id-token: write
-      contents: read
+  build-ktransformers:
+    name: Build ktransformers shell package
+    needs: runner-preflight
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build twine
+          python -m pip install build packaging twine
 
       - name: Build ktransformers sdist
         run: |
-          rm -rf dist build *.egg-info
-          python -m build --sdist
-          echo "Generated sdist:"
-          ls -lh dist/
+          mkdir -p release-dist/ktransformers
+          python -m build --sdist --outdir release-dist/ktransformers
+          python -m twine check --strict release-dist/ktransformers/*
 
-      - name: Verify ktransformers sdist
+      - name: Verify ktransformers metadata
+        env:
+          KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+          ACCELERATE_VERSION: ${{ needs.runner-preflight.outputs.accelerate_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
         run: |
-          artifact_count=$(find dist -maxdepth 1 -name 'ktransformers-*.tar.gz' | wc -l)
-          if [ "$artifact_count" -ne 1 ]; then
-            echo "ERROR: expected exactly one ktransformers sdist, found $artifact_count"
-            find dist -maxdepth 1 -type f -print
-            exit 1
+          python - <<'PY'
+          import email
+          import glob
+          import os
+          import tarfile
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          archives = glob.glob("release-dist/ktransformers/*.tar.gz")
+          if len(archives) != 1:
+              raise SystemExit(f"Expected one ktransformers sdist, got {archives}")
+          with tarfile.open(archives[0]) as archive:
+              members = archive.getmembers()
+              if not any(member.name.endswith("/version.py") for member in members):
+                  raise SystemExit("ktransformers sdist does not include version.py")
+              pkg_info = next(
+                  member for member in members
+                  if member.name.endswith(".egg-info/PKG-INFO")
+              )
+              metadata = email.message_from_binary_file(archive.extractfile(pkg_info))
+
+          if canonicalize_name(metadata["Name"]) != "ktransformers":
+              raise SystemExit(f"Expected ktransformers, got {metadata['Name']}")
+          if metadata["Version"] != os.environ["KT_VERSION"]:
+              raise SystemExit(
+                  f"Expected version {os.environ['KT_VERSION']}, got {metadata['Version']}"
+              )
+
+          requirements = {
+              canonicalize_name(requirement.name): requirement
+              for requirement in (
+                  Requirement(value)
+                  for value in metadata.get_all("Requires-Dist", [])
+              )
+          }
+          expected = {
+              "kt-kernel": os.environ["KT_VERSION"],
+              "accelerate-kt": os.environ["ACCELERATE_VERSION"],
+              "transformers-kt": os.environ["TRANSFORMERS_VERSION"],
+          }
+          for package_name, version in expected.items():
+              requirement = requirements.get(package_name)
+              if requirement is None or f"=={version}" not in str(requirement.specifier):
+                  raise SystemExit(
+                      f"Missing exact dependency {package_name}=={version}"
+                  )
+          PY
+
+      - name: Upload ktransformers artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ktransformers-dist
+          path: release-dist/ktransformers/*
+          retention-days: 7
+
+  publish-all:
+    name: Publish all release packages
+    needs:
+      - runner-preflight
+      - build-sft-packages
+      - build-sglang-kt
+      - build-kt-kernel
+      - build-ktransformers
+    if: needs.runner-preflight.outputs.target != 'build-only'
+    runs-on: [self-hosted, linux, x64, gpu]
+    environment: prod
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download SFT package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sft-package-dists
+          path: release-dist
+
+      - name: Download sglang-kt artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sglang-kt-dist
+          path: release-dist/sglang-kt
+
+      - name: Download kt-kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kt-kernel-wheel-*
+          path: release-dist/kt-kernel
+          merge-multiple: true
+
+      - name: Download ktransformers artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ktransformers-dist
+          path: release-dist/ktransformers
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install publishing tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install twine
+
+      - name: Publish packages in dependency order
+        env:
+          RELEASE_TARGET: ${{ needs.runner-preflight.outputs.target }}
+          ACCELERATE_VERSION: ${{ needs.runner-preflight.outputs.accelerate_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
+          KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          TEST_PYPI_API_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ "$RELEASE_TARGET" = "testpypi" ]; then
+            repository_args=(--repository-url https://test.pypi.org/legacy/)
+            json_base=https://test.pypi.org/pypi
+            simple_index=https://test.pypi.org/simple
+            token="$TEST_PYPI_API_TOKEN"
+          else
+            repository_args=()
+            json_base=https://pypi.org/pypi
+            simple_index=https://pypi.org/simple
+            token="$PYPI_API_TOKEN"
           fi
 
-          artifact=$(find dist -maxdepth 1 -name 'ktransformers-*.tar.gz' | head -1)
-          tar tzf "$artifact" | grep -q '/version.py$' || {
-            echo "ERROR: version.py is missing from $artifact"
+          if [ -z "$token" ]; then
+            echo "ERROR: release token is not configured for $RELEASE_TARGET"
             exit 1
+          fi
+          export TWINE_USERNAME=__token__
+          export TWINE_PASSWORD="$token"
+
+          publish_and_wait() {
+            local project="$1"
+            local version="$2"
+            local artifact_dir="$3"
+            local files=("$artifact_dir"/*)
+
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "ERROR: no artifacts found for $project in $artifact_dir"
+              exit 1
+            fi
+
+            echo "Publishing $project==$version"
+            upload_succeeded=false
+            for upload_attempt in 1 2 3; do
+              if python -m twine upload \
+                --skip-existing \
+                --verbose \
+                "${repository_args[@]}" \
+                "${files[@]}"; then
+                upload_succeeded=true
+                break
+              fi
+              echo "Upload attempt $upload_attempt/3 failed for $project==$version"
+              sleep $((upload_attempt * 10))
+            done
+            if [ "$upload_succeeded" != true ]; then
+              echo "ERROR: failed to upload $project==$version after 3 attempts"
+              return 1
+            fi
+
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent --show-error \
+                "$json_base/$project/$version/json" >/dev/null; then
+                download_dir=$(mktemp -d)
+                if python -m pip download \
+                  --disable-pip-version-check \
+                  --no-cache-dir \
+                  --no-deps \
+                  --index-url "$simple_index" \
+                  --dest "$download_dir" \
+                  "$project==$version"; then
+                  rm -rf "$download_dir"
+                  echo "Verified $project==$version from $simple_index"
+                  return 0
+                fi
+                rm -rf "$download_dir"
+              fi
+              echo "Waiting for $project==$version to become available ($attempt/60)"
+              sleep 10
+            done
+
+            echo "ERROR: $project==$version did not become downloadable"
+            return 1
           }
-          echo "Verified $artifact contains version.py"
 
-      - name: Publish ktransformers to TestPyPI (if requested)
-        if: github.event.inputs.test_pypi == 'true'
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: |
-          python -m twine upload \
-            --repository testpypi \
-            --skip-existing \
-            --verbose \
-            dist/ktransformers-*.tar.gz
+          publish_and_wait accelerate-kt "$ACCELERATE_VERSION" release-dist/accelerate-kt
+          publish_and_wait transformers-kt "$TRANSFORMERS_VERSION" release-dist/transformers-kt
+          publish_and_wait sglang-kt "$KT_VERSION" release-dist/sglang-kt
+          publish_and_wait kt-kernel "$KT_VERSION" release-dist/kt-kernel
+          publish_and_wait ktransformers "$KT_VERSION" release-dist/ktransformers
 
-      - name: Publish ktransformers to PyPI
-        if: github.event.inputs.test_pypi != 'true'
+      - name: Write release summary
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          ACCELERATE_VERSION: ${{ needs.runner-preflight.outputs.accelerate_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
+          KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
         run: |
-          python -m twine upload \
-            --skip-existing \
-            --verbose \
-            dist/ktransformers-*.tar.gz
+          {
+            echo "## Published KTransformers release"
+            echo
+            echo "- accelerate-kt==$ACCELERATE_VERSION"
+            echo "- transformers-kt==$TRANSFORMERS_VERSION"
+            echo "- sglang-kt==$KT_VERSION"
+            echo "- kt-kernel==$KT_VERSION"
+            echo "- ktransformers==$KT_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-published-release:
+    name: Verify clean SFT installation
+    needs:
+      - runner-preflight
+      - publish-all
+    runs-on: [self-hosted, linux, x64, gpu]
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create clean verification environment
+        run: |
+          python -m venv --clear "$RUNNER_TEMP/kt-release-verify"
+          echo "$RUNNER_TEMP/kt-release-verify/bin" >> "$GITHUB_PATH"
+
+      - name: Install published SFT stack
+        env:
+          RELEASE_TARGET: ${{ needs.runner-preflight.outputs.target }}
+          KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            torch==2.9.1 \
+            --index-url https://download.pytorch.org/whl/cpu
+
+          if [ "$RELEASE_TARGET" = "testpypi" ]; then
+            python -m pip install \
+              --index-url https://test.pypi.org/simple \
+              --extra-index-url https://pypi.org/simple \
+              "ktransformers[sft]==$KT_VERSION"
+          else
+            python -m pip install \
+              --index-url https://pypi.org/simple \
+              "ktransformers[sft]==$KT_VERSION"
+          fi
+          python -m pip check
+
+      - name: Verify imported modules and distributions
+        env:
+          ACCELERATE_VERSION: ${{ needs.runner-preflight.outputs.accelerate_version }}
+          TRANSFORMERS_VERSION: ${{ needs.runner-preflight.outputs.transformers_version }}
+          KT_VERSION: ${{ needs.runner-preflight.outputs.kt_version }}
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+          import os
+
+          import accelerate
+          import kt_kernel
+          import ktransformers
+          import transformers
+
+          expected = {
+              "accelerate-kt": os.environ["ACCELERATE_VERSION"],
+              "transformers-kt": os.environ["TRANSFORMERS_VERSION"],
+              "kt-kernel": os.environ["KT_VERSION"],
+              "ktransformers": os.environ["KT_VERSION"],
+          }
+          for package_name, expected_version in expected.items():
+              installed_version = version(package_name)
+              if installed_version != expected_version:
+                  raise SystemExit(
+                      f"Expected {package_name}=={expected_version}, "
+                      f"got {installed_version}"
+                  )
+              print(f"{package_name}=={installed_version}")
+
+          print("All KT-SFT modules imported successfully")
+          PY

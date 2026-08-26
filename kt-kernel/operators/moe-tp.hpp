@@ -5,7 +5,13 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <vector>
 
 #include "../cpu_backend/shared_mem_buffer.h"
 #include "common.hpp"
@@ -45,7 +51,11 @@ class TP_MOE_Common : public MoE_Interface {
  public:
   GeneralMOEConfig config;
   using input_t = typename T::input_t;
-  TP_MOE_Common(const GeneralMOEConfig& config) : config(config) {
+  using PartFactory = std::function<std::unique_ptr<T>(const GeneralMOEConfig&, int)>;
+
+  TP_MOE_Common(const GeneralMOEConfig& config) : TP_MOE_Common(config, PartFactory{}) {}
+
+  TP_MOE_Common(const GeneralMOEConfig& config, PartFactory part_factory) : config(config) {
     printf("TP MOE layer %d, pool: 0x%lx, expert num: %d, num_experts_per_tok: %d\n", config.layer_idx,
            (intptr_t)config.pool, config.expert_num, config.num_experts_per_tok);
     if (config.pool == nullptr) {
@@ -122,8 +132,26 @@ class TP_MOE_Common : public MoE_Interface {
       }
     }
 
-    config.pool->dispense_backend()->do_numa_job(
-        [this, config](int i) { tps[i] = std::unique_ptr<T>(new Concrete(tp_configs[i], i)); });
+    std::vector<std::exception_ptr> construction_errors(tp_count);
+    config.pool->dispense_backend()->do_numa_job([this, &construction_errors, &part_factory](int i) {
+      try {
+        tps[i] = part_factory ? part_factory(tp_configs[i], i) : std::unique_ptr<T>(new Concrete(tp_configs[i], i));
+      } catch (...) {
+        construction_errors[i] = std::current_exception();
+      }
+    });
+    for (int i = 0; i < tp_count; ++i) {
+      if (!construction_errors[i]) continue;
+      try {
+        std::rethrow_exception(construction_errors[i]);
+      } catch (const std::exception& error) {
+        throw std::runtime_error("TP/NUMA " + std::to_string(i) +
+                                 " construction failed: " + error.what());
+      } catch (...) {
+        throw std::runtime_error("TP/NUMA " + std::to_string(i) +
+                                 " construction failed with an unknown error");
+      }
+    }
 
     local_output_numa.resize(tp_count, nullptr);
     MemoryRequest mem_requests;
@@ -138,6 +166,8 @@ class TP_MOE_Common : public MoE_Interface {
     // printf("local output tp, %d,\n", tp_configs[0].max_possible_qlen());
     shared_mem_buffer.alloc(this, mem_requests);
   }
+
+  ~TP_MOE_Common() { shared_mem_buffer.dealloc(this); }
 
   void warm_up() {
     int qlen = config.max_possible_qlen();

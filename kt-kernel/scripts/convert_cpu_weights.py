@@ -83,12 +83,26 @@ def load_model_config(input_path: str, input_type: str = None) -> Dict:
         "num_experts_per_tok": text_cfg.get("num_experts_per_tok", 2),
         "hidden_size": text_cfg.get("hidden_size"),
         "moe_intermediate_size": text_cfg.get("moe_intermediate_size", text_cfg.get("intermediate_size")),
+        "num_hidden_layers": text_cfg.get("num_hidden_layers"),
     }
 
     # Validate required fields
-    missing_fields = [k for k, v in model_config.items() if v is None]
+    required_fields = (
+        "num_experts",
+        "num_experts_per_tok",
+        "hidden_size",
+        "moe_intermediate_size",
+    )
+    missing_fields = [key for key in required_fields if model_config[key] is None]
     if missing_fields:
         raise ValueError(f"Missing required config fields: {missing_fields}")
+    num_hidden_layers = model_config["num_hidden_layers"]
+    if num_hidden_layers is not None and (
+        not isinstance(num_hidden_layers, int) or num_hidden_layers <= 0
+    ):
+        raise ValueError(
+            f"num_hidden_layers must be a positive integer, got {num_hidden_layers!r}"
+        )
 
     # For FP8 input, extract and validate quantization_config
     if input_type == "fp8":
@@ -317,6 +331,10 @@ class ConverterBase:
     def _find_expert_layers(self) -> Dict[int, List[int]]:
         """Find all layers and experts in the model"""
         layers = defaultdict(set)
+        num_hidden_layers = self.model_config.get("num_hidden_layers")
+
+        def is_main_model_layer(layer_idx: int) -> bool:
+            return num_hidden_layers is None or layer_idx < num_hidden_layers
 
         # detect layout
         for key in self.tensor_file_map.keys():
@@ -331,7 +349,8 @@ class ConverterBase:
                     parts = key.split(".")
                     if len(parts) >= 6:
                         layer_idx = int(parts[2])
-                        layers.add(layer_idx)
+                        if is_main_model_layer(layer_idx):
+                            layers.add(layer_idx)
 
             result: Dict[int, List[int]] = {}
             for layer_idx in sorted(layers):
@@ -347,7 +366,8 @@ class ConverterBase:
                 if len(parts) >= 6:
                     layer_idx = int(parts[2])
                     expert_idx = int(parts[5])
-                    layers[layer_idx].add(expert_idx)
+                    if is_main_model_layer(layer_idx):
+                        layers[layer_idx].add(expert_idx)
 
         # Convert to sorted lists
         result: Dict[int, List[int]] = {}

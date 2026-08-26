@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
+from kt_kernel.sft import get_kt_expert_placeholders
 from kt_kernel.sft.arch import MOEArchConfig
 from kt_kernel.sft.checkpoint import (
     FULL_WEIGHT_INDEX_NAME,
@@ -20,6 +21,7 @@ from kt_kernel.sft.config import KTConfig
 from kt_kernel.sft.layer import KTMoELayerWrapper
 from kt_kernel.sft.lora import load_kt_moe_from_adapter, save_kt_moe_to_adapter
 from kt_kernel.sft.wrapper import wrap_moe_layers_with_kt_wrapper
+from kt_kernel.sft.weights import _clear_original_expert_weights, extract_moe_weights
 
 
 class _FakeFullBackend:
@@ -315,7 +317,7 @@ def test_distributed_full_checkpoint_load_is_rank0_owned_and_error_synchronized(
     save_kt_moe_to_adapter(SimpleNamespace(_kt_wrappers=[wrapper]), str(tmp_path))
     expected_sum = float(wrapper.wrapper.gate_proj_buf.detach().float().sum())
 
-    context = mp.get_context("fork")
+    context = mp.get_context("spawn")
     result_queue = context.Queue()
     init_file = tmp_path / "dist-success"
     processes = [
@@ -372,6 +374,97 @@ class _OriginalMoE(nn.Module):
         super().__init__()
         self.gate = nn.Linear(4, 2, bias=False)
         self.experts = nn.ModuleList([_Expert(), _Expert()])
+
+
+def test_extract_fused_experts_rejects_unmarked_tiny_storage_placeholder():
+    fused_experts = nn.Module()
+    tiny_storage = torch.empty(1, dtype=torch.bfloat16).untyped_storage()
+    gate_up = torch.empty(0, dtype=torch.bfloat16).set_(
+        tiny_storage,
+        storage_offset=0,
+        size=(2, 6, 4),
+        stride=(0, 0, 0),
+    )
+    fused_experts.gate_up_proj = nn.Parameter(gate_up, requires_grad=False)
+    fused_experts.down_proj = nn.Parameter(
+        torch.empty((2, 4, 3), dtype=torch.bfloat16),
+        requires_grad=False,
+    )
+    moe_module = nn.Module()
+    moe_module.experts = fused_experts
+    moe_config = MOEArchConfig(
+        moe_layer_attr="mlp",
+        router_attr="gate",
+        experts_attr="experts",
+        weight_names=("gate_proj", "up_proj", "down_proj"),
+        expert_num=2,
+        intermediate_size=3,
+        num_experts_per_tok=1,
+    )
+
+    with pytest.raises(RuntimeError, match="zero-storage placeholder"):
+        extract_moe_weights(moe_module, moe_config)
+
+
+def _layer_with_expert_placeholders():
+    moe_config = MOEArchConfig(
+        moe_layer_attr="mlp",
+        router_attr="gate",
+        experts_attr="experts",
+        weight_names=("gate_proj", "up_proj", "down_proj"),
+        expert_num=2,
+        intermediate_size=3,
+        num_experts_per_tok=1,
+    )
+    original_moe = _OriginalMoE()
+    layer = KTMoELayerWrapper(
+        original_moe=original_moe,
+        wrapper=None,
+        lora_params=None,
+        moe_config=moe_config,
+        hidden_size=4,
+        layer_idx=0,
+    )
+    _clear_original_expert_weights(original_moe, moe_config, empty_placeholders=True)
+    return layer
+
+
+def test_public_placeholder_helper_returns_exact_identities_and_fqns():
+    layer = _layer_with_expert_placeholders()
+
+    model = nn.Module()
+    model.layers = nn.ModuleList([layer])
+    alias = layer.experts[0].gate_proj.weight
+    model.register_parameter("placeholder_alias", alias)
+    unrelated = nn.Parameter(torch.empty(0), requires_grad=False)
+    unrelated._kt_zero_storage = True
+    model.register_parameter("unrelated_marked_parameter", unrelated)
+
+    placeholders = get_kt_expert_placeholders(model)
+
+    expected_fqns = {
+        f"layers.0.experts.{expert_idx}.{projection}.weight"
+        for expert_idx in range(2)
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+    expected_fqns.add("placeholder_alias")
+    assert set(placeholders) == expected_fqns
+    assert placeholders["placeholder_alias"] is alias
+    assert placeholders["layers.0.experts.0.gate_proj.weight"] is alias
+    assert all(getattr(parameter, "_kt_zero_storage", False) for parameter in placeholders.values())
+    assert "unrelated_marked_parameter" not in placeholders
+
+
+def test_public_placeholder_helper_rejects_conflicting_fqn_identities():
+    layer = _layer_with_expert_placeholders()
+    model = nn.Module()
+    model.layer = layer
+    first = layer.experts[0].gate_proj.weight
+    second = layer.experts[0].up_proj.weight
+    model.named_parameters = lambda remove_duplicate=False: iter((("duplicate", first), ("duplicate", second)))
+
+    with pytest.raises(RuntimeError, match="conflicting Parameter identities"):
+        get_kt_expert_placeholders(model)
 
 
 def test_state_dict_hook_removes_only_marked_expert_placeholders(tmp_path):
