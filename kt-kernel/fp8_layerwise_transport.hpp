@@ -10,7 +10,8 @@
 
 namespace kt::layerwise {
 
-inline constexpr std::size_t kFP8LayerwiseControlBytes = 4096;
+inline constexpr std::size_t kFP8LayerwiseControlBytes = 8192;
+inline constexpr int kFP8LayerwiseMaxTPSize = 8;
 inline constexpr int kFP8LayerwiseBufferKinds = 4;
 inline constexpr int kFP8LayerwiseHostSlots = 2;
 

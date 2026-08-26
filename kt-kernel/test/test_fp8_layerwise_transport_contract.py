@@ -10,6 +10,9 @@ from types import SimpleNamespace
 
 
 AMX_PATH = Path(__file__).resolve().parents[1] / "python/utils/amx.py"
+TRANSPORT_HPP_PATH = Path(__file__).resolve().parents[1] / "fp8_layerwise_transport.hpp"
+TRANSPORT_CPP_PATH = Path(__file__).resolve().parents[1] / "fp8_layerwise_transport.cpp"
+BINDINGS_PATH = Path(__file__).resolve().parents[1] / "ext_bindings.cpp"
 
 
 def _compile_thin_method():
@@ -45,6 +48,18 @@ class _CPUInferRecorder:
 
 
 class TestFP8LayerwiseTransportContract(unittest.TestCase):
+    def test_native_transport_exports_tp8_capacity(self):
+        header = TRANSPORT_HPP_PATH.read_text(encoding="utf-8")
+        source = TRANSPORT_CPP_PATH.read_text(encoding="utf-8")
+        bindings = BINDINGS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("kFP8LayerwiseMaxTPSize = 8", header)
+        self.assertIn("kFP8LayerwiseControlBytes = 8192", header)
+        self.assertIn("tp_size > kFP8LayerwiseMaxTPSize", source)
+        self.assertIn("TP sizes 1 through 8", source)
+        self.assertIn('m.attr("FP8_LAYERWISE_CONTROL_BYTES")', bindings)
+        self.assertIn('m.attr("FP8_LAYERWISE_MAX_TP_SIZE")', bindings)
+
     def test_thin_wrapper_forwards_exact_layer_contract(self):
         invoke = _compile_thin_method()
         moe = _MoeRecorder()

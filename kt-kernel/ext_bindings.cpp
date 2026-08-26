@@ -563,6 +563,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__fp8_kernel__") = "unsupported";
 #endif
   m.attr("__fp8_weight_layout__") = "block-e4m3-128x128";
+  m.attr("FP8_LAYERWISE_CONTROL_BYTES") = kt::layerwise::kFP8LayerwiseControlBytes;
+  m.attr("FP8_LAYERWISE_MAX_TP_SIZE") = kt::layerwise::kFP8LayerwiseMaxTPSize;
 
   m.def("initialize_fp8_layerwise_control", &kt::layerwise::initialize_fp8_layerwise_control,
         py::arg("control_ptr"), py::arg("control_size"), py::arg("tp_size"));

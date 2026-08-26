@@ -27,8 +27,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::uint64_t kControlMagic = 0x4b544650384c5731ULL;  // "KTFP8LW1"
-constexpr std::uint64_t kControlVersion = 1;
-constexpr int kMaxTPSize = 4;
+constexpr std::uint64_t kControlVersion = 2;
 constexpr std::uint64_t kPoisonClaimed = std::numeric_limits<std::uint64_t>::max();
 
 enum ErrorCode : int {
@@ -77,25 +76,25 @@ struct alignas(64) FP8LayerwiseControl {
   AtomicCell next_sequence;
   AtomicCell producer_done_epoch;
 
-  AtomicCell join_epoch[kMaxTPSize];
-  AtomicCell consumer_done_epoch[kMaxTPSize];
-  AtomicCell wait_returned_epoch[kMaxTPSize];
+  AtomicCell join_epoch[kFP8LayerwiseMaxTPSize];
+  AtomicCell consumer_done_epoch[kFP8LayerwiseMaxTPSize];
+  AtomicCell wait_returned_epoch[kFP8LayerwiseMaxTPSize];
 
   ReadySlot ready[kFP8LayerwiseHostSlots];
-  AtomicCell ack_sequence[kMaxTPSize][kFP8LayerwiseHostSlots];
+  AtomicCell ack_sequence[kFP8LayerwiseMaxTPSize][kFP8LayerwiseHostSlots];
 
   AtomicCell layer_start_ns;
   AtomicCell writer_ns;
   AtomicCell slot_wait_ns;
   AtomicCell producer_total_ns;
-  AtomicCell h2d_ns[kMaxTPSize];
-  AtomicCell bytes[kMaxTPSize];
+  AtomicCell h2d_ns[kFP8LayerwiseMaxTPSize];
+  AtomicCell bytes[kFP8LayerwiseMaxTPSize];
 };
 
 static_assert(std::is_trivial_v<FP8LayerwiseControl>);
 static_assert(std::is_standard_layout_v<FP8LayerwiseControl>);
 static_assert(sizeof(FP8LayerwiseControl) <= kFP8LayerwiseControlBytes,
-              "FP8 layerwise control must fit in one 4 KiB shared page");
+              "FP8 layerwise control must fit in the shared control region");
 
 std::uint64_t load_acquire(const AtomicCell& cell) {
   return __atomic_load_n(&cell.value, __ATOMIC_ACQUIRE);
@@ -136,7 +135,7 @@ void validate_control_region(std::uintptr_t control_ptr, std::size_t control_siz
   if (control_ptr == 0) throw std::invalid_argument("FP8 layerwise control pointer is null");
   if ((control_ptr & 63U) != 0) throw std::invalid_argument("FP8 layerwise control pointer must be 64-byte aligned");
   if (control_size < kFP8LayerwiseControlBytes) {
-    throw std::invalid_argument("FP8 layerwise control region must be at least 4096 bytes");
+    throw std::invalid_argument("FP8 layerwise control region must be at least 8192 bytes");
   }
 }
 
@@ -195,8 +194,8 @@ std::uint64_t fold_progress(std::uint64_t seed, std::uint64_t value) {
 
 void initialize_fp8_layerwise_control(std::uintptr_t control_ptr, std::size_t control_size, int tp_size) {
   validate_control_region(control_ptr, control_size);
-  if (tp_size <= 0 || tp_size > kMaxTPSize) {
-    throw std::invalid_argument("FP8 layerwise transport supports TP sizes 1 through 4");
+  if (tp_size <= 0 || tp_size > kFP8LayerwiseMaxTPSize) {
+    throw std::invalid_argument("FP8 layerwise transport supports TP sizes 1 through 8");
   }
   auto* control = reinterpret_cast<FP8LayerwiseControl*>(control_ptr);
   std::memset(control, 0, kFP8LayerwiseControlBytes);
