@@ -26,7 +26,7 @@ jobs:
     environment: prod
 
     env:
-      RELEASE_ROOT: /home/yyj/kt-hotfix-release-20260827
+      RELEASE_ROOT: /home/yyj/kt-hotfix-release-post3-20260827
 
     steps:
       - name: Set up Python
@@ -38,11 +38,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RELEASE_ROOT/final-dist-v9/release"
+          cd "$RELEASE_ROOT/final"
           sha256sum --check <<'EOF'
           b44b68effe42f7cfbfe9bb8e07af57ef29194c3648e20a1fdd06273b42aca7ca  kt_kernel-0.7.0.post2-cp312-cp312-manylinux_2_35_x86_64.whl
-          1bf1e51e115314388e41aeed5d7c380985bf67a448e8133af1e7ff81de5d9f8f  ktransformers-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl
-          b13705d35c577530efaec915b02ba66a6bf67f88a5429f4758bb59885e723971  sglang_kt-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl
+          17ad5a3f582ed9252bd8765e0b2a2c0c7b39b754f4e8a5cbf13c62dbc0767e73  ktransformers-0.7.0.post3-py3-none-manylinux_2_35_x86_64.whl
+          ef2e2365ca0808fbedcc4d109dee8de4026ba03af4239b10a1c7bfb9f2059e51  sglang_kt-0.7.0.post3-py3-none-manylinux_2_35_x86_64.whl
           b8e7c1baeb19123b251dfb4f6e6c2be615abd29b6feb23113deeaef5e7175811  transformers_kt-5.6.0.post4-py3-none-manylinux_2_35_x86_64.whl
           EOF
 
@@ -77,8 +77,8 @@ jobs:
           }
 
           verify_or_unused kt-kernel 0.7.0.post2 b44b68effe42f7cfbfe9bb8e07af57ef29194c3648e20a1fdd06273b42aca7ca
-          verify_or_unused ktransformers 0.7.0.post2 1bf1e51e115314388e41aeed5d7c380985bf67a448e8133af1e7ff81de5d9f8f
-          verify_or_unused sglang-kt 0.7.0.post2 b13705d35c577530efaec915b02ba66a6bf67f88a5429f4758bb59885e723971
+          verify_or_unused ktransformers 0.7.0.post3 17ad5a3f582ed9252bd8765e0b2a2c0c7b39b754f4e8a5cbf13c62dbc0767e73
+          verify_or_unused sglang-kt 0.7.0.post3 ef2e2365ca0808fbedcc4d109dee8de4026ba03af4239b10a1c7bfb9f2059e51
           verify_or_unused transformers-kt 5.6.0.post4 b8e7c1baeb19123b251dfb4f6e6c2be615abd29b6feb23113deeaef5e7175811
 
       - name: Install publisher and validate metadata
@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade twine
-          python -m twine check "$RELEASE_ROOT/final-dist-v9/release/"*.whl
+          python -m twine check "$RELEASE_ROOT/final/"*.whl
 
       - name: Publish exact tested wheels to PyPI
         shell: bash
@@ -111,13 +111,9 @@ jobs:
           }
 
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v9/release/kt_kernel-0.7.0.post2-cp312-cp312-manylinux_2_35_x86_64.whl"
+            "$RELEASE_ROOT/final/sglang_kt-0.7.0.post3-py3-none-manylinux_2_35_x86_64.whl"
           upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v9/release/transformers_kt-5.6.0.post4-py3-none-manylinux_2_35_x86_64.whl"
-          upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v9/release/sglang_kt-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl"
-          upload_with_retry \
-            "$RELEASE_ROOT/final-dist-v9/release/ktransformers-0.7.0.post2-py3-none-manylinux_2_35_x86_64.whl"
+            "$RELEASE_ROOT/final/ktransformers-0.7.0.post3-py3-none-manylinux_2_35_x86_64.whl"
 
       - name: Verify exact PyPI files
         shell: bash
@@ -149,6 +145,6 @@ jobs:
           }
 
           verify_exact kt-kernel 0.7.0.post2 b44b68effe42f7cfbfe9bb8e07af57ef29194c3648e20a1fdd06273b42aca7ca
-          verify_exact ktransformers 0.7.0.post2 1bf1e51e115314388e41aeed5d7c380985bf67a448e8133af1e7ff81de5d9f8f
-          verify_exact sglang-kt 0.7.0.post2 b13705d35c577530efaec915b02ba66a6bf67f88a5429f4758bb59885e723971
+          verify_exact ktransformers 0.7.0.post3 17ad5a3f582ed9252bd8765e0b2a2c0c7b39b754f4e8a5cbf13c62dbc0767e73
+          verify_exact sglang-kt 0.7.0.post3 ef2e2365ca0808fbedcc4d109dee8de4026ba03af4239b10a1c7bfb9f2059e51
           verify_exact transformers-kt 5.6.0.post4 b8e7c1baeb19123b251dfb4f6e6c2be615abd29b6feb23113deeaef5e7175811
