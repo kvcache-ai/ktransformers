@@ -41,6 +41,7 @@ INFERENCE_METHODS = frozenset(
         "GPTQ_INT4",  # GPTQ INT4
         "SYCL_GPTQ_INT4",  # GPTQ INT4 experts on a SYCL device
         "MXFP4",  # MXFP4 (E2M1 nibble + ue8m0 group scale, e.g. DeepSeek-V4-Flash routed experts)
+        "NVFP4",  # NVFP4 (E2M1 nibble + e4m3 per-16 block scale x per-tensor global, ModelOpt)
         "MXFP8",  # MXFP8 (E4M3fn byte + ue8m0 group scale, e.g. MiniMax-M3-Preview)
         "LLAMAFILE",  # GGUF format
         "MOE_INT4",
@@ -351,6 +352,7 @@ def _create_inference_wrapper(
         "GPTQ_INT4",
         "SYCL_GPTQ_INT4",
         "MXFP4",
+        "NVFP4",
         "MXFP8",
     ]:
         backend_cls = NativeMoEWrapper
