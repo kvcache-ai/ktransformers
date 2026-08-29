@@ -9,7 +9,8 @@
  *   Weight:   FP4 E2M1 (nibble-packed, same layout) → PSHUFB lookup → BF16
  *   Act:      BF16 direct (BufferABF16Impl, no online INT8 quantization)
  *   Dot prod: _mm512_dpbf16_ps (BF16×BF16→FP32) instead of _mm512_dpbssd_epi32
- *   Scale:    FP32 per-group scale (weight only, no activation scale)
+ *   Scale:    per-group weight scale; E8M0 is stored as one exponent byte,
+ *             with an exact FP32 fallback for other scale layouts
  **/
 #ifndef CPUINFER_OPERATOR_AMX_FP4_MOE_H
 #define CPUINFER_OPERATOR_AMX_FP4_MOE_H
@@ -52,6 +53,17 @@ struct GemmKernel224MXFP4SmallKGroup {
       0x00, 0x3F, 0x3F, 0x3F, 0x40, 0x40, 0x40, 0x40,   //  0..7  positive
       0x80, 0xBF, 0xBF, 0xBF, 0xC0, 0xC0, 0xC0, 0xC0};  //  8..15 negative
 
+#if defined(__AVX512BF16__)
+  // Natural lane-local order emitted by the grouped decoder below. Keeping
+  // decoded values in this order removes per-output-row 16-bit interleaves;
+  // the much smaller activation is permuted once before the N-row loop.
+  alignas(64) static constexpr uint16_t natural_group_indices[32] = {0,  2,  4,  6,  8,  10, 12, 14, 16, 18, 20,
+                                                                     22, 24, 26, 28, 30, 1,  3,  5,  7,  9,  11,
+                                                                     13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
+  alignas(32) static constexpr uint16_t fp4_bf16[16] = {0x0000, 0x3F00, 0x3F80, 0x3FC0, 0x4000, 0x4040, 0x4080, 0x40C0,
+                                                        0x8000, 0xBF00, 0xBF80, 0xBFC0, 0xC000, 0xC040, 0xC080, 0xC0C0};
+#endif
+
   // Convert 16 packed FP4 bytes (32 values = 1 k_group) → 32 BF16 values (__m512i)
   // Output column order: [BF16(lo[0]),BF16(hi[0]), ..., BF16(lo[15]),BF16(hi[15])]
   __attribute__((always_inline)) static inline __m512i mxfp4_to_bf16_32(__m128i packed) {
@@ -84,6 +96,28 @@ struct GemmKernel224MXFP4SmallKGroup {
     __m256i q1 = _mm256_inserti128_si256(_mm256_castsi128_si256(p2), p3, 1);
     return _mm512_inserti64x4(_mm512_castsi256_si512(q0), q1, 1);
   }
+
+#if defined(__AVX512BF16__)
+  // Decode one complete 32-value group with a word-indexed LUT. Expanding the
+  // low/high nibbles directly to word indices avoids the byte lookups and
+  // byte-to-word unpack chain used by the PSHUFB decoder. Two independent
+  // widen operations avoid the dependency chain of widening packed bytes once.
+  __attribute__((always_inline)) static inline __m512i mxfp4_to_bf16_32_natural(__m128i packed) {
+    const __m128i lo_mask = _mm_set1_epi8(0x0F);
+    const __m128i lo = _mm_and_si128(packed, lo_mask);
+    const __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
+    const __m256i lo_words = _mm256_cvtepu8_epi16(lo);
+    const __m256i hi_words = _mm256_cvtepu8_epi16(hi);
+    const __m512i indices = _mm512_inserti64x4(_mm512_castsi256_si512(lo_words), hi_words, 1);
+    const __m512i lut = _mm512_castsi256_si512(_mm256_load_si256(reinterpret_cast<const __m256i*>(fp4_bf16)));
+    return _mm512_permutexvar_epi16(indices, lut);
+  }
+
+  __attribute__((always_inline)) static inline __m512bh permute_activation_group(__m512bh activation) {
+    const __m512i indices = _mm512_load_si512(static_cast<const void*>(natural_group_indices));
+    return (__m512bh)_mm512_permutexvar_epi16(indices, (__m512i)activation);
+  }
+#endif
 
   struct ActivationBF16 {
     __m512bh a;
@@ -138,10 +172,137 @@ struct GemmKernel224MXFP4SmallKGroup {
 #endif
   }
 
-  // Buffers
-  using BufferA = BufferABF16Impl<GemmKernel224MXFP4SmallKGroup>;        // raw BF16, no quant
-  using BufferB = BufferBInt4KGroupImpl<GemmKernel224MXFP4SmallKGroup>;  // nibble-packed FP4
-  using BufferC = BufferCReduceImpl<GemmKernel224MXFP4SmallKGroup>;      // FP32 reduce
+  // BufferA records whether decode activation has already been converted to
+  // the natural grouped order. Prefill and all fallback paths keep the
+  // existing logical layout.
+  struct BufferA : public BufferABF16Impl<GemmKernel224MXFP4SmallKGroup> {
+    using Base = BufferABF16Impl<GemmKernel224MXFP4SmallKGroup>;
+    using Base::a;
+    using Base::get_submat;
+    using Base::k;
+    using Base::max_m;
+    using Base::required_size;
+
+    bool natural_order = false;
+
+    BufferA(int max_m_, int k_, void* ptr) : Base(max_m_, k_, ptr) {}
+
+    void set_data(void* ptr) {
+      Base::set_data(ptr);
+      natural_order = false;
+    }
+
+    void from_mat(int m, ggml_bf16_t* src, int ith, int nth) {
+      Base::from_mat(m, src, ith, nth);
+      natural_order = false;
+    }
+
+    void from_mat_natural(int m, ggml_bf16_t* src, int ith, int nth) {
+#if defined(__AVX512BF16__)
+      assert(m <= max_m);
+      assert(ith == 0 && nth == 1);
+      assert(k % 32 == 0);
+      for (int mi = 0; mi < m; ++mi) {
+        const __m512bh* src_row = reinterpret_cast<const __m512bh*>(src + static_cast<size_t>(mi) * k);
+        __m512bh* dst_row = reinterpret_cast<__m512bh*>(get_submat(m, k, mi, 0));
+        for (int g = 0; g < k / 32; ++g) dst_row[g] = permute_activation_group(src_row[g]);
+      }
+      natural_order = true;
+#else
+      from_mat(m, src, ith, nth);
+#endif
+    }
+  };
+
+  // Native MXFP4 scales are positive powers of two. After validating the full
+  // tensor, compact their FP32 exponent bytes in-place; reconstructing either
+  // FP32 or BF16 is then bit-exact. Non-E8M0 input is left untouched and uses
+  // the original FP32 fallback path.
+  struct BufferB : public BufferBInt4KGroupImpl<GemmKernel224MXFP4SmallKGroup> {
+    using Base = BufferBInt4KGroupImpl<GemmKernel224MXFP4SmallKGroup>;
+    using Base::b;
+    using Base::d;
+    using Base::get_submat;
+    using Base::k;
+    using Base::k_group_count;
+    using Base::k_group_size;
+    using Base::n;
+
+    uint8_t* scale_e8;
+    bool scale_e8_valid = false;
+
+    static size_t required_size(int n, int k, int k_group_size) { return Base::required_size(n, k, k_group_size); }
+
+    BufferB(int n_, int k_, int k_group_size_, void* ptr) : Base(n_, k_, k_group_size_, ptr) {
+      // The compact bytes replace the FP32 contents in-place after validation.
+      // Forward compression is overlap-safe: byte i is always written below
+      // the first byte of every not-yet-read float j > i.
+      scale_e8 = reinterpret_cast<uint8_t*>(d);
+    }
+
+    void finalize_scale_e8() {
+      const size_t count = static_cast<size_t>(n) * k_group_count;
+      bool valid = true;
+      for (size_t i = 0; i < count; ++i) {
+        uint32_t bits;
+        std::memcpy(&bits, d + i, sizeof(bits));
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        const bool is_positive_power_of_two =
+            (bits & 0x80000000u) == 0 && (bits & 0x007FFFFFu) == 0 && exponent != 0 && exponent != 0xFFu;
+        valid = valid && is_positive_power_of_two;
+      }
+      scale_e8_valid = valid;
+      if (valid) {
+        for (size_t i = 0; i < count; ++i) {
+          uint32_t bits;
+          std::memcpy(&bits, d + i, sizeof(bits));
+          scale_e8[i] = static_cast<uint8_t>((bits >> 23) & 0xFFu);
+        }
+      }
+    }
+
+    const uint8_t* get_scale_e8(int n_, int n_begin, int k_, int k_begin) const {
+      (void)n_;
+      (void)k_;
+      const int k_group_idx = k_begin / k_group_size;
+      return scale_e8 + static_cast<size_t>(n_begin) * k_group_count + k_group_idx;
+    }
+
+    float* get_scale(int n_, int n_begin, int k_, int k_begin) {
+      if (!scale_e8_valid) return Base::get_scale(n_, n_begin, k_, k_begin);
+      constexpr int max_group_count = K_BLOCK / 32;
+      const int group_count = k_ / k_group_size;
+      assert(group_count <= max_group_count);
+      alignas(64) thread_local float scratch[4][max_group_count];
+      thread_local unsigned slot = 0;
+      float* destination = scratch[slot++ & 3u];
+      const uint8_t* source = get_scale_e8(n_, n_begin, k_, k_begin);
+      int group = 0;
+      for (; group + 16 <= group_count; group += 16) {
+        const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + group));
+        const __m512i exponents = _mm512_slli_epi32(_mm512_cvtepu8_epi32(packed), 23);
+        _mm512_store_ps(destination + group, _mm512_castsi512_ps(exponents));
+      }
+      for (; group < group_count; ++group) {
+        const uint32_t bits = static_cast<uint32_t>(source[group]) << 23;
+        std::memcpy(destination + group, &bits, sizeof(bits));
+      }
+      return destination;
+    }
+
+    void copy_scale_to_bf16(ggml_bf16_t* destination, size_t offset, size_t count) const {
+      if (scale_e8_valid) {
+        for (size_t i = 0; i < count; ++i) {
+          const uint16_t bits = static_cast<uint16_t>(scale_e8[offset + i]) << 7;
+          std::memcpy(destination + i, &bits, sizeof(bits));
+        }
+      } else {
+        for (size_t i = 0; i < count; ++i) destination[i] = GGML_FP32_TO_BF16(d[offset + i]);
+      }
+    }
+  };
+
+  using BufferC = BufferCReduceImpl<GemmKernel224MXFP4SmallKGroup>;  // FP32 reduce
 
   // 4 个 zmm 的 horizontal reduce → 4 个连续 fp32。
   // 4 次 reduce_add_ps 之间无依赖，编译器/CPU 可并行调度。
@@ -207,6 +368,162 @@ struct GemmKernel224MXFP4SmallKGroup {
       }
     }
   }
+
+#if defined(__AVX512BF16__)
+  // Convert a logical BF16 activation into the grouped decoder's natural
+  // order. This is intentionally separate from the GEMV so callers can hoist
+  // it out of every N-row worker task.
+  static void permute_activation(int m, int k, BufferA* src, BufferA* dst) {
+    const int group_count = k / 32;
+    for (int mi = 0; mi < m; ++mi) {
+      const __m512bh* src_row = reinterpret_cast<const __m512bh*>(src->get_submat(m, k, mi, 0));
+      __m512bh* dst_row = reinterpret_cast<__m512bh*>(dst->get_submat(m, k, mi, 0));
+      for (int g = 0; g < group_count; ++g) {
+        dst_row[g] = permute_activation_group(src_row[g]);
+      }
+    }
+  }
+
+  // Expand compact E8M0 exponents in vectors before entering the weight loop.
+  // This preserves the reduced DRAM traffic without putting a byte load,
+  // scalar shift and GPR-to-vector dependency on every dot product.
+  static void expand_e8_scales(const uint8_t* source, float* destination, int count) {
+    int group = 0;
+    for (; group + 16 <= count; group += 16) {
+      const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + group));
+      const __m512i exponents = _mm512_slli_epi32(_mm512_cvtepu8_epi32(packed), 23);
+      _mm512_store_ps(destination + group, _mm512_castsi512_ps(exponents));
+    }
+    for (; group < count; ++group) {
+      const uint32_t bits = static_cast<uint32_t>(source[group]) << 23;
+      std::memcpy(destination + group, &bits, sizeof(bits));
+    }
+  }
+
+  // m=1/group32 decode fast path. BufferA must already be in natural order.
+  template <bool E8_SCALE>
+  static void fp4_mat_vec_kgroup_natural_impl(int n, int k, BufferA* ba, BufferB* bb, BufferC* bc, int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+    const int group_count = k / 32;
+    assert(group_count <= K_BLOCK / 32);
+    const __m512bh* activation = reinterpret_cast<const __m512bh*>(ba->get_submat(1, k, 0, 0));
+    float* output = bc->get_submat(1, n, 0, n_start);
+    alignas(64) float scale_scratch[4][K_BLOCK / 32];
+
+    int ni = n_start;
+    for (; ni + 4 <= n_end; ni += 4) {
+      const __m128i* w0 = reinterpret_cast<const __m128i*>(bb->get_submat(n, k, ni + 0, 0));
+      const __m128i* w1 = reinterpret_cast<const __m128i*>(bb->get_submat(n, k, ni + 1, 0));
+      const __m128i* w2 = reinterpret_cast<const __m128i*>(bb->get_submat(n, k, ni + 2, 0));
+      const __m128i* w3 = reinterpret_cast<const __m128i*>(bb->get_submat(n, k, ni + 3, 0));
+      const float* s0;
+      const float* s1;
+      const float* s2;
+      const float* s3;
+      if constexpr (E8_SCALE) {
+        expand_e8_scales(bb->get_scale_e8(n, ni + 0, k, 0), scale_scratch[0], group_count);
+        expand_e8_scales(bb->get_scale_e8(n, ni + 1, k, 0), scale_scratch[1], group_count);
+        expand_e8_scales(bb->get_scale_e8(n, ni + 2, k, 0), scale_scratch[2], group_count);
+        expand_e8_scales(bb->get_scale_e8(n, ni + 3, k, 0), scale_scratch[3], group_count);
+        s0 = scale_scratch[0];
+        s1 = scale_scratch[1];
+        s2 = scale_scratch[2];
+        s3 = scale_scratch[3];
+      } else {
+        s0 = bb->get_scale(n, ni + 0, k, 0);
+        s1 = bb->get_scale(n, ni + 1, k, 0);
+        s2 = bb->get_scale(n, ni + 2, k, 0);
+        s3 = bb->get_scale(n, ni + 3, k, 0);
+      }
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+      __m512 acc2 = _mm512_setzero_ps();
+      __m512 acc3 = _mm512_setzero_ps();
+      auto accumulate_group = [&](int g) __attribute__((always_inline)) {
+        const __m512bh a = activation[g];
+        const __m512bh d0 = (__m512bh)mxfp4_to_bf16_32_natural(w0[g]);
+        const __m512bh d1 = (__m512bh)mxfp4_to_bf16_32_natural(w1[g]);
+        const __m512bh d2 = (__m512bh)mxfp4_to_bf16_32_natural(w2[g]);
+        const __m512bh d3 = (__m512bh)mxfp4_to_bf16_32_natural(w3[g]);
+        acc0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]), _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d0), acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]), _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d1), acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]), _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d2), acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]), _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d3), acc3);
+      };
+      auto prefetch_group = [&](int g) __attribute__((always_inline)) {
+        if constexpr (E8_SCALE) {
+          constexpr int prefetch_groups = 40;
+          const int future = g + prefetch_groups;
+          if (future < group_count) {
+            _mm_prefetch(reinterpret_cast<const char*>(w0 + future), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(w1 + future), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(w2 + future), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(w3 + future), _MM_HINT_T0);
+          }
+        }
+      };
+      int g = 0;
+      for (; g + 3 < group_count; g += 4) {
+        prefetch_group(g);
+        accumulate_group(g);
+        accumulate_group(g + 1);
+        accumulate_group(g + 2);
+        accumulate_group(g + 3);
+      }
+      for (; g < group_count; ++g) {
+        prefetch_group(g);
+        accumulate_group(g);
+      }
+      reduce4(acc0, acc1, acc2, acc3, output + (ni - n_start));
+    }
+
+    for (; ni < n_end; ++ni) {
+      const __m128i* w = reinterpret_cast<const __m128i*>(bb->get_submat(n, k, ni, 0));
+      const float* scales;
+      if constexpr (E8_SCALE) {
+        expand_e8_scales(bb->get_scale_e8(n, ni, k, 0), scale_scratch[0], group_count);
+        scales = scale_scratch[0];
+      } else {
+        scales = bb->get_scale(n, ni, k, 0);
+      }
+      __m512 acc = _mm512_setzero_ps();
+      auto accumulate_group = [&](int g) __attribute__((always_inline)) {
+        const __m512bh d = (__m512bh)mxfp4_to_bf16_32_natural(w[g]);
+        acc = _mm512_fmadd_ps(_mm512_set1_ps(scales[g]), _mm512_dpbf16_ps(_mm512_setzero_ps(), activation[g], d), acc);
+      };
+      auto prefetch_group = [&](int g) __attribute__((always_inline)) {
+        if constexpr (E8_SCALE) {
+          constexpr int prefetch_groups = 40;
+          const int future = g + prefetch_groups;
+          if (future < group_count) _mm_prefetch(reinterpret_cast<const char*>(w + future), _MM_HINT_T0);
+        }
+      };
+      int g = 0;
+      for (; g + 3 < group_count; g += 4) {
+        prefetch_group(g);
+        accumulate_group(g);
+        accumulate_group(g + 1);
+        accumulate_group(g + 2);
+        accumulate_group(g + 3);
+      }
+      for (; g < group_count; ++g) {
+        prefetch_group(g);
+        accumulate_group(g);
+      }
+      output[ni - n_start] = _mm512_reduce_add_ps(acc);
+    }
+  }
+
+  static void fp4_mat_vec_kgroup_natural(int n, int k, BufferA* ba, BufferB* bb, BufferC* bc, int ith, int nth) {
+    if (bb->scale_e8_valid) {
+      fp4_mat_vec_kgroup_natural_impl<true>(n, k, ba, bb, bc, ith, nth);
+    } else {
+      fp4_mat_vec_kgroup_natural_impl<false>(n, k, ba, bb, bc, ith, nth);
+    }
+  }
+
+#endif
 
   // mat-mat: 4×4 register tile (M_TILE=4, N_TILE=4 → 16 累加器)。
   // 每 K-group 解码 4 行 N 一次, 被 4 个 token 共享 → PSHUFB 解码开销 / 4。
@@ -337,6 +654,12 @@ inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferC> bc, int ith, int nth) {
+#if defined(__AVX512BF16__)
+  if (m == 1 && k_group_size == 32 && k % 32 == 0 && ba->natural_order) {
+    GemmKernel224MXFP4SmallKGroup::fp4_mat_vec_kgroup_natural(n, k, ba.get(), bb.get(), bc.get(), ith, nth);
+    return;
+  }
+#endif
   GemmKernel224MXFP4SmallKGroup::fp4_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
@@ -362,6 +685,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
   using Base::gate_bb_;
   using Base::gate_bc_;
   using Base::gate_up_ba_;
+  using Base::m_local_gate_output_ptr_;
   using Base::m_local_num_;
   using Base::tp_part_idx;
   using Base::up_bb_;
@@ -428,6 +752,52 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
     }
   }
 
+  void prepare_decode_gate_input(int expert_idx, int qlen, const void* input) {
+    if (qlen == 1 && config_.quant_config.group_size == 32 && config_.hidden_size % 32 == 0) {
+      gate_up_ba_[expert_idx]->from_mat_natural(qlen, (ggml_bf16_t*)input, 0, 1);
+    } else {
+      gate_up_ba_[expert_idx]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
+    }
+  }
+
+  void prepare_decode_down_input(int expert_idx, int qlen) {
+    if (qlen != 1 || config_.quant_config.group_size != 32 || config_.intermediate_size % 32 != 0) {
+      Base::prepare_decode_down_input(expert_idx, qlen);
+      return;
+    }
+    assert(down_ba_[expert_idx]->natural_order);
+  }
+
+  void apply_decode_activation(int activated_expert, int nth, int qlen) {
+#if defined(__AVX512BF16__)
+    if (qlen != 1 || config_.quant_config.group_size != 32 || config_.intermediate_size % 32 != 0) {
+      Base::apply_decode_activation(activated_expert, nth, qlen);
+      return;
+    }
+    for (int task_id = 0; task_id < nth * activated_expert; ++task_id) {
+      const int expert_idx = this->m_expert_id_map_[task_id / nth];
+      const int ith = task_id % nth;
+      auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
+      const ggml_bf16_t* gate = m_local_gate_output_ptr_[expert_idx];
+      const ggml_bf16_t* up = this->m_local_up_output_ptr_[expert_idx];
+      ggml_bf16_t* destination = down_ba_[expert_idx]->get_submat(1, config_.intermediate_size, 0, n_start);
+      for (int j = n_start; j < n_end; j += 32) {
+        __m512 gate0, gate1, up0, up1;
+        avx512_32xbf16_to_32xfp32((__m512i*)(gate + j), &gate0, &gate1);
+        avx512_32xbf16_to_32xfp32((__m512i*)(up + j), &up0, &up1);
+        const __m512 result0 = amx::act_fn(gate0, up0, config_.swiglu_limit, config_.swiglu_alpha);
+        const __m512 result1 = amx::act_fn(gate1, up1, config_.swiglu_limit, config_.swiglu_alpha);
+        const __m512bh logical = _mm512_cvtne2ps_pbh(result1, result0);
+        const __m512bh natural = T::permute_activation_group(logical);
+        _mm512_storeu_si512((void*)(destination + (j - n_start)), (__m512i)natural);
+      }
+      down_ba_[expert_idx]->natural_order = true;
+    }
+#else
+    Base::apply_decode_activation(activated_expert, nth, qlen);
+#endif
+  }
+
   void load_weights() {
     auto& quant_config = config_.quant_config;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
@@ -480,6 +850,9 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
                           (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
           convert_or_copy(down_bb_[expert_idx]->d,
                           (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
+          gate_bb_[expert_idx]->finalize_scale_e8();
+          up_bb_[expert_idx]->finalize_scale_e8();
+          down_bb_[expert_idx]->finalize_scale_e8();
         },
         nullptr);
   }
@@ -495,20 +868,6 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
       s += 64;
     }
     if (bytes -= chunks * 64) std::memcpy(d, s, bytes);
-  }
-
-  static inline void fast_fp32_to_bf16(ggml_bf16_t* __restrict dst, const float* __restrict src, size_t count) {
-    size_t i = 0;
-    for (; i + 32 <= count; i += 32) {
-      __m512 v0 = _mm512_loadu_ps(src + i);
-      __m512 v1 = _mm512_loadu_ps(src + i + 16);
-      __m512i i0 = _mm512_srli_epi32(_mm512_castps_si512(v0), 16);
-      __m512i i1 = _mm512_srli_epi32(_mm512_castps_si512(v1), 16);
-      __m512i packed = _mm512_packus_epi32(i0, i1);
-      __m512i permuted = _mm512_permutexvar_epi64(_mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0), packed);
-      _mm512_storeu_si512((__m512i*)(dst + i), permuted);
-    }
-    for (; i < count; i++) dst[i] = ggml_fp32_to_bf16(src[i]);
   }
 
   void write_weights_to_buffer(int gpu_tp_count, int cpu_tp_count, int expert_id, const GeneralMOEConfig& full_config,
@@ -583,14 +942,14 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
               for (size_t col = col_start; col < col_end; col++) {
                 fast_memcpy(w2_weight_dst + col * gpu_weight_stride + gpu_weight_slice_offset,
                             (uint8_t*)down_bb_[expert_id]->b + col * weight_per_col, weight_per_col);
-                fast_fp32_to_bf16(w2_scale_dst + col * gpu_scale_stride + gpu_scale_slice_offset,
-                                  down_bb_[expert_id]->d + col * scale_per_col, scale_per_col);
+                down_bb_[expert_id]->copy_scale_to_bf16(w2_scale_dst + col * gpu_scale_stride + gpu_scale_slice_offset,
+                                                        col * scale_per_col, scale_per_col);
               }
             } else if (task_id == NUM_WEIGHT_TASKS * 2 + num_down_tasks) {
-              fast_fp32_to_bf16(w13_scale_dst + offset_in_gpu_scale, gate_bb_[expert_id]->d, cpu_tp_scale_elem_count);
+              gate_bb_[expert_id]->copy_scale_to_bf16(w13_scale_dst + offset_in_gpu_scale, 0, cpu_tp_scale_elem_count);
             } else {
-              fast_fp32_to_bf16(w13_scale_dst + offset_in_gpu_scale + gpu_tp_scale_elem_count, up_bb_[expert_id]->d,
-                                cpu_tp_scale_elem_count);
+              up_bb_[expert_id]->copy_scale_to_bf16(w13_scale_dst + offset_in_gpu_scale + gpu_tp_scale_elem_count, 0,
+                                                    cpu_tp_scale_elem_count);
             }
           },
           nullptr);
@@ -659,14 +1018,14 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
 
                 fast_memcpy(w2_weight_dst + col * weight_per_gpu_col,
                             (uint8_t*)down_bb_[expert_id]->b + col_offset_weight, weight_per_gpu_col);
-                fast_fp32_to_bf16(w2_scale_dst + col * scale_per_gpu_col, down_bb_[expert_id]->d + col_offset_scale,
-                                  scale_per_gpu_col);
+                down_bb_[expert_id]->copy_scale_to_bf16(w2_scale_dst + col * scale_per_gpu_col, col_offset_scale,
+                                                        scale_per_gpu_col);
               }
             } else if (task_type == NUM_WEIGHT_TASKS * 2 + num_down_tasks) {
-              fast_fp32_to_bf16(w13_scale_dst, gate_bb_[expert_id]->d + cpu_offset_scale, data_per_gpu_tp_scale);
+              gate_bb_[expert_id]->copy_scale_to_bf16(w13_scale_dst, cpu_offset_scale, data_per_gpu_tp_scale);
             } else {
-              fast_fp32_to_bf16(w13_scale_dst + gpu_tp_scale_elem_count, up_bb_[expert_id]->d + cpu_offset_scale,
-                                data_per_gpu_tp_scale);
+              up_bb_[expert_id]->copy_scale_to_bf16(w13_scale_dst + gpu_tp_scale_elem_count, cpu_offset_scale,
+                                                    data_per_gpu_tp_scale);
             }
           },
           nullptr);
