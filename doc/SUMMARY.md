@@ -7,6 +7,8 @@
 
 # Tutorial
 - [kt-sft part](en/SFT/README.md)
+  - [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](en/SFT/KTransformers-Fine-Tuning_Cookbook.md)
+  - [KTransformers × LlamaFactory MoE 微调 Cookbook](zh/KTransformers-Fine-Tuning_Cookbook_zh.md)
   - [KT-FT Fine-Tuning and Inference Loop](en/SFT/Qwen3.5-SGLang-LoRA-Serving.md)
   - [KT-FT 微调推理闭环](zh/Qwen3.5-SGLang-LoRA-Serving_zh.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
@@ -21,6 +23,8 @@
 - [Makefile Usage](en/makefile_usage.md) -->
 - [kt-kernel part](en/kt-kernel/README.md)
   - [kt-cli](en/kt-kernel/kt-cli.md)
+  - [GLM-5.3-flash Tutorial](en/kt-kernel/GLM-5.3-Flash-Tutorial.md)
+  - [GLM-5.3-flash 教程（中文）](zh/GLM-5.3-Flash-Tutorial_zh.md)
   - [AVX2 Backend Tutorial](en/kt-kernel/AVX2-Tutorial.md)
   - [AVX2 后端教程（中文）](zh/AVX2-Tutorial_zh.md)
   - [SYCL GPTQ INT4 后端教程（中文）](zh/SYCL-GPTQ-INT4-Tutorial_zh.md)

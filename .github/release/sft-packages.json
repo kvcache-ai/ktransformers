@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "packages": {
+    "accelerate-kt": {
+      "repository": "kvcache-ai/accelerate",
+      "ref": "ea632f0c4dc1a56b2f1540e93dfcf4e66f3da578",
+      "version": "1.14.0.post2"
+    },
+    "transformers-kt": {
+      "repository": "kvcache-ai/transformers",
+      "ref": "3f97700f4b1b2ebed23ba6c41bed95c6f5cb65e5",
+      "version": "5.6.0.post3"
+    }
+  }
+}
