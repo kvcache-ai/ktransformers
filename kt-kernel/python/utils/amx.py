@@ -17,6 +17,7 @@ from .loader import (
     BF16SafeTensorLoader,
     GPTQSafeTensorLoader,
     MXFP4SafeTensorLoader,
+    NVFP4SafeTensorLoader,
     MXFP8SafeTensorLoader,
 )
 from kt_kernel_ext.moe import MOEConfig
@@ -625,6 +626,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "SYCL_GPTQ_INT4 backend not available. Rebuild kt_kernel_ext with "
                 "CPUINFER_USE_SYCL=1 using a SYCL compiler such as icpx."
             )
+        if method == "NVFP4" and not _HAS_AVX2_MXFP4_SUPPORT:
+            raise RuntimeError(
+                "NVFP4 needs the AVX2 FP4 backend (AVX2MXFP4_MOE), which is not compiled in."
+            )
         if method == "MXFP4" and not (_HAS_MXFP4_SUPPORT or _HAS_AVX2_MXFP4_SUPPORT):
             raise RuntimeError(
                 "MXFP4 backend not available. Required ISA (any one of):\n"
@@ -683,6 +688,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
             return GPTQSafeTensorLoader(weight_path)
         elif method == "MXFP4":
             return MXFP4SafeTensorLoader(weight_path)
+        elif method == "NVFP4":
+            return NVFP4SafeTensorLoader(weight_path)
         elif method == "MXFP8":
             return MXFP8SafeTensorLoader(weight_path)
         else:
@@ -785,6 +792,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 # ue8m0 is losslessly representable in bf16 (8-bit exponent, 0 mantissa);
                 # the loader has already done that conversion.
                 assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for MXFP4"
+            elif self.method == "NVFP4":
+                # e4m3 block scale x per-tensor global, folded to bf16 by the loader.
+                assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for NVFP4"
             elif self.method == "MXFP8":
                 # ue8m0 scales stay as uint8; C++ convert_ue8m0_to_fp32 handles conversion.
                 assert self.gate_scales[0].dtype == torch.uint8, "Expected uint8 (ue8m0) scales for MXFP8"
@@ -875,6 +885,35 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 raise RuntimeError(
                     "No MXFP4 backend available after runtime selection. "
                     "Compile with AVX512_BF16 (AMXFP4_KGroup_MOE) or AVX2 (AVX2MXFP4_MOE)."
+                )
+            self.moe = backend_cls(moe_config)
+        elif self.method == "NVFP4":
+            # NVFP4: same E2M1 nibble packing as MXFP4, but a per-16 block scale
+            # in E4M3 times a per-tensor global scale. The loader has already
+            # folded both into one bf16 scale per group, so the FP4 kernel runs
+            # this unchanged -- only group_size differs (16 vs 32).
+            group_size = self.hidden_size // self.gate_scales[0].shape[1]
+            if group_size != 16:
+                raise RuntimeError(
+                    f"NVFP4 expects group_size 16, derived {group_size} from "
+                    f"hidden_size={self.hidden_size} and scale shape "
+                    f"{tuple(self.gate_scales[0].shape)}."
+                )
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = group_size
+            moe_config.quant_config.zero_point = False
+            backend_cls = _select_mxfp4_backend()
+            if backend_cls is None:
+                raise RuntimeError(
+                    "No FP4 backend available for NVFP4 after runtime selection. "
+                    "Compile with AVX512_BF16 (AMXFP4_KGroup_MOE) or AVX2 (AVX2MXFP4_MOE)."
+                )
+            if backend_cls is not AVX2MXFP4_MOE:
+                # Only the AVX2 kernel has the group-16 path; the AMX FP4 kernel
+                # is built around a 32-value k-group.
+                raise RuntimeError(
+                    "NVFP4 (group_size 16) currently requires the AVX2 FP4 backend. "
+                    "Set KT_MXFP4_BACKEND=avx2, or extend the AMX kernel to group-16."
                 )
             self.moe = backend_cls(moe_config)
         elif self.method == "MXFP8":
