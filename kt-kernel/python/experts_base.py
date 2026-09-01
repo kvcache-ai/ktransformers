@@ -92,9 +92,21 @@ class KExpertsCPUBuffer:
 
         pin_memory = True
 
+        # A CUDA graph captured around submit_forward bakes the pinned host
+        # pointers of the returned buffer into the graph, so whatever is handed
+        # out here during a capture has to stay alive for as long as the graph
+        # can be replayed.  capture_bs alone does not cover that: it only holds
+        # the batch sizes the decode graph runner registered, so a capture
+        # driven by any other code path lands in the single temp slot, gets
+        # evicted by the next differently sized request, and the replayed graph
+        # then reads freed pinned memory.
+        capturing = torch.cuda.is_current_stream_capturing()
+
         if batch_size in cls.capture_buffers:
             return cls.capture_buffers[batch_size]
         if batch_size == cls.temp_bs:
+            if capturing:
+                cls.capture_buffers[batch_size] = cls.temp_buffer
             return cls.temp_buffer
 
         input_tensor_cpu = [
@@ -135,7 +147,7 @@ class KExpertsCPUBuffer:
             bsz_tensor_cpu,
             output_gpu,
         )
-        if batch_size in cls.capture_bs:
+        if batch_size in cls.capture_bs or capturing:
             cls.capture_buffers[batch_size] = cur_buffer
         cls.temp_bs = batch_size
         cls.temp_buffer = cur_buffer
