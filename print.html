@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-61c5991f.js";
+            window.path_to_searchindex_js = "searchindex-8e125c1e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78d73750.js"></script>
@@ -200,6 +200,7 @@
 <li><strong>Aug 26, 2026</strong>: Added native support for <strong>GLM-5.3-flash</strong>, bringing 1M-token context and multimodal input to consumer GPUs. (<a href="doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
 <li><strong>Aug 17, 2026</strong>: LoRA fine-tuning now supports compatible AVX512 x86 CPUs, including AMD servers, without requiring AMX. (<a href="https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0">v0.7.0 Release Notes</a>)</li>
+<li><strong>Aug 16, 2026</strong>: DeepSeek-V4-Flash on a single Ascend NPU with CPU expert offload. (<a href="doc/en/DeepSeek-V4-Flash_tutorial_for_Ascend_NPU.html">Tutorial</a>)</li>
 <li><strong>Aug 5, 2026</strong>: Introduced native block-FP8 LoRA fine-tuning, loading FP8 routed-expert weights directly from the checkpoint without materializing a complete BF16 copy. (<a href="https://github.com/kvcache-ai/ktransformers/pull/2141">PR #2141</a>)</li>
 <li><strong>July 23, 2026</strong>: Added end-to-end BF16 full-parameter fine-tuning for MoE models, including complete checkpoint saving. (<a href="https://github.com/kvcache-ai/ktransformers/pull/2094">PR #2094</a>)</li>
 <li><strong>June 21, 2026</strong>: MiniMax-M3 Day0 Support! (<a href="doc/en/kt-kernel/MiniMax-M3-Tutorial.html">Tutorial</a>)</li>
