@@ -30,6 +30,8 @@ ktransformers/ktransformers_ext/cuda_musa/
 test_prompt.txt
 csrc/demo
 build*
+# ... but the Ascend deployment helpers are sources, not build output.
+!kt-kernel/tools/ascend_dsv4/build_*.sh
 CMakeFiles/
 kvc2/
 sched/
