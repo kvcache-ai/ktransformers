@@ -17,6 +17,9 @@ compile_commands.json
 ktransformers/server/local_store/
 ktransformers/server_test1.db
 *.patch
+# ...but kt-kernel's third-party patch series is tracked on purpose: the build
+# applies it to third_party/llama.cpp at configure time.
+!kt-kernel/third_party_patches/**/*.patch
 img/
 tmp*.txt
 test.txt
