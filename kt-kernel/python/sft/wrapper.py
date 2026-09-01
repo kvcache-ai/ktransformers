@@ -774,10 +774,16 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         chunked_prefill_size = getattr(cfg, "kt_model_max_length", None)
         if chunked_prefill_size is None:
             chunked_prefill_size = getattr(model.config, "max_position_embeddings", 4096)
+        # kt_model_max_length is a per-sequence bound (LLaMA-Factory populates it from
+        # cutoff_len), but the trainer flattens a batch before the kernel sees it, so each
+        # rank's qlen is batch_size * seq_len.  Scale by the per-device batch size or any
+        # per_device_train_batch_size > 1 trips the qlen check in
+        # _validate_forward_inputs.
+        train_batch_size = int(getattr(cfg, "kt_train_batch_size", 1) or 1)
         # Rank 0 receives the concatenation of every rank's local rows.  Model
         # configs are homogeneous across ranks, so the sum of local maxima is
         # the per-rank capacity multiplied by world size.
-        rank0_chunked_prefill_size = int(chunked_prefill_size) * distributed_world_size
+        rank0_chunked_prefill_size = int(chunked_prefill_size) * distributed_world_size * train_batch_size
 
         # Only rank 0 creates KTMoEWrapper and loads weights
         construct_error = None
@@ -1039,6 +1045,7 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_lora_alpha=configured_lora_alpha,
         kt_lora_dropout=configured_lora_dropout,
         kt_model_max_length=getattr(model_args, "model_max_length", None),
+        kt_train_batch_size=getattr(model_args, "kt_train_batch_size", None),
         kt_train_mode=kt_train_mode,
         kt_activation_policy=getattr(model_args, "activation_policy", None),
     )

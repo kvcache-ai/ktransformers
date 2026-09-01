@@ -264,6 +264,9 @@ class KTConfig:
     # Cache
     kt_max_cache_depth: int | None = None
     kt_model_max_length: int | None = None
+    # Per-device train batch size. The trainer flattens a batch into a single qlen, so the
+    # prefill buffer has to cover batch * seq_len, not the per-sequence model_max_length.
+    kt_train_batch_size: int | None = None
     kt_activation_policy: KTActivationPolicy | Mapping[str, str] | None = None
 
     # LoRA
@@ -528,6 +531,8 @@ class KTConfig:
             self.kt_full_weight_grad = self.kt_train_mode in ("full", "hybrid")
         if self.kt_model_max_length is None:
             self.kt_model_max_length = _env_int("ACCELERATE_KT_MODEL_MAX_LENGTH", None)
+        if self.kt_train_batch_size is None:
+            self.kt_train_batch_size = _env_int("ACCELERATE_KT_TRAIN_BATCH_SIZE", 1)
         if self.kt_skip_expert_loading is None:
             if "ACCELERATE_KT_SKIP_EXPERT_LOADING" in os.environ:
                 self.kt_skip_expert_loading = _env_bool("ACCELERATE_KT_SKIP_EXPERT_LOADING", True)
