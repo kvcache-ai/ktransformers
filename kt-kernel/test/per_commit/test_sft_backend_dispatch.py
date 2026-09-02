@@ -32,18 +32,25 @@ def _install_fake_runtime(
     has_fp8_sft: bool = False,
     fp8_kernel: str = backend.FP8_KERNEL,
     fp8_layout: str = backend.FP8_WEIGHT_LAYOUT,
+    has_rawint4_sft: bool = False,
+    rawint4_kernel: str = backend.RAWINT4_KERNEL,
+    rawint4_layout: str = backend.RAWINT4_WEIGHT_LAYOUT,
 ):
     moe = SimpleNamespace()
     if has_int8_sft:
         moe.AMXInt8_SFT_MOE = object()
     if has_fp8_sft:
         moe.AMXFP8_SFT_MOE = object()
+    if has_rawint4_sft:
+        moe.AMXInt4_KGroup_SFT_MOE = object()
     extension = SimpleNamespace(
         __cpu_variant__=variant,
         __int8_kernel__=kernel,
         __int8_weight_layout__=layout,
         __fp8_kernel__=fp8_kernel,
         __fp8_weight_layout__=fp8_layout,
+        __rawint4_kernel__=rawint4_kernel,
+        __rawint4_weight_layout__=rawint4_layout,
         moe=moe,
     )
     fake_package = SimpleNamespace(
@@ -177,7 +184,102 @@ def test_fp8_runtime_rejects_weight_layout_mismatch(monkeypatch):
 
 @pytest.mark.parametrize("configured", ["auto", "FP8", "fp8"])
 def test_fp8_backend_normalization(configured):
-    assert backend.normalize_sft_backend(
-        configured,
-        expert_weight_format="fp8",
-    ) == backend.FP8_BACKEND
+    assert (
+        backend.normalize_sft_backend(
+            configured,
+            expert_weight_format="fp8",
+        )
+        == backend.FP8_BACKEND
+    )
+
+
+@pytest.mark.parametrize("configured", ["auto", "RAWINT4", "rawint4"])
+def test_rawint4_backend_normalization(configured):
+    assert (
+        backend.normalize_sft_backend(
+            configured,
+            expert_weight_format="rawint4",
+        )
+        == backend.RAWINT4_BACKEND
+    )
+
+
+def test_rawint4_legacy_backend_alias_warns():
+    with pytest.warns(FutureWarning, match="deprecated"):
+        normalized = backend.normalize_sft_backend(
+            "AMXINT4_KGroup",
+            expert_weight_format="rawint4",
+        )
+    assert normalized == backend.RAWINT4_BACKEND
+
+
+def test_rawint4_runtime_reports_exact_contract(monkeypatch):
+    _install_fake_runtime(
+        monkeypatch,
+        variant="amx",
+        kernel="amx-int8",
+        has_rawint4_sft=True,
+    )
+
+    runtime = backend.get_rawint4_runtime()
+
+    assert runtime.cpu_variant == "amx"
+    assert runtime.kernel == backend.RAWINT4_KERNEL
+    assert runtime.weight_layout == backend.RAWINT4_WEIGHT_LAYOUT
+
+
+def test_rawint4_runtime_rejects_missing_symbol(monkeypatch):
+    _install_fake_runtime(
+        monkeypatch,
+        variant="amx",
+        kernel="amx-int8",
+        has_rawint4_sft=False,
+    )
+    with pytest.raises(RuntimeError, match="does not provide RAWINT4 SFT"):
+        backend.get_rawint4_runtime()
+
+
+def _sap4_rawint4_quantization_config():
+    return {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "quantization_status": "compressed",
+        "config_groups": {
+            "group_0": {
+                "input_activations": None,
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "actorder": None,
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": 32,
+                    "num_bits": 4,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "group",
+                    "symmetric": True,
+                    "type": "int",
+                },
+            }
+        },
+        "ignore": ["lm_head"],
+    }
+
+
+def test_rawint4_checkpoint_contract_accepts_real_metadata_shape():
+    contract = backend.get_rawint4_checkpoint_contract(
+        SimpleNamespace(text_config=SimpleNamespace(quantization_config=_sap4_rawint4_quantization_config()))
+    )
+    assert contract.bits == 4
+    assert contract.group_size == 32
+    assert contract.signed is True
+    assert contract.zero_point is False
+
+
+@pytest.mark.parametrize("zero_point", [False, True, None, 0])
+def test_rawint4_checkpoint_contract_rejects_explicit_zero_point(zero_point):
+    quantization_config = _sap4_rawint4_quantization_config()
+    quantization_config["config_groups"]["group_0"]["weights"]["zero_point"] = zero_point
+    with pytest.raises(ValueError, match="must not declare zero-point metadata"):
+        backend.get_rawint4_checkpoint_contract({"quantization_config": quantization_config})

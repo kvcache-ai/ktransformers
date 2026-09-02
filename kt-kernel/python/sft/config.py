@@ -23,7 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from .backend import FP8_BACKEND, INT8_BACKEND, normalize_sft_backend
+from .backend import (
+    FP8_BACKEND,
+    INT8_BACKEND,
+    RAWINT4_BACKEND,
+    normalize_sft_backend,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -39,13 +44,15 @@ _KNOWN_SFT_BACKENDS = {
     "amxint8",
     "amxfp8",
     "amxint4",
+    "rawint4",
+    "amxint4_kgroup",
     "amxbf16_skiplora",
     "amxint8_skiplora",
     "amxint4_skiplora",
 }
 
 ActivationRetention = Literal["retain", "recompute"]
-ExpertWeightFormat = Literal["bf16", "int8", "fp8"]
+ExpertWeightFormat = Literal["bf16", "int8", "fp8", "rawint4"]
 WeightLifecycle = Literal["persistent", "ephemeral"]
 
 
@@ -254,11 +261,15 @@ class KTConfig:
     kt_non_expert_weight_path: str | None = None
     kt_expert_weight_format: ExpertWeightFormat | str | None = None
     kt_weight_lifecycle: WeightLifecycle | str | None = None
-    kt_expert_checkpoint_path: str | None = None  # HF expert checkpoint or KT Full checkpoint directory
+    kt_expert_checkpoint_path: str | None = (
+        None  # HF expert checkpoint or KT Full checkpoint directory
+    )
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
-    kt_share_backward_bb: bool | None = None  # default True — always saves memory
-    kt_share_cache_pool: bool | None = None  # auto-set by trainer_config_process, not user-facing
+    kt_share_backward_bb: bool | None = None  # defaults off for RAWINT4, on otherwise
+    kt_share_cache_pool: bool | None = (
+        None  # auto-set by trainer_config_process, not user-facing
+    )
     kt_force_fused_expert_lora: bool | None = None
 
     # Cache
@@ -273,7 +284,9 @@ class KTConfig:
 
     # Training mode
     kt_train_mode: str | None = None  # "lora" | "full" | "hybrid"
-    kt_full_weight_grad: bool | None = None  # auto-set True when train_mode in (full, hybrid)
+    kt_full_weight_grad: bool | None = (
+        None  # auto-set True when train_mode in (full, hybrid)
+    )
 
     # LoRA Experts (GPU-side extra experts)
     kt_use_lora_experts: bool | None = None
@@ -368,7 +381,9 @@ class KTConfig:
     @classmethod
     def _validated_mapping(cls, obj: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(obj)
-        invalid_keys = sorted(repr(name) for name in payload if not isinstance(name, str))
+        invalid_keys = sorted(
+            repr(name) for name in payload if not isinstance(name, str)
+        )
         if invalid_keys:
             raise TypeError(f"KTConfig field names must be strings: {invalid_keys}")
         if "enabled" in payload:
@@ -390,10 +405,13 @@ class KTConfig:
                 "ACCELERATE_KT_EXPERT_WEIGHT_FORMAT"
             )
         if self.kt_expert_weight_format is not None:
-            self.kt_expert_weight_format = str(self.kt_expert_weight_format).strip().lower()
-            if self.kt_expert_weight_format not in {"bf16", "int8", "fp8"}:
+            self.kt_expert_weight_format = (
+                str(self.kt_expert_weight_format).strip().lower()
+            )
+            if self.kt_expert_weight_format not in {"bf16", "int8", "fp8", "rawint4"}:
                 raise ValueError(
-                    "kt_expert_weight_format must be one of ['bf16', 'fp8', 'int8'], "
+                    "kt_expert_weight_format must be one of "
+                    "['bf16', 'fp8', 'int8', 'rawint4'], "
                     f"got {self.kt_expert_weight_format!r}"
                 )
         if self.kt_weight_lifecycle is None:
@@ -412,7 +430,9 @@ class KTConfig:
             forwarded_policy is not None and forwarded_policy.strip() != ""
         )
         legacy_reuse = os.environ.get(_LEGACY_REUSE_ENV)
-        legacy_reuse_is_explicit = legacy_reuse is not None and legacy_reuse.strip() != ""
+        legacy_reuse_is_explicit = (
+            legacy_reuse is not None and legacy_reuse.strip() != ""
+        )
         if self.kt_activation_policy is not None and forwarded_policy_is_explicit:
             raise ValueError(
                 f"kt_activation_policy conflicts with {_ACTIVATION_POLICY_ENV}; "
@@ -434,7 +454,9 @@ class KTConfig:
                     forwarded_policy
                 )
             elif legacy_reuse_is_explicit:
-                self.kt_activation_policy = _legacy_activation_policy_from_env(legacy_reuse)
+                self.kt_activation_policy = _legacy_activation_policy_from_env(
+                    legacy_reuse
+                )
             else:
                 self.kt_activation_policy = KTActivationPolicy()
         else:
@@ -444,7 +466,7 @@ class KTConfig:
         if self.kt_backend is None:
             if env_backend:
                 self.kt_backend = env_backend
-            elif self.kt_expert_weight_format in {"int8", "fp8"}:
+            elif self.kt_expert_weight_format in {"int8", "fp8", "rawint4"}:
                 self.kt_backend = "auto"
             else:
                 self.kt_backend = "AMXBF16"
@@ -465,12 +487,15 @@ class KTConfig:
                 self.kt_expert_weight_format = "int8"
             elif backend_lower == FP8_BACKEND.lower():
                 self.kt_expert_weight_format = "fp8"
+            elif backend_lower == RAWINT4_BACKEND.lower():
+                self.kt_expert_weight_format = "rawint4"
             elif backend_lower == "amxbf16":
                 self.kt_expert_weight_format = "bf16"
         expected_backend = {
             "bf16": "amxbf16",
             "int8": INT8_BACKEND.lower(),
             "fp8": FP8_BACKEND.lower(),
+            "rawint4": RAWINT4_BACKEND.lower(),
         }.get(self.kt_expert_weight_format)
         if expected_backend is not None and backend_lower != expected_backend:
             source = "kt_backend" if explicit_backend else "ACCELERATE_KT_BACKEND"
@@ -491,13 +516,18 @@ class KTConfig:
                 "ACCELERATE_KT_NON_EXPERT_WEIGHT_PATH", None
             )
         if self.kt_expert_checkpoint_path is None:
-            self.kt_expert_checkpoint_path = os.environ.get("ACCELERATE_KT_EXPERT_CHECKPOINT_PATH", None)
+            self.kt_expert_checkpoint_path = os.environ.get(
+                "ACCELERATE_KT_EXPERT_CHECKPOINT_PATH", None
+            )
         if self.kt_num_gpu_experts is None:
             self.kt_num_gpu_experts = _env_int("ACCELERATE_KT_NUM_GPU_EXPERTS", 0)
         if self.kt_max_cache_depth is None:
             self.kt_max_cache_depth = _env_int("ACCELERATE_KT_MAX_CACHE_DEPTH", 2)
         if self.kt_share_backward_bb is None:
-            self.kt_share_backward_bb = _env_bool("ACCELERATE_KT_SHARE_BACKWARD_BB", True)
+            self.kt_share_backward_bb = _env_bool(
+                "ACCELERATE_KT_SHARE_BACKWARD_BB",
+                self.kt_expert_weight_format != "rawint4",
+            )
         if self.kt_share_cache_pool is None:
             self.kt_share_cache_pool = False
         if self.kt_force_fused_expert_lora is None:
@@ -505,11 +535,15 @@ class KTConfig:
                 "ACCELERATE_KT_FORCE_FUSED_EXPERT_LORA", False
             )
         if self.kt_use_lora_experts is None:
-            self.kt_use_lora_experts = _env_bool("ACCELERATE_KT_USE_LORA_EXPERTS", False)
+            self.kt_use_lora_experts = _env_bool(
+                "ACCELERATE_KT_USE_LORA_EXPERTS", False
+            )
         if self.kt_lora_expert_num is None:
             self.kt_lora_expert_num = _env_int("ACCELERATE_KT_LORA_EXPERT_NUM", None)
         if self.kt_lora_expert_intermediate_size is None:
-            self.kt_lora_expert_intermediate_size = _env_int("ACCELERATE_KT_LORA_EXPERT_INTERMEDIATE_SIZE", None)
+            self.kt_lora_expert_intermediate_size = _env_int(
+                "ACCELERATE_KT_LORA_EXPERT_INTERMEDIATE_SIZE", None
+            )
         if self.kt_lora_rank is None:
             self.kt_lora_rank = _env_int("ACCELERATE_KT_LORA_RANK", None)
         if self.kt_lora_alpha is None:
@@ -530,7 +564,9 @@ class KTConfig:
             self.kt_model_max_length = _env_int("ACCELERATE_KT_MODEL_MAX_LENGTH", None)
         if self.kt_skip_expert_loading is None:
             if "ACCELERATE_KT_SKIP_EXPERT_LOADING" in os.environ:
-                self.kt_skip_expert_loading = _env_bool("ACCELERATE_KT_SKIP_EXPERT_LOADING", True)
+                self.kt_skip_expert_loading = _env_bool(
+                    "ACCELERATE_KT_SKIP_EXPERT_LOADING", True
+                )
 
         if self.kt_non_expert_weight_path and self.kt_expert_weight_format != "int8":
             raise ValueError(
@@ -584,6 +620,58 @@ class KTConfig:
                 raise ValueError("FP8 SFT requires kt_share_backward_bb=true")
             if self.kt_weight_lifecycle != "persistent":
                 raise ValueError("FP8 SFT requires kt_weight_lifecycle='persistent'")
+        if self.kt_expert_weight_format == "rawint4":
+            if str(self.kt_backend).lower() != RAWINT4_BACKEND.lower():
+                raise ValueError(
+                    "RAWINT4 SFT requires kt_backend='auto' or kt_backend='RAWINT4'"
+                )
+            if self.kt_train_mode != "lora" or bool(self.kt_full_weight_grad):
+                raise ValueError(
+                    "RAWINT4 SFT supports frozen-base LoRA only; Full and Hybrid are not supported"
+                )
+            if int(self.kt_lora_rank or 0) != 8:
+                raise ValueError("RAWINT4 SFT v1 requires kt_lora_rank=8")
+            if float(self.kt_lora_dropout or 0.0) != 0.0:
+                raise ValueError("RAWINT4 SFT v1 requires kt_lora_dropout=0")
+            effective_threadpool_count = (
+                int(self.kt_threadpool_count or 1) if self.kt_tp_enabled else 1
+            )
+            if effective_threadpool_count not in {1, 2}:
+                raise ValueError(
+                    "RAWINT4 SFT v1 supports TP1/TP2 only; "
+                    f"effective threadpool_count={effective_threadpool_count}"
+                )
+            if int(self.kt_num_gpu_experts or 0) != 0:
+                raise ValueError("RAWINT4 SFT requires kt_num_gpu_experts=0")
+            if bool(self.kt_use_lora_experts):
+                raise ValueError(
+                    "RAWINT4 SFT does not support GPU LoRA experts; use pure expert LoRA"
+                )
+            if bool(self.kt_share_backward_bb):
+                raise ValueError(
+                    "RAWINT4 SFT computes backward directly from packed weights; "
+                    "kt_share_backward_bb must be false"
+                )
+            if not bool(self.kt_force_fused_expert_lora):
+                raise ValueError("RAWINT4 SFT requires kt_force_fused_expert_lora=true")
+            if self.kt_expert_checkpoint_path:
+                raise ValueError(
+                    "RAWINT4 SFT reads packed experts from the source checkpoint; "
+                    "kt_expert_checkpoint_path is not supported"
+                )
+            if self.kt_weight_lifecycle != "persistent":
+                raise ValueError(
+                    "RAWINT4 SFT requires kt_weight_lifecycle='persistent'"
+                )
+            if (
+                self.kt_activation_policy.cpu == "retain"
+                and self.kt_activation_policy.gpu == "recompute"
+            ):
+                raise ValueError(
+                    "RAWINT4 SFT v1 supports activation_policy "
+                    "cpu=retain,gpu=retain for ordinary forward/backward caching, "
+                    "but checkpoint-forward reuse (cpu=retain,gpu=recompute) is not supported"
+                )
         if self.kt_weight_lifecycle == "ephemeral":
             if self.kt_expert_weight_format != "int8":
                 raise ValueError(

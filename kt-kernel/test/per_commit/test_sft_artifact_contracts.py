@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,87 @@ def _sha256(path):
 
 def _write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _rawint4_quantization_config():
+    return {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "quantization_status": "compressed",
+        "config_groups": {
+            "group_0": {
+                "input_activations": None,
+                "output_activations": None,
+                "weights": {
+                    "type": "int",
+                    "num_bits": 4,
+                    "strategy": "group",
+                    "group_size": 32,
+                    "dynamic": False,
+                    "symmetric": True,
+                    "actorder": None,
+                    "block_structure": None,
+                },
+            }
+        },
+    }
+
+
+def test_rawint4_kt_owns_source_quantizer_but_preserves_nested_metadata():
+    quantization = _rawint4_quantization_config()
+    config = SimpleNamespace(
+        quantization_config=quantization,
+        text_config=SimpleNamespace(quantization_config=quantization),
+    )
+    kt_config = SimpleNamespace(
+        kt_expert_weight_format="rawint4",
+        kt_skip_expert_loading=True,
+    )
+
+    assert artifacts_module.should_disable_kt_source_quantizer(kt_config, config)
+    assert config.text_config.quantization_config is quantization
+    assert artifacts_module.should_disable_kt_source_quantizer(
+        SimpleNamespace(kt_backend="AMXINT4_KGroup", kt_skip_expert_loading=True), config
+    )
+    with pytest.raises(KTArtifactError, match="explicit quantization_config"):
+        artifacts_module.should_disable_kt_source_quantizer(kt_config, config, {"bits": 4})
+
+
+def test_fused_expert_lora_exclusion_is_exact():
+    wrapper = torch.nn.Module()
+    wrapper.experts = torch.nn.ModuleList(
+        [
+            torch.nn.ModuleDict(
+                {
+                    "gate_proj": torch.nn.Linear(2, 2, bias=False),
+                    "up_proj": torch.nn.Linear(2, 2, bias=False),
+                    "down_proj": torch.nn.Linear(2, 2, bias=False),
+                }
+            )
+        ]
+    )
+    wrapper._experts_attr = "experts"
+    wrapper._use_fused_expert_lora = True
+    wrapper.moe_config = SimpleNamespace(weight_names=("gate_proj", "up_proj", "down_proj"))
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    model.layers[0].mlp = wrapper
+    model.dense_gate_proj = torch.nn.Linear(2, 2, bias=False)
+    model._kt_wrappers = [wrapper]
+
+    pattern = artifacts_module.get_kt_fused_lora_exclude_modules(
+        SimpleNamespace(kt_force_fused_expert_lora=True), model
+    )
+
+    assert pattern is not None
+    assert artifacts_module.re.fullmatch(pattern, "layers.0.mlp.experts.0.gate_proj")
+    assert not artifacts_module.re.fullmatch(pattern, "dense_gate_proj")
+    assert (
+        artifacts_module.get_kt_fused_lora_exclude_modules(
+            SimpleNamespace(kt_force_fused_expert_lora=False), model
+        )
+        is None
+    )
 
 
 def _make_routed_weights(root, *, schema_version=2):
@@ -308,6 +390,29 @@ def test_prequantized_key_ownership_and_loading_diagnostics_are_public():
             ),
             model,
         )
+    with pytest.raises(KTArtifactError, match="KT RAWINT4.*exact non-expert model match"):
+        validate_kt_prequantized_loading_info(
+            SimpleNamespace(kt_backend="AMXINT4_KGroup", kt_skip_expert_loading=True),
+            SimpleNamespace(
+                missing_keys=["model.norm.weight"],
+                mismatched_keys=[],
+                conversion_errors={},
+                unexpected_keys=[],
+                error_msgs=[],
+            ),
+            model,
+        )
+
+
+def test_kimi_nested_text_config_is_a_supported_moe_model():
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            architectures=["FutureMoonshotConditionalGeneration"],
+            model_type="future_moonshot",
+            text_config=SimpleNamespace(model_type="kimi_k2", num_hidden_layers=61),
+        )
+    )
+    assert is_kt_supported_moe_model(model)
 
 
 class _Backend:
@@ -318,10 +423,33 @@ class _Backend:
         self.initialized = buffers
 
 
-def _fused_model(*, expert_weight_format="bf16"):
+def _make_rawint4_base(root, *, fill=1):
+    root.mkdir()
+    _write_json(root / "config.json", {"model_type": "kimi_k25"})
+    shard = root / "model-00001-of-00001.safetensors"
+    save_file(
+        {"language_model.model.layers.1.mlp.experts.gate_up_proj": torch.full((8,), fill, dtype=torch.int32)},
+        shard,
+    )
+    _write_json(
+        root / "model.safetensors.index.json",
+        {
+            "metadata": {"total_size": 32},
+            "weight_map": {
+                "language_model.model.layers.1.mlp.experts.gate_up_proj": shard.name,
+            },
+        },
+    )
+    return root
+
+
+def _fused_model(*, expert_weight_format="bf16", base_model_path=None):
     model = torch.nn.Module()
-    model.config = SimpleNamespace(name_or_path="/models/base", _name_or_path="/models/base")
+    base_model_path = os.fspath(base_model_path) if base_model_path is not None else "/models/base"
+    model.config = SimpleNamespace(name_or_path=base_model_path, _name_or_path=base_model_path)
     model._kt_expert_weight_format = expert_weight_format
+    lora_rank = 8 if expert_weight_format == "rawint4" else 1
+    lora_alpha = 16.0 if expert_weight_format == "rawint4" else 2.0
     wrapper = SimpleNamespace(
         layer_idx=0,
         moe_config=SimpleNamespace(expert_num=1, intermediate_size=2),
@@ -330,14 +458,26 @@ def _fused_model(*, expert_weight_format="bf16"):
         experts=torch.nn.ModuleList(),
         _use_fused_expert_lora=True,
         _fused_experts=False,
-        _lora_rank=1,
-        _lora_alpha=2.0,
+        _lora_rank=lora_rank,
+        _lora_alpha=lora_alpha,
         _kt_expert_weight_format=expert_weight_format,
         _uses_authoritative_optimizer_grads=False,
         _full_weight_grad=False,
         lora_experts=None,
         wrapper=_Backend(),
     )
+    if expert_weight_format == "rawint4":
+        quantization = {
+            "bits": 4,
+            "group_size": 32,
+            "signed": True,
+            "symmetric": True,
+            "zero_point": False,
+            "format": "pack-quantized",
+            "weight_layout": "compressed-tensors-rawint4-g32-v1",
+        }
+        model._kt_rawint4_quantization = dict(quantization)
+        wrapper._kt_rawint4_quantization = dict(quantization)
     model._kt_wrappers = [wrapper]
     return model, wrapper
 
@@ -348,12 +488,11 @@ def _write_standard_adapter(output):
     save_file({"router.lora_A.weight": torch.ones(1, 2)}, output / "adapter_model.safetensors")
 
 
-@pytest.mark.parametrize("expert_weight_format", ["fp8", "int8"])
-def test_quantized_adapter_manifest_uses_explicit_runtime_provenance(
-    tmp_path, monkeypatch, expert_weight_format
-):
+@pytest.mark.parametrize("expert_weight_format", ["fp8", "int8", "rawint4"])
+def test_quantized_adapter_manifest_uses_explicit_runtime_provenance(tmp_path, monkeypatch, expert_weight_format):
     monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
-    model, _ = _fused_model(expert_weight_format=expert_weight_format)
+    base = _make_rawint4_base(tmp_path / "rawint4-base") if expert_weight_format == "rawint4" else None
+    model, _ = _fused_model(expert_weight_format=expert_weight_format, base_model_path=base)
     kt_adapt_peft_lora(model)
     output = tmp_path / expert_weight_format
     _write_standard_adapter(output)
@@ -364,7 +503,109 @@ def test_quantized_adapter_manifest_uses_explicit_runtime_provenance(
     assert saved.payload["expert_weight_format"] == expert_weight_format
     assert "non_expert_cache" not in saved.payload
     assert "int8_experts" not in saved.payload
+    if expert_weight_format == "rawint4":
+        assert saved.payload["expert_quantization"] == {
+            "bits": 4,
+            "group_size": 32,
+            "signed": True,
+            "symmetric": True,
+            "zero_point": False,
+            "format": "pack-quantized",
+            "weight_layout": "compressed-tensors-rawint4-g32-v1",
+        }
+        assert saved.payload["base"]["fingerprint_schema"] == "safetensors-sharded-sampled-v1"
+        assert len(saved.payload["base"]["fingerprint"]) == 64
+        assert saved.payload["base"]["shards"][0]["name"] == "model-00001-of-00001.safetensors"
+    else:
+        assert "expert_quantization" not in saved.payload
     assert loaded.payload == saved.payload
+
+
+def test_rawint4_adapter_load_rejects_quantization_provenance_change(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    base = _make_rawint4_base(tmp_path / "rawint4-base")
+    model, _ = _fused_model(expert_weight_format="rawint4", base_model_path=base)
+    kt_adapt_peft_lora(model)
+    output = tmp_path / "rawint4"
+    _write_standard_adapter(output)
+    save_kt_adapter_artifacts(model, output)
+
+    manifest_path = output / KT_ADAPTER_MANIFEST_NAME
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["expert_quantization"]["group_size"] = 64
+    _write_json(manifest_path, payload)
+
+    with pytest.raises(KTArtifactError, match="expert_quantization"):
+        load_kt_adapter_artifacts(model, output)
+
+
+def test_rawint4_adapter_base_identity_allows_same_checkpoint_at_new_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    original = _make_rawint4_base(tmp_path / "original")
+    source_model, _ = _fused_model(
+        expert_weight_format="rawint4", base_model_path=original
+    )
+    kt_adapt_peft_lora(source_model)
+    output = tmp_path / "adapter"
+    _write_standard_adapter(output)
+    saved = save_kt_adapter_artifacts(source_model, output)
+
+    relocated = tmp_path / "relocated"
+    shutil.copytree(original, relocated)
+    restored_model, _ = _fused_model(
+        expert_weight_format="rawint4", base_model_path=relocated
+    )
+    loaded = load_kt_adapter_artifacts(restored_model, output)
+
+    assert loaded.payload == saved.payload
+    assert saved.payload["base"]["model_name_or_path"] == str(original)
+
+
+def test_rawint4_adapter_base_identity_supports_regular_model_view_with_file_symlinks(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    original = _make_rawint4_base(tmp_path / "original")
+    model_view = tmp_path / "model-view"
+    model_view.mkdir()
+    for name in ("config.json", "model.safetensors.index.json", "model-00001-of-00001.safetensors"):
+        (model_view / name).symlink_to(original / name)
+    model, _ = _fused_model(expert_weight_format="rawint4", base_model_path=model_view)
+    kt_adapt_peft_lora(model)
+    output = tmp_path / "adapter"
+    _write_standard_adapter(output)
+
+    saved = save_kt_adapter_artifacts(model, output)
+    loaded = load_kt_adapter_artifacts(model, output)
+
+    assert loaded.payload == saved.payload
+    assert saved.payload["base"]["model_name_or_path"] == str(model_view)
+
+
+def test_rawint4_adapter_base_identity_rejects_replaced_shard_at_same_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    base = _make_rawint4_base(tmp_path / "base")
+    model, _ = _fused_model(expert_weight_format="rawint4", base_model_path=base)
+    kt_adapt_peft_lora(model)
+    output = tmp_path / "adapter"
+    _write_standard_adapter(output)
+    save_kt_adapter_artifacts(model, output)
+
+    replacement = tmp_path / "replacement.safetensors"
+    save_file(
+        {
+            "language_model.model.layers.1.mlp.experts.gate_up_proj": torch.full(
+                (8,), 1, dtype=torch.int32
+            )
+        },
+        replacement,
+    )
+    os.replace(replacement, base / "model-00001-of-00001.safetensors")
+
+    # Even a byte-identical replacement has a new filesystem identity. At the
+    # recorded path that must fail closed instead of silently trusting the path.
+    with pytest.raises(KTArtifactError, match="RAWINT4 base shards were replaced"):
+        load_kt_adapter_artifacts(model, output)
 
 
 def test_adapter_load_rejects_expert_weight_format_mismatch(tmp_path, monkeypatch):
