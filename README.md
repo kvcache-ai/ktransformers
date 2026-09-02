@@ -15,6 +15,13 @@
 
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/) and [kt-sft](https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft).
 
+> **Experimental RAWINT4/KGroup SFT:** this branch contains the qj5090-tested
+> `AMXINT4_KGroup` training backend. It is not provided by the current public
+> wheel and **must be compiled from this branch**. See
+> [experiments/rawint4-kgroup-sft/README.md](./experiments/rawint4-kgroup-sft/README.md)
+> for the pinned environment, build verification, evidence, and Kimi-K2.5/K2.6
+> training YAML files.
+
 ## 🔥 Updates
 * **May 6, 2026**: KTransformers at [GOSIM Paris 2026](https://paris2026.gosim.org/zh/schedule/) — "Agentic AI on Edge" track. We'll present KT's inference performance on consumer hardware.
 * **Mar 26, 2026**: Support AVX2-only CPU backend for KT-Kernel inference. ([Tutorial](./doc/en/kt-kernel/AVX2-Tutorial.md))

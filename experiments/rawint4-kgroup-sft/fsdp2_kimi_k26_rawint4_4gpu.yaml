@@ -1,0 +1,31 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: true
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_transformer_layer_cls_to_wrap: DeepseekV3DecoderLayer
+  fsdp_version: 2
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+use_cpu: false
+
+kt_config:
+  enabled: true
+  kt_backend: AMXINT4_KGroup
+  kt_weight_path: /path/to/Kimi-K2.6
+  kt_num_threads: 48
+  kt_tp_enabled: true
+  kt_threadpool_count: 2
+  kt_max_cache_depth: 2
+  kt_share_backward_bb: false
+  kt_lora_rank: 8
+  kt_lora_alpha: 32
+  kt_model_max_length: 8192
+  kt_skip_expert_lora_adaptation: false
+  kt_force_fused_expert_lora: true

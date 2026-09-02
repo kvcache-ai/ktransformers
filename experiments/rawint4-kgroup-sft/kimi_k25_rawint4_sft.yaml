@@ -1,0 +1,51 @@
+### model
+model_name_or_path: /path/to/Kimi-K2.5
+trust_remote_code: true
+low_cpu_mem_usage: true
+use_fast_tokenizer: false
+flash_attn: disabled
+
+### method
+stage: sft
+do_train: true
+do_eval: false
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 32
+lora_target: q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj
+
+### dataset
+dataset: synthetic_over4192_512
+template: kimi_text_nothink
+cutoff_len: 128
+max_samples: 100000
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /path/to/output/kimi-k25-rawint4-kgroup
+logging_steps: 1
+save_steps: 1
+save_total_limit: 1
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-4
+max_steps: 1
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### ktransformers
+use_kt: true
+kt_weight_path: /path/to/Kimi-K2.5
+kt_skip_expert_lora_adaptation: false
+kt_force_fused_expert_lora: true
