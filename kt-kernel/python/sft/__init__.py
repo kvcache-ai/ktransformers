@@ -16,8 +16,10 @@ from .backend import (
     FP8_SFT_METHOD,
     INT8_BACKEND,
     INT8_SFT_METHOD,
+    MXFP4_SFT_METHOD,
     get_fp8_runtime,
     get_int8_runtime,
+    get_mxfp4_runtime,
 )
 from .weight_manifest import validate_persistent_int8_weights
 from .artifacts import (
@@ -109,6 +111,8 @@ __all__ = [
     "FP8_BACKEND",
     "FP8_SFT_METHOD",
     "get_fp8_runtime",
+    "MXFP4_SFT_METHOD",
+    "get_mxfp4_runtime",
     "validate_persistent_int8_weights",
     "FUSED_EXPERT_LORA_NAME",
     "KT_ADAPTER_MANIFEST_NAME",
