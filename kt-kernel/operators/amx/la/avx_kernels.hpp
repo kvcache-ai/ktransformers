@@ -1430,6 +1430,253 @@ inline void lora_backward_matmul_transposed(const ggml_bf16_t* __restrict grad, 
 #endif
 }
 
+inline __m512 load_bf16x16_as_fp32(const ggml_bf16_t* ptr) {
+  const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+  return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(packed), 16));
+}
+
+inline void store_optimizer_gradient_bf16(ggml_bf16_t* dst, const float* src, size_t count, bool accumulate,
+                                          float scale) {
+  size_t i = 0;
+#if defined(__AVX512BF16__)
+  const __m512 scale_v = _mm512_set1_ps(scale);
+  for (; i + 15 < count; i += 16) {
+    __m512 value = _mm512_mul_ps(_mm512_loadu_ps(src + i), scale_v);
+    if (accumulate) value = _mm512_add_ps(value, load_bf16x16_as_fp32(dst + i));
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), (__m256i)_mm512_cvtneps_pbh(value));
+  }
+#endif
+  for (; i < count; ++i) {
+    float value = src[i] * scale;
+    if (accumulate) value += GGML_BF16_TO_FP32(dst[i]);
+    dst[i] = GGML_FP32_TO_BF16(value);
+  }
+}
+
+// Rank-8 LoRA backward microkernels. The route dimension is grouped by expert;
+// all accumulations remain FP32 and weight gradients are written once per expert.
+inline void lora_backward_du_rank8_matmat(const float* __restrict grad, const ggml_bf16_t* __restrict lora_b_t,
+                                          float* __restrict du, int num_tokens, int output_dim) {
+  int t = 0;
+  for (; t + 1 < num_tokens; t += 2) {
+    __m512 acc0[8];
+    __m512 acc1[8];
+    for (int r = 0; r < 8; r++) {
+      acc0[r] = _mm512_setzero_ps();
+      acc1[r] = _mm512_setzero_ps();
+    }
+    int n = 0;
+    for (; n + 15 < output_dim; n += 16) {
+      const __m512 g0 = _mm512_loadu_ps(grad + static_cast<size_t>(t) * output_dim + n);
+      const __m512 g1 = _mm512_loadu_ps(grad + static_cast<size_t>(t + 1) * output_dim + n);
+      for (int r = 0; r < 8; r++) {
+        const __m512 b = load_bf16x16_as_fp32(lora_b_t + static_cast<size_t>(r) * output_dim + n);
+        acc0[r] = _mm512_fmadd_ps(g0, b, acc0[r]);
+        acc1[r] = _mm512_fmadd_ps(g1, b, acc1[r]);
+      }
+    }
+    for (int r = 0; r < 8; r++) {
+      float sum0 = _mm512_reduce_add_ps(acc0[r]);
+      float sum1 = _mm512_reduce_add_ps(acc1[r]);
+      const ggml_bf16_t* b = lora_b_t + static_cast<size_t>(r) * output_dim;
+      for (int i = n; i < output_dim; i++) {
+        const float w = GGML_BF16_TO_FP32(b[i]);
+        sum0 += grad[static_cast<size_t>(t) * output_dim + i] * w;
+        sum1 += grad[static_cast<size_t>(t + 1) * output_dim + i] * w;
+      }
+      du[static_cast<size_t>(t) * 8 + r] = sum0;
+      du[static_cast<size_t>(t + 1) * 8 + r] = sum1;
+    }
+  }
+  for (; t < num_tokens; t++) {
+    __m512 acc[8];
+    for (int r = 0; r < 8; r++) acc[r] = _mm512_setzero_ps();
+    int n = 0;
+    for (; n + 15 < output_dim; n += 16) {
+      const __m512 g = _mm512_loadu_ps(grad + static_cast<size_t>(t) * output_dim + n);
+      for (int r = 0; r < 8; r++) {
+        const __m512 b = load_bf16x16_as_fp32(lora_b_t + static_cast<size_t>(r) * output_dim + n);
+        acc[r] = _mm512_fmadd_ps(g, b, acc[r]);
+      }
+    }
+    for (int r = 0; r < 8; r++) {
+      float sum = _mm512_reduce_add_ps(acc[r]);
+      const ggml_bf16_t* b = lora_b_t + static_cast<size_t>(r) * output_dim;
+      for (int i = n; i < output_dim; i++) sum += grad[static_cast<size_t>(t) * output_dim + i] * GGML_BF16_TO_FP32(b[i]);
+      du[static_cast<size_t>(t) * 8 + r] = sum;
+    }
+  }
+}
+
+inline void lora_backward_dx_rank8_matmat(const float* __restrict du, const ggml_bf16_t* __restrict lora_a,
+                                          float* __restrict dx, int num_tokens, int input_dim, float scale) {
+  const __m512 scale_v = _mm512_set1_ps(scale);
+  int t = 0;
+  for (; t + 3 < num_tokens; t += 4) {
+    int k = 0;
+    for (; k + 15 < input_dim; k += 16) {
+      __m512 out0 = _mm512_loadu_ps(dx + static_cast<size_t>(t) * input_dim + k);
+      __m512 out1 = _mm512_loadu_ps(dx + static_cast<size_t>(t + 1) * input_dim + k);
+      __m512 out2 = _mm512_loadu_ps(dx + static_cast<size_t>(t + 2) * input_dim + k);
+      __m512 out3 = _mm512_loadu_ps(dx + static_cast<size_t>(t + 3) * input_dim + k);
+      for (int r = 0; r < 8; r++) {
+        const __m512 a = load_bf16x16_as_fp32(lora_a + static_cast<size_t>(r) * input_dim + k);
+        out0 = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t) * 8 + r] * scale), a, out0);
+        out1 = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t + 1) * 8 + r] * scale), a, out1);
+        out2 = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t + 2) * 8 + r] * scale), a, out2);
+        out3 = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t + 3) * 8 + r] * scale), a, out3);
+      }
+      _mm512_storeu_ps(dx + static_cast<size_t>(t) * input_dim + k, out0);
+      _mm512_storeu_ps(dx + static_cast<size_t>(t + 1) * input_dim + k, out1);
+      _mm512_storeu_ps(dx + static_cast<size_t>(t + 2) * input_dim + k, out2);
+      _mm512_storeu_ps(dx + static_cast<size_t>(t + 3) * input_dim + k, out3);
+    }
+    for (int tt = 0; tt < 4; tt++) {
+      float* out = dx + static_cast<size_t>(t + tt) * input_dim;
+      for (int i = k; i < input_dim; i++) {
+        float value = 0.0f;
+        for (int r = 0; r < 8; r++) value += du[static_cast<size_t>(t + tt) * 8 + r] * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(r) * input_dim + i]);
+        out[i] += value * scale;
+      }
+    }
+  }
+  for (; t < num_tokens; t++) {
+    float* out = dx + static_cast<size_t>(t) * input_dim;
+    int k = 0;
+    for (; k + 15 < input_dim; k += 16) {
+      __m512 value = _mm512_setzero_ps();
+      for (int r = 0; r < 8; r++) {
+        value = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t) * 8 + r]),
+                               load_bf16x16_as_fp32(lora_a + static_cast<size_t>(r) * input_dim + k), value);
+      }
+      _mm512_storeu_ps(out + k, _mm512_add_ps(_mm512_loadu_ps(out + k), _mm512_mul_ps(value, scale_v)));
+    }
+    for (int i = k; i < input_dim; i++) {
+      float value = 0.0f;
+      for (int r = 0; r < 8; r++) value += du[static_cast<size_t>(t) * 8 + r] * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(r) * input_dim + i]);
+      out[i] += value * scale;
+    }
+  }
+}
+
+// Column-owned LoRA dX. Each caller owns [col_begin, col_end), so routed rows
+// can be accumulated directly into token-order dX without an expert-route
+// scratch tensor or atomics.
+inline void lora_backward_dx_rank8_columns_indexed(
+    const float* __restrict du, const ggml_bf16_t* __restrict lora_a, const int* __restrict row_indices,
+    float* __restrict dx, int num_tokens, int input_dim, int col_begin, int col_end, float scale) {
+  const __m512 scale_v = _mm512_set1_ps(scale);
+  for (int t = 0; t < num_tokens; t++) {
+    float* out = dx + static_cast<size_t>(row_indices[t]) * input_dim;
+    int k = col_begin;
+    for (; k + 15 < col_end; k += 16) {
+      __m512 value = _mm512_setzero_ps();
+      for (int r = 0; r < 8; r++) {
+        value = _mm512_fmadd_ps(
+            _mm512_set1_ps(du[static_cast<size_t>(t) * 8 + r]),
+            load_bf16x16_as_fp32(lora_a + static_cast<size_t>(r) * input_dim + k), value);
+      }
+      _mm512_storeu_ps(out + k, _mm512_add_ps(_mm512_loadu_ps(out + k), _mm512_mul_ps(value, scale_v)));
+    }
+    for (; k < col_end; k++) {
+      float value = 0.0f;
+      for (int r = 0; r < 8; r++) {
+        value += du[static_cast<size_t>(t) * 8 + r] *
+                 GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(r) * input_dim + k]);
+      }
+      out[k] += value * scale;
+    }
+  }
+}
+
+inline void lora_backward_da_rank8_matmat(const ggml_bf16_t* __restrict input, const int* __restrict row_indices,
+                                          const float* __restrict du, float* __restrict da, int num_tokens,
+                                          int input_dim, float scale, bool accumulate = true) {
+  for (int k = 0; k < input_dim; k += 16) {
+    const int width = std::min(16, input_dim - k);
+    __m512 acc[8];
+    const __mmask16 mask = width == 16 ? static_cast<__mmask16>(0xffff) : static_cast<__mmask16>((1u << width) - 1u);
+    for (int r = 0; r < 8; r++) {
+      acc[r] = accumulate ? _mm512_maskz_loadu_ps(mask, da + static_cast<size_t>(r) * input_dim + k)
+                          : _mm512_setzero_ps();
+    }
+    for (int t = 0; t < num_tokens; t++) {
+      const int source_row = row_indices == nullptr ? t : row_indices[t];
+      const __m512 x = width == 16
+                           ? load_bf16x16_as_fp32(input + static_cast<size_t>(source_row) * input_dim + k)
+                           : _mm512_castsi512_ps(_mm512_slli_epi32(
+                                 _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(mask,
+                                     input + static_cast<size_t>(source_row) * input_dim + k)), 16));
+      for (int r = 0; r < 8; r++) {
+        acc[r] = _mm512_fmadd_ps(_mm512_set1_ps(du[static_cast<size_t>(t) * 8 + r] * scale), x, acc[r]);
+      }
+    }
+    for (int r = 0; r < 8; r++) _mm512_mask_storeu_ps(da + static_cast<size_t>(r) * input_dim + k, mask, acc[r]);
+  }
+}
+
+inline void lora_backward_db_rank8_matmat(const float* __restrict u, const float* __restrict grad,
+                                          float* __restrict db, int num_tokens, int output_dim, float scale,
+                                          bool accumulate = true) {
+  alignas(64) float lanes[8][16];
+  for (int n = 0; n < output_dim; n += 16) {
+    const int width = std::min(16, output_dim - n);
+    const __mmask16 mask = width == 16 ? static_cast<__mmask16>(0xffff) : static_cast<__mmask16>((1u << width) - 1u);
+    __m512 acc[8];
+    for (int r = 0; r < 8; r++) {
+      for (int i = 0; i < width; i++) {
+        lanes[r][i] = accumulate ? db[(static_cast<size_t>(n + i) * 8) + r] : 0.0f;
+      }
+      for (int i = width; i < 16; i++) lanes[r][i] = 0.0f;
+      acc[r] = _mm512_load_ps(lanes[r]);
+    }
+    for (int t = 0; t < num_tokens; t++) {
+      const __m512 g = _mm512_maskz_loadu_ps(mask, grad + static_cast<size_t>(t) * output_dim + n);
+      for (int r = 0; r < 8; r++) {
+        acc[r] = _mm512_fmadd_ps(_mm512_set1_ps(u[static_cast<size_t>(t) * 8 + r] * scale), g, acc[r]);
+      }
+    }
+    for (int r = 0; r < 8; r++) _mm512_store_ps(lanes[r], acc[r]);
+    for (int i = 0; i < width; i++) {
+      for (int r = 0; r < 8; r++) db[(static_cast<size_t>(n + i) * 8) + r] = lanes[r][i];
+    }
+  }
+}
+
+inline void lora_backward_db_rank8_matmat_bf16(const float* __restrict u, const ggml_bf16_t* __restrict grad,
+                                               float* __restrict db, int num_tokens, int output_dim, float scale,
+                                               bool accumulate = true) {
+  alignas(64) float lanes[8][16];
+  for (int n = 0; n < output_dim; n += 16) {
+    const int width = std::min(16, output_dim - n);
+    const __mmask16 mask =
+        width == 16 ? static_cast<__mmask16>(0xffff) : static_cast<__mmask16>((1u << width) - 1u);
+    __m512 acc[8];
+    for (int r = 0; r < 8; r++) {
+      for (int i = 0; i < width; i++) {
+        lanes[r][i] = accumulate ? db[(static_cast<size_t>(n + i) * 8) + r] : 0.0f;
+      }
+      for (int i = width; i < 16; i++) lanes[r][i] = 0.0f;
+      acc[r] = _mm512_load_ps(lanes[r]);
+    }
+    for (int t = 0; t < num_tokens; t++) {
+      const __m512 g = width == 16
+                           ? load_bf16x16_as_fp32(grad + static_cast<size_t>(t) * output_dim + n)
+                           : _mm512_castsi512_ps(_mm512_slli_epi32(
+                                 _mm512_cvtepu16_epi32(
+                                     _mm256_maskz_loadu_epi16(mask, grad + static_cast<size_t>(t) * output_dim + n)),
+                                 16));
+      for (int r = 0; r < 8; r++) {
+        acc[r] = _mm512_fmadd_ps(_mm512_set1_ps(u[static_cast<size_t>(t) * 8 + r] * scale), g, acc[r]);
+      }
+    }
+    for (int r = 0; r < 8; r++) _mm512_store_ps(lanes[r], acc[r]);
+    for (int i = 0; i < width; i++) {
+      for (int r = 0; r < 8; r++) db[(static_cast<size_t>(n + i) * 8) + r] = lanes[r][i];
+    }
+  }
+}
+
 }  // namespace avx
 
 #endif  // AVX_KERNELS_HPP
