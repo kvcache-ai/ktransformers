@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
-from .backend import is_fp8_sft_method, is_int8_sft_method
+from .backend import is_fp8_sft_method, is_int8_sft_method, is_mxfp4_sft_method
 
 
 def _supports_authoritative_optimizer_grads(
@@ -32,14 +32,14 @@ def _supports_authoritative_optimizer_grads(
     """Whether this SFT configuration can use C++-authoritative gradients.
 
     BF16 supports both base and LoRA authoritative gradients. Quantized base
-    weights are frozen, so INT8/FP8 support the same lifecycle only for pure LoRA.
+    weights are frozen, so INT8/FP8/MXFP4 support the lifecycle only for pure LoRA.
     """
     if int(num_gpu_experts) != 0:
         return False
     if method == "AMXBF16_SFT":
         return True
     return (
-        (is_int8_sft_method(method) or is_fp8_sft_method(method))
+        (is_int8_sft_method(method) or is_fp8_sft_method(method) or is_mxfp4_sft_method(method))
         and not bool(full_weight_grad)
         and int(lora_rank) > 0
     )

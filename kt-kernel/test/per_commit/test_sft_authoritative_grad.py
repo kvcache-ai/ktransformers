@@ -67,6 +67,15 @@ def test_capability_supports_cpu_only_bf16_and_frozen_int8_lora():
     assert not _supports_authoritative_optimizer_grads(
         "AMXINT8_SFT", 1, full_weight_grad=False, lora_rank=8
     )
+    assert _supports_authoritative_optimizer_grads(
+        "MXFP4_SFT", 0, full_weight_grad=False, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "MXFP4_SFT", 0, full_weight_grad=True, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "MXFP4_SFT", 1, full_weight_grad=False, lora_rank=8
+    )
     assert not _supports_authoritative_optimizer_grads("AMXINT4_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT_SkipLoRA", 0)
 

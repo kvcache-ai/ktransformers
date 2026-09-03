@@ -15,6 +15,10 @@ FP8_SFT_METHOD = "AMXFP8_SFT"
 FP8_WEIGHT_LAYOUT = "block-e4m3-128x128"
 FP8_KERNEL = "avx512-fp8-decode-bf16"
 _FP8_SFT_METHOD_ALIASES = frozenset({FP8_SFT_METHOD, "FP8_SFT"})
+MXFP4_SFT_METHOD = "MXFP4_SFT"
+MXFP4_WEIGHT_LAYOUT = "mxfp4-e2m1-ue8m0-g32"
+MXFP4_KERNEL = "avx512-bf16-mxfp4-g32"
+_MXFP4_SFT_METHOD_ALIASES = frozenset({MXFP4_SFT_METHOD})
 
 
 def is_int8_sft_method(method: str) -> bool:
@@ -23,6 +27,10 @@ def is_int8_sft_method(method: str) -> bool:
 
 def is_fp8_sft_method(method: str) -> bool:
     return str(method) in _FP8_SFT_METHOD_ALIASES
+
+
+def is_mxfp4_sft_method(method: str) -> bool:
+    return str(method) in _MXFP4_SFT_METHOD_ALIASES
 
 
 def normalize_sft_backend(
@@ -76,6 +84,13 @@ class INT8Runtime:
 
 @dataclass(frozen=True)
 class FP8Runtime:
+    cpu_variant: str
+    kernel: str
+    weight_layout: str
+
+
+@dataclass(frozen=True)
+class MXFP4Runtime:
     cpu_variant: str
     kernel: str
     weight_layout: str
@@ -160,4 +175,29 @@ def get_fp8_runtime() -> FP8Runtime:
         cpu_variant=cpu_variant,
         kernel=kernel,
         weight_layout=layout,
+    )
+
+
+def get_mxfp4_runtime() -> MXFP4Runtime:
+    """Validate and describe native group-32 MXFP4 routed-expert SFT."""
+
+    import kt_kernel
+
+    extension = kt_kernel.kt_kernel_ext
+    cpu_variant = str(getattr(extension, "__cpu_variant__", "")).lower()
+    if cpu_variant not in {"amx", "avx512_bf16"}:
+        raise RuntimeError(
+            "MXFP4 SFT requires an AVX512-BF16 extension; "
+            f"loaded cpu_variant={cpu_variant or 'unknown'!r}"
+        )
+    moe_extension = getattr(extension, "moe", None)
+    if moe_extension is None or not hasattr(moe_extension, "MXFP4_SFT_MOE"):
+        raise RuntimeError(
+            "The loaded kt-kernel extension does not provide MXFP4 SFT. "
+            "Install a wheel containing MXFP4_SFT_MOE."
+        )
+    return MXFP4Runtime(
+        cpu_variant=cpu_variant,
+        kernel=MXFP4_KERNEL,
+        weight_layout=MXFP4_WEIGHT_LAYOUT,
     )

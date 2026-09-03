@@ -53,6 +53,7 @@ SFT_METHODS = frozenset(
     [
         "AMXBF16_SFT",  # AMX BF16 training
         "AMXFP8_SFT",  # Block-wise E4M3 routed-expert LoRA training
+        "MXFP4_SFT",  # Native E2M1/UE8M0 group-32 routed-expert LoRA training
         "INT8_SFT",  # Hardware-neutral INT8 training (AMX or AVX512-VNNI)
         "AMXINT8_SFT",  # AMX INT8 training
         "AMXINT4_SFT",  # AMX INT4 training
@@ -113,7 +114,7 @@ class KTMoEWrapper:
             threadpool_count=4,
             weight_path="/path/to/weights",
             chunked_prefill_size=25600,
-            method="AMXBF16_SFT",  # or "AMXINT8_SFT", "AMXINT4_SFT"
+            method="AMXBF16_SFT",  # or "MXFP4_SFT", "INT8_SFT"
             mode="sft",
             lora_rank=16,
             lora_alpha=32.0,
@@ -233,14 +234,13 @@ class KTMoEWrapper:
                 swiglu_alpha=swiglu_alpha,
             )
         else:  # mode == "sft"
-            # SFT factory does not plumb swiglu_limit; reject non-zero
-            # rather than dropping it on the floor. Origin: kt-sglang 耦合.
-            if swiglu_limit != 0.0:
+            if swiglu_limit != 0.0 and method != "MXFP4_SFT":
                 raise ValueError(
-                    f"swiglu_limit={swiglu_limit} is not supported in "
-                    f"mode='sft' (method={method!r}); SFT backends do not "
-                    f"implement the V4-2604B clamp."
+                    f"swiglu_limit={swiglu_limit} is only supported by "
+                    f"method='MXFP4_SFT' in SFT mode, got {method!r}"
                 )
+            if method == "MXFP4_SFT" and swiglu_alpha != 0.0:
+                raise ValueError("MXFP4_SFT requires swiglu_alpha=0")
             return _create_sft_wrapper(
                 layer_idx=layer_idx,
                 num_experts=num_experts,
@@ -260,6 +260,7 @@ class KTMoEWrapper:
                 group_size=group_size,
                 zero_point=zero_point,
                 full_weight_grad=full_weight_grad,
+                swiglu_limit=swiglu_limit,
             )
 
     # Forward static methods to the base class
@@ -426,6 +427,7 @@ def _create_sft_wrapper(
     group_size: int,
     zero_point: bool,
     full_weight_grad: bool = False,
+    swiglu_limit: float = 0.0,
 ):
     """
     Create an SFT wrapper based on the method.
@@ -458,4 +460,5 @@ def _create_sft_wrapper(
         group_size=group_size,
         zero_point=zero_point,
         full_weight_grad=full_weight_grad,
+        swiglu_limit=swiglu_limit,
     )

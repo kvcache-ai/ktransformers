@@ -959,6 +959,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   // SFT MoE with LoRA support (BF16, INT8, INT4, AWQ, K2)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "AMXBF16_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup, AMX_FP4_MOE_TP>>(
+      moe_module, "MXFP4_SFT_MOE");
 #if defined(__AVX512VBMI__)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224FP8, AMX_FP8_MOE_TP>>(moe_module, "AMXFP8_SFT_MOE");
 #endif

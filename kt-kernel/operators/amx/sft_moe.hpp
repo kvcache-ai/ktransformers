@@ -33,6 +33,7 @@
 #include "la/amx_raw_kernels.hpp"
 #include "la/avx_kernels.hpp"
 #include "la/bf16_dweight.hpp"
+#include "fp4-moe.hpp"
 #include "moe.hpp"
 
 // =====================================================
@@ -243,9 +244,17 @@ template <>
 struct supports_block_fp8_base_backward<amx::GemmKernel224FP8> : std::true_type {};
 template <typename T>
 inline constexpr bool supports_block_fp8_base_backward_v = supports_block_fp8_base_backward<T>::value;
+
+template <typename T>
+struct supports_mxfp4_transpose_free_backward : std::false_type {};
+template <>
+struct supports_mxfp4_transpose_free_backward<amx::GemmKernel224MXFP4SmallKGroup> : std::true_type {};
+template <typename T>
+inline constexpr bool supports_mxfp4_transpose_free_backward_v = supports_mxfp4_transpose_free_backward<T>::value;
 template <typename T>
 inline constexpr bool supports_base_backward_v =
-    supports_standard_mat_mul_v<T> || supports_block_fp8_base_backward_v<T>;
+    supports_standard_mat_mul_v<T> || supports_block_fp8_base_backward_v<T> ||
+    supports_mxfp4_transpose_free_backward_v<T>;
 
 // =====================================================
 // Type trait: kernel has direct BB→BB transposed repack (from_bb_transposed)
@@ -383,10 +392,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   static constexpr bool kSkipLoRA = SkipLoRA;
   static constexpr bool kIsInt8Backend = std::is_same_v<T, amx::GemmKernel224Int8>;
   static constexpr bool kIsFP8Backend = std::is_same_v<T, amx::GemmKernel224FP8>;
+  static constexpr bool kIsMXFP4Backend = std::is_same_v<T, amx::GemmKernel224MXFP4SmallKGroup>;
   static constexpr bool kSupportsDirectBf16Reload = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeBaseGrads = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeLoraGrads =
-      !SkipLoRA && (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend || kIsFP8Backend);
+      !SkipLoRA &&
+      (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend || kIsFP8Backend || kIsMXFP4Backend);
 
  protected:
   using Base = BaseMOE<T>;
@@ -694,6 +705,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   size_t base_backward_bb_required_size(int n, int k) const {
     if constexpr (kIsFP8Backend) {
       return T::BufferB::required_size(n, k, config_.quant_config.group_size);
+    } else if constexpr (kIsMXFP4Backend) {
+      return 0;
     } else {
       return T::BufferB::required_size(n, k);
     }
@@ -702,6 +715,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   std::shared_ptr<typename T::BufferB> make_base_backward_bb(int n, int k, void* data) const {
     if constexpr (kIsFP8Backend) {
       return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size, data);
+    } else if constexpr (kIsMXFP4Backend) {
+      throw std::logic_error("MXFP4 SFT does not allocate transposed base weights");
     } else {
       return std::make_shared<typename T::BufferB>(n, k, data);
     }
@@ -712,6 +727,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                              const std::shared_ptr<typename T::BufferC>& bc, int ith, int nth) {
     if constexpr (kIsFP8Backend) {
       amx::mat_mul_kgroup(m, n, k, config_.quant_config.group_size, ba, bb, bc, ith, nth);
+    } else if constexpr (kIsMXFP4Backend) {
+      throw std::logic_error("MXFP4 backward must use the transpose-free dX path");
     } else {
       amx::mat_mul(m, n, k, ba, bb, bc, ith, nth);
     }
@@ -737,6 +754,23 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
       if (config.full_weight_grad) {
         throw std::invalid_argument("FP8 SFT phase one supports frozen-base LoRA only");
+      }
+    }
+    if constexpr (kIsMXFP4Backend) {
+#if !defined(__AVX512BF16__)
+      throw std::invalid_argument("MXFP4 SFT requires an AVX512-BF16 build");
+#endif
+      if (config.quant_config.group_size != 32 || config.quant_config.zero_point) {
+        throw std::invalid_argument("MXFP4 SFT requires zero-point-free group-32 E2M1 weights");
+      }
+      if (config.hidden_size % 32 != 0 || config.intermediate_size % 32 != 0) {
+        throw std::invalid_argument("MXFP4 SFT requires 32-aligned TP-local hidden and intermediate dimensions");
+      }
+      if (!std::isfinite(config.swiglu_limit) || config.swiglu_limit <= 0.0f || config.swiglu_alpha != 0.0f) {
+        throw std::invalid_argument("MXFP4 SFT requires the DeepSeek-V4 asymmetric SwiGLU clamp");
+      }
+      if (config.full_weight_grad) {
+        throw std::invalid_argument("MXFP4 SFT supports frozen-base LoRA only");
       }
     }
 
@@ -1027,6 +1061,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   }
 
   void set_full_weight_grad(bool enabled) {
+    if constexpr (kIsMXFP4Backend) {
+      if (enabled) {
+        throw std::invalid_argument("MXFP4 SFT keeps routed-expert base weights frozen");
+      }
+    }
     sft_config_.full_weight_grad = enabled;
     if constexpr (std::is_same_v<T, amx::GemmKernel224BF16>) {
       if (enabled) {
@@ -1685,7 +1724,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     alloc_backward_buffers();
 
     // ★ share_backward_bb: check if async repack already prepared this layer ★
-    if (config_.share_backward_bb) {
+    if (config_.share_backward_bb && !kIsMXFP4Backend) {
       auto& shared = SFTSharedPools::instance();
       shared.ensure_numa_count(tp_part_idx + 1);
       if constexpr (kIsFP8Backend) {
@@ -2908,6 +2947,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   // Debug getter for LoRA pointer verification
   void* get_gate_lora_a() const { return (void*)gate_lora_a_; }
 
+  void validate_mxfp4_scales() const {
+    if constexpr (!kIsMXFP4Backend) {
+      throw std::logic_error("MXFP4 scale validation called on a different SFT backend");
+    } else {
+      for (int expert = 0; expert < config_.expert_num; ++expert) {
+        if (!gate_bb_[expert]->scale_e8_valid || !up_bb_[expert]->scale_e8_valid ||
+            !down_bb_[expert]->scale_e8_valid) {
+          throw std::runtime_error("MXFP4 SFT requires finite native UE8M0 group scales");
+        }
+      }
+    }
+  }
+
   /**
    * @brief Prepare backward weights for AMX GEMM.
    *
@@ -2980,65 +3032,70 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Used in share_backward_bb mode (Mode 1) to avoid persistent backward_bb_pool_ per instance.
    */
   void prepare_backward_weights_from_forward() {
-    if constexpr (!supports_base_backward_v<T>) return;
+    if constexpr (kIsMXFP4Backend) {
+      backward_weights_prepared_ = true;
+      return;
+    } else if constexpr (!supports_base_backward_v<T>) {
+      return;
+    } else {
+      auto pool = config_.pool->get_subpool(tp_part_idx);
 
-    auto pool = config_.pool->get_subpool(tp_part_idx);
+      // Phase 1: gate + up (both use [intermediate_size, hidden_size] -> [hidden_size, intermediate_size])
+      pool->do_work_stealing_job(
+          config_.expert_num * 2, nullptr,
+          [this](int task_id) {
+            int proj = task_id / config_.expert_num;
+            int expert_idx = task_id % config_.expert_num;
+            auto& src_bb = (proj == 0) ? gate_bb_[expert_idx] : up_bb_[expert_idx];
+            auto& dst_bb = (proj == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
 
-    // Phase 1: gate + up (both use [intermediate_size, hidden_size] -> [hidden_size, intermediate_size])
-    pool->do_work_stealing_job(
-        config_.expert_num * 2, nullptr,
-        [this](int task_id) {
-          int proj = task_id / config_.expert_num;
-          int expert_idx = task_id % config_.expert_num;
-          auto& src_bb = (proj == 0) ? gate_bb_[expert_idx] : up_bb_[expert_idx];
-          auto& dst_bb = (proj == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
-
-          if constexpr (has_bb_transposed_repack_v<T>) {
-            if constexpr (kIsInt8Backend) {
-              dst_bb->repack_from_bb_transposed(*src_bb);
+            if constexpr (has_bb_transposed_repack_v<T>) {
+              if constexpr (kIsInt8Backend) {
+                dst_bb->repack_from_bb_transposed(*src_bb);
+              } else {
+                int nth = T::recommended_nth(dst_bb->n);
+                for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+              }
             } else {
-              int nth = T::recommended_nth(dst_bb->n);
-              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+              thread_local std::vector<ggml_bf16_t> workspace;
+              workspace.resize((size_t)src_bb->n * src_bb->k);
+              int src_nth = T::recommended_nth(src_bb->n);
+              for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
+              int dst_nth = T::recommended_nth(dst_bb->n);
+              for (int p = 0; p < dst_nth; p++)
+                dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
             }
-          } else {
-            thread_local std::vector<ggml_bf16_t> workspace;
-            workspace.resize((size_t)src_bb->n * src_bb->k);
-            int src_nth = T::recommended_nth(src_bb->n);
-            for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
-            int dst_nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < dst_nth; p++)
-              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
-          }
-        },
-        nullptr);
+          },
+          nullptr);
 
-    // Phase 2: down (uses [hidden_size, intermediate_size] -> [intermediate_size, hidden_size])
-    pool->do_work_stealing_job(
-        config_.expert_num, nullptr,
-        [this](int task_id) {
-          auto& src_bb = down_bb_[task_id];
-          auto& dst_bb = down_backward_bb_[task_id];
+      // Phase 2: down (uses [hidden_size, intermediate_size] -> [intermediate_size, hidden_size])
+      pool->do_work_stealing_job(
+          config_.expert_num, nullptr,
+          [this](int task_id) {
+            auto& src_bb = down_bb_[task_id];
+            auto& dst_bb = down_backward_bb_[task_id];
 
-          if constexpr (has_bb_transposed_repack_v<T>) {
-            if constexpr (kIsInt8Backend) {
-              dst_bb->repack_from_bb_transposed(*src_bb);
+            if constexpr (has_bb_transposed_repack_v<T>) {
+              if constexpr (kIsInt8Backend) {
+                dst_bb->repack_from_bb_transposed(*src_bb);
+              } else {
+                int nth = T::recommended_nth(dst_bb->n);
+                for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+              }
             } else {
-              int nth = T::recommended_nth(dst_bb->n);
-              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+              thread_local std::vector<ggml_bf16_t> workspace;
+              workspace.resize((size_t)src_bb->n * src_bb->k);
+              int src_nth = T::recommended_nth(src_bb->n);
+              for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
+              int dst_nth = T::recommended_nth(dst_bb->n);
+              for (int p = 0; p < dst_nth; p++)
+                dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
             }
-          } else {
-            thread_local std::vector<ggml_bf16_t> workspace;
-            workspace.resize((size_t)src_bb->n * src_bb->k);
-            int src_nth = T::recommended_nth(src_bb->n);
-            for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
-            int dst_nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < dst_nth; p++)
-              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
-          }
-        },
-        nullptr);
+          },
+          nullptr);
 
-    backward_weights_prepared_ = true;
+      backward_weights_prepared_ = true;
+    }
   }
 
   void load_forward_weights_from_full_bf16(void* gate_proj, void* up_proj, void* down_proj, int full_intermediate_size,
@@ -3558,9 +3615,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       gate_up_backward_bb_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
       down_backward_bb_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
       backward_bb_pool_bytes_ = config_.expert_num * (gate_up_backward_bb_size * 2 + down_backward_bb_size);
-    } else if constexpr (kIsFP8Backend) {
-      // Base weights stay block-FP8. LoRA uses the direct BF16 AVX512 path,
-      // so only allocate its BF16 scratch and the common base-backward A/C buffers.
+    } else if constexpr (kIsFP8Backend || kIsMXFP4Backend) {
+      // Native quantized base weights remain frozen. LoRA uses direct BF16
+      // AVX512 kernels, so only its scratch and common dX buffers are needed.
       lora_bb_pool_bytes_ = 0;
       lora_ba_pool_bytes_ = 0;
       lora_bc_inter_pool_bytes_ = 0;
@@ -3592,9 +3649,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_ * sizeof(float) +
           align_overhead;
 
-      gate_up_backward_bb_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
-      down_backward_bb_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
-      backward_bb_pool_bytes_ = config_.expert_num * (gate_up_backward_bb_size * 2 + down_backward_bb_size);
+      if constexpr (kIsFP8Backend) {
+        gate_up_backward_bb_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
+        down_backward_bb_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
+        backward_bb_pool_bytes_ = config_.expert_num * (gate_up_backward_bb_size * 2 + down_backward_bb_size);
+      } else {
+        // MXFP4 dX consumes the original packed forward weights directly.
+        backward_bb_pool_bytes_ = 0;
+      }
     } else {
       // For unsupported kernels (KGroup kernels), set all AMX buffer sizes to 0
       // These kernels will use the original for-loop implementation
@@ -3698,8 +3760,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                             lora_gate_up_out_bc_size, lora_down_out_bc_size, grad_output_ba_size,
                             grad_intermediate_bc_size, grad_gate_up_bc_size, gate_up_backward_bb_size,
                             down_backward_bb_size);
-    } else if constexpr (kIsFP8Backend) {
-      init_fp8_sft_buffers(max_m);
+    } else if constexpr (kIsFP8Backend || kIsMXFP4Backend) {
+      init_native_quantized_sft_buffers(max_m);
     }
 
     // Pool logger: static allocation summary (printed once per instance at init)
@@ -3714,7 +3776,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @brief Initialize only the BF16 activation/LoRA scratch metadata and
    * block-FP8 base backward buffers needed by FP8 SFT.
    */
-  void init_fp8_sft_buffers(size_t max_m) {
+  void init_native_quantized_sft_buffers(size_t max_m) {
     lora_gate_intermediate_ptr_.assign(config_.expert_num, nullptr);
     lora_up_intermediate_ptr_.assign(config_.expert_num, nullptr);
 
@@ -3734,10 +3796,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       grad_gate_up_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
     }
 
-    if (backward_bb_pool_ != nullptr) init_backward_bb_pointers();
+    if constexpr (kIsFP8Backend) {
+      if (backward_bb_pool_ != nullptr) init_backward_bb_pointers();
+    }
     lora_weights_prepared_ = false;
     lora_backward_weights_prepared_ = false;
-    backward_weights_prepared_ = false;
+    backward_weights_prepared_ = kIsMXFP4Backend;
   }
 
   /**
@@ -5215,12 +5279,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // =====================================================
     // Step 3: Quantize scattered grad_output to BufferA
     // =====================================================
-    direct_or_pool(activated_expert, [this](int task_id) {
-      int expert_idx = m_expert_id_map_[task_id];
-      int num_tokens = m_local_num_[expert_idx];
-      if (num_tokens == 0) return;
-      grad_output_ba_[expert_idx]->from_mat(num_tokens, grad_output_bf16_ptr_[expert_idx], 0, 1);
-    });
+    if constexpr (!kIsMXFP4Backend) {
+      direct_or_pool(activated_expert, [this](int task_id) {
+        int expert_idx = m_expert_id_map_[task_id];
+        int num_tokens = m_local_num_[expert_idx];
+        if (num_tokens == 0) return;
+        grad_output_ba_[expert_idx]->from_mat(num_tokens, grad_output_bf16_ptr_[expert_idx], 0, 1);
+      });
+    }
 
     // =====================================================
     // Step 3+4: AMX GEMM + to_mat (merged to use same ith/nth)
@@ -5255,15 +5321,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
           if (m == 0) return;
 
-          auto& ba = grad_output_ba_[expert_idx];
-          auto& bb = down_backward_bb_[expert_idx];
-          auto& bc = grad_intermediate_bc_[expert_idx];
+          if constexpr (kIsMXFP4Backend) {
+            // down forward weight is [H, I]. Read its original packed rows to
+            // produce [m, I] without a persistent [I, H] transpose.
+            T::transpose_free_dx(m, config_.hidden_size, config_.intermediate_size,
+                                 grad_output_bf16_ptr_[expert_idx], down_bb_[expert_idx].get(),
+                                 grad_intermediate_ + expert_offsets[task_idx], ith, nth);
+          } else {
+            auto& ba = grad_output_ba_[expert_idx];
+            auto& bb = down_backward_bb_[expert_idx];
+            auto& bc = grad_intermediate_bc_[expert_idx];
 
-          // mat_mul: [m, hidden_size] @ [intermediate_size, hidden_size]^T = [m, intermediate_size]
-          base_backward_mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
-
-          // to_mat: Convert BufferC to BF16 - use same ith, nth as mat_mul!
-          bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
+            // mat_mul: [m, hidden_size] @ [intermediate_size, hidden_size]^T = [m, intermediate_size]
+            base_backward_mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+            bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
+          }
         },
         nullptr);
     profiler_.record(SFTProfileStage::BwdDownBaseDx, stage_start);
@@ -5815,8 +5887,32 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         avx512_32xbf16_to_32xfp32((__m512i*)(up_output + i), &u0, &u1);
         avx512_32xbf16_to_32xfp32((__m512i*)(grad_inter + i), &gi0, &gi1);
 
+        __mmask16 gate_mask0 = 0xFFFF;
+        __mmask16 gate_mask1 = 0xFFFF;
+        __mmask16 up_mask0 = 0xFFFF;
+        __mmask16 up_mask1 = 0xFFFF;
+        if constexpr (kIsMXFP4Backend) {
+          const __m512 limit = _mm512_set1_ps(config_.swiglu_limit);
+          const __m512 neg_limit = _mm512_set1_ps(-config_.swiglu_limit);
+          gate_mask0 = _mm512_cmp_ps_mask(g0, limit, _CMP_LE_OQ);
+          gate_mask1 = _mm512_cmp_ps_mask(g1, limit, _CMP_LE_OQ);
+          up_mask0 = _mm512_cmp_ps_mask(u0, neg_limit, _CMP_GE_OQ) & _mm512_cmp_ps_mask(u0, limit, _CMP_LE_OQ);
+          up_mask1 = _mm512_cmp_ps_mask(u1, neg_limit, _CMP_GE_OQ) & _mm512_cmp_ps_mask(u1, limit, _CMP_LE_OQ);
+          g0 = _mm512_min_ps(g0, limit);
+          g1 = _mm512_min_ps(g1, limit);
+          u0 = _mm512_min_ps(_mm512_max_ps(u0, neg_limit), limit);
+          u1 = _mm512_min_ps(_mm512_max_ps(u1, neg_limit), limit);
+        }
+
         // First 16: sigmoid, silu derivative, gradients
-        __m512 exp0 = avx512_exp_ps(_mm512_sub_ps(_mm512_setzero_ps(), g0));
+        __m512 neg_g0 = _mm512_sub_ps(_mm512_setzero_ps(), g0);
+        __m512 neg_g1 = _mm512_sub_ps(_mm512_setzero_ps(), g1);
+        if constexpr (kIsMXFP4Backend) {
+          const __m512 max_exp_input = _mm512_set1_ps(88.0f);
+          neg_g0 = _mm512_min_ps(neg_g0, max_exp_input);
+          neg_g1 = _mm512_min_ps(neg_g1, max_exp_input);
+        }
+        __m512 exp0 = avx512_exp_ps(neg_g0);
         __m512 sig0 = _mm512_div_ps(one, _mm512_add_ps(one, exp0));
         __m512 silu0 = _mm512_mul_ps(g0, sig0);
         __m512 dsilu0 = _mm512_mul_ps(sig0, _mm512_fmadd_ps(g0, _mm512_sub_ps(one, sig0), one));
@@ -5824,12 +5920,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         __m512 gu0 = _mm512_mul_ps(gi0, silu0);
 
         // Second 16: same computation
-        __m512 exp1 = avx512_exp_ps(_mm512_sub_ps(_mm512_setzero_ps(), g1));
+        __m512 exp1 = avx512_exp_ps(neg_g1);
         __m512 sig1 = _mm512_div_ps(one, _mm512_add_ps(one, exp1));
         __m512 silu1 = _mm512_mul_ps(g1, sig1);
         __m512 dsilu1 = _mm512_mul_ps(sig1, _mm512_fmadd_ps(g1, _mm512_sub_ps(one, sig1), one));
         __m512 gg1 = _mm512_mul_ps(_mm512_mul_ps(gi1, u1), dsilu1);
         __m512 gu1 = _mm512_mul_ps(gi1, silu1);
+
+        if constexpr (kIsMXFP4Backend) {
+          gg0 = _mm512_maskz_mov_ps(gate_mask0, gg0);
+          gg1 = _mm512_maskz_mov_ps(gate_mask1, gg1);
+          gu0 = _mm512_maskz_mov_ps(up_mask0, gu0);
+          gu1 = _mm512_maskz_mov_ps(up_mask1, gu1);
+        }
 
         avx512_32xfp32_to_32xbf16(&gg0, &gg1, (__m512i*)(grad_gate + i));
         avx512_32xfp32_to_32xbf16(&gu0, &gu1, (__m512i*)(grad_up + i));
@@ -5839,11 +5942,22 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       for (; i < total; i++) {
         float g_val = GGML_BF16_TO_FP32(gate_output[i]);
         float u_val = GGML_BF16_TO_FP32(up_output[i]);
+        bool gate_in_range = true;
+        bool up_in_range = true;
+        if constexpr (kIsMXFP4Backend) {
+          gate_in_range = g_val <= config_.swiglu_limit;
+          up_in_range = u_val >= -config_.swiglu_limit && u_val <= config_.swiglu_limit;
+          g_val = std::min(g_val, config_.swiglu_limit);
+          u_val = std::min(std::max(u_val, -config_.swiglu_limit), config_.swiglu_limit);
+        }
         float sigmoid_val = 1.0f / (1.0f + expf(-g_val));
         float silu_val = g_val * sigmoid_val;
         float grad_i_val = GGML_BF16_TO_FP32(grad_inter[i]);
-        grad_gate[i] = GGML_FP32_TO_BF16(grad_i_val * u_val * sigmoid_val * (1.0f + g_val * (1.0f - sigmoid_val)));
-        grad_up[i] = GGML_FP32_TO_BF16(grad_i_val * silu_val);
+        const float gate_grad =
+            grad_i_val * u_val * sigmoid_val * (1.0f + g_val * (1.0f - sigmoid_val));
+        const float up_grad = grad_i_val * silu_val;
+        grad_gate[i] = GGML_FP32_TO_BF16(gate_in_range ? gate_grad : 0.0f);
+        grad_up[i] = GGML_FP32_TO_BF16(up_in_range ? up_grad : 0.0f);
       }
     });
   }
@@ -6006,16 +6120,18 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     auto base_pass = [&](bool do_up) {
       // Quantize grad to BufferA
-      direct_or_pool(activated_expert, [&, do_up](int task_id) {
-        int expert_idx = m_expert_id_map_[task_id];
-        int m = m_local_num_[expert_idx];
-        if (m == 0) return;
+      if constexpr (!kIsMXFP4Backend) {
+        direct_or_pool(activated_expert, [&, do_up](int task_id) {
+          int expert_idx = m_expert_id_map_[task_id];
+          int m = m_local_num_[expert_idx];
+          if (m == 0) return;
 
-        size_t offset = expert_offsets[task_id];
-        ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
-                                  : (grad_gate_output_ + offset * config_.intermediate_size);
-        down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
-      });
+          size_t offset = expert_offsets[task_id];
+          ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
+                                    : (grad_gate_output_ + offset * config_.intermediate_size);
+          down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
+        });
+      }
 
       int nth = T::recommended_nth(config_.hidden_size);
       pool->do_work_stealing_job(
@@ -6027,12 +6143,23 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             int m = m_local_num_[expert_idx];
             if (m == 0) return;
 
-            auto& ba = down_ba_[expert_idx];
-            auto& bb = do_up ? up_backward_bb_[expert_idx] : gate_backward_bb_[expert_idx];
-            auto& bc = grad_gate_up_bc_[expert_idx];
+            if constexpr (kIsMXFP4Backend) {
+              const size_t offset = expert_offsets[task_idx];
+              const auto* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
+                                       : (grad_gate_output_ + offset * config_.intermediate_size);
+              auto* weight = (do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx]).get();
+              // gate/up forward weights are [I, H]. Consume those packed rows
+              // directly to produce each expert's [m, H] input contribution.
+              T::transpose_free_dx(m, config_.intermediate_size, config_.hidden_size, grad, weight,
+                                   grad_output_bf16_ptr_[expert_idx], ith, nth);
+            } else {
+              auto& ba = down_ba_[expert_idx];
+              auto& bb = do_up ? up_backward_bb_[expert_idx] : gate_backward_bb_[expert_idx];
+              auto& bc = grad_gate_up_bc_[expert_idx];
 
-            base_backward_mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
-            bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
+              base_backward_mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+              bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
+            }
           },
           nullptr);
 
