@@ -13,6 +13,7 @@ from kt_kernel.sft.autograd import KTMoEFunction
 from kt_kernel.sft.base import BaseSFTMoEWrapper, _supports_authoritative_optimizer_grads
 from kt_kernel.sft.dist_utils import _distributed_rank_world_size
 from kt_kernel.sft.lora import kt_adapt_peft_lora, sync_kt_lora_gradients, update_kt_lora_pointers
+from kt_kernel.sft.weights import RAWINT4ExpertWeights
 
 
 class _TaskRunner:
@@ -309,6 +310,121 @@ def test_int8_sft_rejects_merged_or_unconverted_weight_path(tmp_path):
     backend.layer_idx = 3
     with pytest.raises(RuntimeError, match=r"pre-quantized \.kt files"):
         backend._load_base_weights_from_file()
+
+
+def test_rawint4_uses_authoritative_lora_gradients():
+    assert _supports_authoritative_optimizer_grads(
+        "RAWINT4_SFT",
+        0,
+        full_weight_grad=False,
+        lora_rank=8,
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "RAWINT4_SFT",
+        0,
+        full_weight_grad=True,
+        lora_rank=8,
+    )
+
+
+def test_rawint4_wrapper_accepts_only_exact_packed_tensor_contract():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT4_KGroup_SFT"
+    backend._is_rawint4 = True
+    backend.num_experts = 2
+    backend.hidden_size = 32
+    backend.moe_intermediate_size = 32
+    backend._weights_loaded = False
+    observed = {}
+    backend.load_weights = lambda mapping: observed.setdefault("mapping", mapping)
+    weights = RAWINT4ExpertWeights(
+        gate_proj=torch.empty((2, 32, 16), dtype=torch.uint8),
+        gate_scale=torch.empty((2, 32, 1), dtype=torch.bfloat16),
+        up_proj=torch.empty((2, 32, 16), dtype=torch.uint8),
+        up_scale=torch.empty((2, 32, 1), dtype=torch.bfloat16),
+        down_proj=torch.empty((2, 32, 16), dtype=torch.uint8),
+        down_scale=torch.empty((2, 32, 1), dtype=torch.bfloat16),
+    )
+    mapping = torch.arange(2)
+
+    backend.load_rawint4_weights(weights, mapping)
+
+    assert observed["mapping"] is mapping
+    assert backend.gate_proj is weights.gate_proj
+    assert backend.gate_scale is weights.gate_scale
+    assert backend._use_rawint4_tensor_path is True
+
+    weights.gate_scale = weights.gate_scale.float()
+    with pytest.raises(ValueError, match="scale must be contiguous CPU BF16"):
+        backend.load_rawint4_weights(weights, mapping)
+
+
+def test_rawint4_sft_rejects_ordinary_bf16_tensor_loading():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT4_KGroup_SFT"
+    backend._is_rawint4 = True
+    tensor = torch.empty(1, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="packed weights"):
+        backend.load_weights_from_tensors(tensor, tensor, tensor, torch.arange(1))
+
+
+@pytest.mark.parametrize(
+    ("mapping", "message"),
+    [
+        (torch.tensor([0.0, 1.0]), "integer dtype"),
+        (torch.tensor([0], dtype=torch.int64), "exactly 2 entries"),
+        (torch.tensor([0, 0], dtype=torch.int64), "must be a permutation"),
+        (torch.tensor([0, 2], dtype=torch.int64), "must be a permutation"),
+    ],
+)
+def test_load_weights_rejects_invalid_physical_to_logical_map(mapping, message):
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend._weights_loaded = False
+    backend._is_rawint4 = True
+    backend.num_experts = 2
+
+    with pytest.raises(ValueError, match=message):
+        backend.load_weights(mapping)
+
+
+def test_rawint4_map_accepts_nonidentity_permutation_and_keeps_cpu_owner():
+    class StopAfterMap(Exception):
+        pass
+
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend._weights_loaded = False
+    backend._is_rawint4 = True
+    backend.num_experts = 2
+    backend.gate_proj = None
+    backend._use_projs_path = False
+    backend._load_base_weights_from_file = lambda: (_ for _ in ()).throw(StopAfterMap())
+    mapping = torch.tensor([1, 0], dtype=torch.int32)
+
+    with pytest.raises(StopAfterMap):
+        backend.load_weights(mapping)
+
+    assert backend._physical_to_logical_map_cpu.device.type == "cpu"
+    assert backend._physical_to_logical_map_cpu.dtype == torch.int64
+    assert backend._physical_to_logical_map_cpu.is_contiguous()
+    assert backend._physical_to_logical_map_cpu.tolist() == [1, 0]
+
+
+def test_legacy_map_retains_at_least_expert_count_contract():
+    class StopAfterMap(Exception):
+        pass
+
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend._weights_loaded = False
+    backend._is_rawint4 = False
+    backend.num_experts = 2
+    backend.gate_proj = None
+    backend._use_projs_path = False
+    backend._load_base_weights_from_file = lambda: (_ for _ in ()).throw(StopAfterMap())
+
+    with pytest.raises(StopAfterMap):
+        backend.load_weights(torch.tensor([1.0, 0.0, 99.0]))
+
+    assert backend._physical_to_logical_map_cpu.tolist() == [1, 0, 99]
 
 
 @pytest.mark.parametrize(

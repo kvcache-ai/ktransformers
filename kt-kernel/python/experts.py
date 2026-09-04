@@ -57,6 +57,7 @@ SFT_METHODS = frozenset(
         "AMXINT8_SFT",  # AMX INT8 training
         "AMXINT4_SFT",  # AMX INT4 training
         "AMXINT4_1_SFT",  # AMX INT4_1 training
+        "RAWINT4_SFT",  # Native packed group-32 INT4 routed-expert LoRA training
         "AMXINT4_KGroup_SFT",  # AMX INT4 K-Group training
         "AMXINT4_1KGroup_SFT",  # AMX INT4_1 K-Group training
         # SkipLoRA variants (skip all LoRA computation in backward, only compute base weight grad_input)

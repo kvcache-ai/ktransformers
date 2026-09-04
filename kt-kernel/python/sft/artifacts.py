@@ -24,6 +24,7 @@ from typing import Any, Iterator, Mapping
 
 from safetensors import safe_open
 
+from .backend import RAWINT4_WEIGHT_LAYOUT, get_rawint4_checkpoint_contract
 from .weight_manifest import validate_persistent_int8_weights
 
 
@@ -63,13 +64,17 @@ _RUNTIME_TENSOR_CONTRACTS = "_kt_routed_expert_runtime_tensor_contracts"
 _SUPPORTED_MOE_ARCHITECTURES = (
     "DeepseekV2",
     "DeepseekV3",
+    "KimiK2",
     "Qwen2Moe",
     "Qwen3Moe",
     "Qwen3_5Moe",
     "Glm4Moe",
     "Mixtral",
 )
-_EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8"})
+_EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8", "rawint4"})
+_RAWINT4_BASE_IDENTITY_SCHEMA = "safetensors-sharded-sampled-v1"
+_RAWINT4_SAMPLE_BYTES = 64 * 1024
+_RAWINT4_SAMPLE_COUNT = 8
 
 
 class KTArtifactError(RuntimeError):
@@ -201,6 +206,215 @@ def _source_fingerprint(config_digest: str, index_digest: str) -> str:
     digest.update(b"\0")
     digest.update(index_digest.encode())
     return digest.hexdigest()
+
+
+def _canonical_json_sha256(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _rawint4_shard_record(path: Path) -> dict[str, Any]:
+    """Build a portable sampled identity plus a local replacement guard.
+
+    Hashing every byte of a Kimi checkpoint would stream roughly 595 GB each
+    time an adapter is saved or loaded.  The portable identity instead covers
+    the safetensors header and evenly spaced payload windows.  For the original
+    path, device/inode/ctime additionally makes an in-place shard replacement
+    fail closed even when it avoids those sampled windows.
+    """
+
+    if not path.is_file():
+        raise KTArtifactError(f"RAWINT4 base shard must be a readable file: {path}")
+    with path.open("rb") as handle:
+        stat = os.fstat(handle.fileno())
+        size = stat.st_size
+        prefix = handle.read(8)
+        if len(prefix) != 8:
+            raise KTArtifactError(f"RAWINT4 base shard has no safetensors header: {path}")
+        header_size = int.from_bytes(prefix, byteorder="little", signed=False)
+        if header_size <= 0 or header_size > size - 8:
+            raise KTArtifactError(f"RAWINT4 base shard has an invalid safetensors header: {path}")
+        header = handle.read(header_size)
+        if len(header) != header_size:
+            raise KTArtifactError(f"RAWINT4 base shard has a truncated safetensors header: {path}")
+
+        payload_start = 8 + header_size
+        payload_size = size - payload_start
+        window_size = min(_RAWINT4_SAMPLE_BYTES, payload_size)
+        offsets = {payload_start}
+        if payload_size > window_size:
+            span = payload_size - window_size
+            offsets.update(
+                payload_start + (span * sample_idx // (_RAWINT4_SAMPLE_COUNT - 1))
+                for sample_idx in range(_RAWINT4_SAMPLE_COUNT)
+            )
+        sample_digest = hashlib.sha256()
+        for offset in sorted(offsets):
+            handle.seek(offset)
+            chunk = handle.read(window_size)
+            if len(chunk) != window_size:
+                raise KTArtifactError(f"RAWINT4 base shard changed while fingerprinting: {path}")
+            sample_digest.update(str(offset - payload_start).encode())
+            sample_digest.update(b"\0")
+            sample_digest.update(chunk)
+        final_stat = os.fstat(handle.fileno())
+
+    identity_fields = ("st_dev", "st_ino", "st_ctime_ns", "st_size")
+    if any(getattr(stat, field) != getattr(final_stat, field) for field in identity_fields):
+        raise KTArtifactError(f"RAWINT4 base shard changed while fingerprinting: {path}")
+    path_stat = path.stat()
+    if any(getattr(stat, field) != getattr(path_stat, field) for field in identity_fields):
+        raise KTArtifactError(f"RAWINT4 base shard was replaced while fingerprinting: {path}")
+
+    return {
+        "name": path.name,
+        "size": size,
+        "header_sha256": hashlib.sha256(header).hexdigest(),
+        "sample_sha256": sample_digest.hexdigest(),
+        "file_identity": {
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "ctime_ns": stat.st_ctime_ns,
+        },
+    }
+
+
+def _rawint4_base_fingerprint(
+    config_sha256: str,
+    index_sha256: str,
+    shards: list[Mapping[str, Any]],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"kt-rawint4-base-safetensors-v1\0")
+    digest.update(config_sha256.encode())
+    digest.update(b"\0")
+    digest.update(index_sha256.encode())
+    digest.update(b"\0")
+    for record in sorted(shards, key=lambda item: str(item.get("name", ""))):
+        portable = {
+            "name": record.get("name"),
+            "size": record.get("size"),
+            "header_sha256": record.get("header_sha256"),
+            "sample_sha256": record.get("sample_sha256"),
+        }
+        digest.update(json.dumps(portable, sort_keys=True, separators=(",", ":")).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _rawint4_base_identity(model_name_or_path: str | os.PathLike[str]) -> dict[str, Any]:
+    root = _safe_root(model_name_or_path, "RAWINT4 base checkpoint")
+    config_path = root / "config.json"
+    index_path = root / KT_NON_EXPERT_INDEX_NAME
+    try:
+        resolved_config_path = config_path.resolve(strict=True)
+        resolved_index_path = index_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise KTArtifactError(f"could not resolve RAWINT4 base checkpoint metadata: {exc}") from exc
+    config = _read_json(resolved_config_path, "RAWINT4 base config")
+    index = _read_json(resolved_index_path, "RAWINT4 base safetensors index")
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise KTArtifactError(f"{index_path}: weight_map must be a non-empty object")
+    shard_names = set()
+    for key, shard_name in weight_map.items():
+        if not isinstance(key, str) or not key:
+            raise KTArtifactError(f"{index_path}: tensor names must be non-empty strings")
+        if (
+            not isinstance(shard_name, str)
+            or shard_name != os.path.basename(shard_name)
+            or not shard_name.endswith(".safetensors")
+        ):
+            raise KTArtifactError(f"{index_path}: unsafe safetensors shard {shard_name!r}")
+        shard_names.add(shard_name)
+    config_digest = _canonical_json_sha256(config)
+    index_digest = _canonical_json_sha256(index)
+    shards = [_rawint4_shard_record(root / name) for name in sorted(shard_names)]
+    return {
+        "model_name_or_path": str(root),
+        "fingerprint_schema": _RAWINT4_BASE_IDENTITY_SCHEMA,
+        "fingerprint": _rawint4_base_fingerprint(config_digest, index_digest, shards),
+        "config_sha256": config_digest,
+        "index_sha256": index_digest,
+        "shards": shards,
+    }
+
+
+def _validate_rawint4_base_identity(
+    saved: Any,
+    current: Any,
+    manifest_path: Path,
+) -> None:
+    if not isinstance(saved, Mapping) or not isinstance(current, Mapping):
+        raise KTArtifactError(f"{manifest_path}: RAWINT4 base identity must be an object")
+    for label, value in (("saved", saved), ("runtime", current)):
+        if value.get("fingerprint_schema") != _RAWINT4_BASE_IDENTITY_SCHEMA:
+            raise KTArtifactError(f"{manifest_path}: unsupported {label} RAWINT4 base fingerprint schema")
+        fingerprint = _require_sha256(
+            value.get("fingerprint"), f"base.{label}.fingerprint", manifest_path
+        )
+        config_digest = _require_sha256(
+            value.get("config_sha256"), f"base.{label}.config_sha256", manifest_path
+        )
+        index_digest = _require_sha256(
+            value.get("index_sha256"), f"base.{label}.index_sha256", manifest_path
+        )
+        shards = value.get("shards")
+        if not isinstance(shards, list) or not shards:
+            raise KTArtifactError(f"{manifest_path}: base.{label}.shards must be non-empty")
+        names = set()
+        for shard_idx, record in enumerate(shards):
+            if not isinstance(record, Mapping):
+                raise KTArtifactError(
+                    f"{manifest_path}: base.{label}.shards[{shard_idx}] must be an object"
+                )
+            name = _require_string(
+                record.get("name"), f"base.{label}.shards[{shard_idx}].name", manifest_path
+            )
+            if name != os.path.basename(name) or not name.endswith(".safetensors") or name in names:
+                raise KTArtifactError(f"{manifest_path}: invalid RAWINT4 base shard name {name!r}")
+            names.add(name)
+            _positive_int(record.get("size"), f"base.{label}.shards[{shard_idx}].size", manifest_path)
+            _require_sha256(
+                record.get("header_sha256"),
+                f"base.{label}.shards[{shard_idx}].header_sha256",
+                manifest_path,
+            )
+            _require_sha256(
+                record.get("sample_sha256"),
+                f"base.{label}.shards[{shard_idx}].sample_sha256",
+                manifest_path,
+            )
+            identity = record.get("file_identity")
+            if not isinstance(identity, Mapping) or any(
+                isinstance(identity.get(field), bool) or not isinstance(identity.get(field), int)
+                for field in ("device", "inode", "ctime_ns")
+            ):
+                raise KTArtifactError(
+                    f"{manifest_path}: invalid base.{label}.shards[{shard_idx}].file_identity"
+                )
+        if fingerprint != _rawint4_base_fingerprint(config_digest, index_digest, shards):
+            raise KTArtifactError(f"{manifest_path}: {label} RAWINT4 base fingerprint is invalid")
+
+    if saved["fingerprint"] != current["fingerprint"]:
+        raise KTArtifactError(f"{manifest_path}: RAWINT4 base checkpoint fingerprint changed")
+
+    saved_path = _require_string(saved.get("model_name_or_path"), "base.model_name_or_path", manifest_path)
+    current_path = _require_string(
+        current.get("model_name_or_path"), "runtime.base.model_name_or_path", manifest_path
+    )
+    if _same_source(current_path, saved_path):
+        saved_identity = {
+            record["name"]: record["file_identity"] for record in saved["shards"]
+        }
+        current_identity = {
+            record["name"]: record["file_identity"] for record in current["shards"]
+        }
+        if saved_identity != current_identity:
+            raise KTArtifactError(
+                f"{manifest_path}: RAWINT4 base shards were replaced at the recorded path"
+            )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -563,6 +777,23 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
     return getattr(config, name, default)
 
 
+def _config_expert_weight_format(config: Any) -> str:
+    weight_format = _config_value(config, "kt_expert_weight_format", None)
+    if isinstance(weight_format, str) and weight_format.strip():
+        return weight_format.strip().lower()
+    backend = _config_value(config, "kt_backend", None)
+    if not isinstance(backend, str):
+        return ""
+    return {
+        "int8": "int8",
+        "amxint8": "int8",
+        "fp8": "fp8",
+        "amxfp8": "fp8",
+        "rawint4": "rawint4",
+        "amxint4_kgroup": "rawint4",
+    }.get(backend.strip().lower(), "")
+
+
 def is_kt_routed_expert_parameter_name(name: str) -> bool:
     """Whether a checkpoint key is a routed expert base parameter owned by KT."""
 
@@ -574,13 +805,77 @@ def is_kt_supported_moe_model(model: Any) -> bool:
 
     config = getattr(model, "config", None)
     architectures = getattr(config, "architectures", None)
-    if not isinstance(architectures, (list, tuple)):
-        return False
-    return any(
-        isinstance(architecture, str)
-        and any(marker in architecture for marker in _SUPPORTED_MOE_ARCHITECTURES)
+    architecture_match = isinstance(architectures, (list, tuple)) and any(
+        isinstance(architecture, str) and any(marker in architecture for marker in _SUPPORTED_MOE_ARCHITECTURES)
         for architecture in architectures
     )
+    if architecture_match:
+        return True
+    text_config = getattr(config, "text_config", None)
+    model_types = {
+        str(getattr(config, "model_type", "")),
+        str(getattr(text_config, "model_type", "")),
+    }
+    return bool(model_types.intersection({"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}))
+
+
+def should_disable_kt_source_quantizer(
+    kt_config: Any,
+    model_config: Any,
+    explicit_quantization_config: Any | None = None,
+) -> bool:
+    """Return whether KT consumes the checkpoint's quantized tensors directly.
+
+    RAWINT4 checkpoints keep ordinary model weights in BF16 and quantize only
+    routed experts. KT owns those packed expert tensors, so the framework must
+    not replace the expert module structure with its source quantizer. The
+    nested checkpoint metadata remains available for KT's strict validation.
+    """
+
+    rawint4_requested = _config_expert_weight_format(kt_config) == "rawint4"
+    skip_loading = bool(_config_value(kt_config, "kt_skip_expert_loading", True))
+    if not rawint4_requested or not skip_loading:
+        return False
+    if explicit_quantization_config is not None:
+        raise KTArtifactError("RAWINT4 SFT cannot be combined with an explicit quantization_config")
+    try:
+        get_rawint4_checkpoint_contract(model_config)
+    except ValueError as exc:
+        raise KTArtifactError(str(exc)) from exc
+    return True
+
+
+def get_kt_fused_lora_exclude_modules(kt_config: Any, model: Any) -> str | None:
+    """Return the exact PEFT exclusion regex for KT-owned expert projections."""
+
+    if not bool(_config_value(kt_config, "kt_force_fused_expert_lora", False)):
+        return None
+
+    wrappers = tuple(getattr(model, "_kt_wrappers", ()) or ())
+    if not wrappers:
+        raise KTArtifactError("KT fused expert LoRA requires wrapped MoE layers before PEFT injection")
+
+    module_names = {id(module): name for name, module in model.named_modules()}
+    patterns = []
+    for wrapper in wrappers:
+        if not bool(getattr(wrapper, "_use_fused_expert_lora", False)):
+            continue
+        wrapper_name = module_names.get(id(wrapper))
+        if not wrapper_name:
+            raise KTArtifactError("KT fused expert LoRA wrapper is missing from the model module tree")
+        moe_config = getattr(wrapper, "moe_config", None)
+        weight_names = tuple(getattr(moe_config, "weight_names", ()))
+        experts_attr = str(getattr(wrapper, "_experts_attr", "experts"))
+        if not weight_names or any(not isinstance(name, str) or not name for name in weight_names):
+            raise KTArtifactError(f"{wrapper_name}: invalid KT expert projection contract")
+        projections = "|".join(re.escape(name) for name in weight_names)
+        patterns.append(
+            rf"{re.escape(wrapper_name)}\.{re.escape(experts_attr)}\.\d+\.(?:{projections})"
+        )
+
+    if not patterns:
+        raise KTArtifactError("KT fused expert LoRA did not claim any routed-expert projections")
+    return rf"(?:{'|'.join(patterns)})"
 
 
 def _loading_value(loading_info: Any, name: str, default: Any) -> Any:
@@ -594,20 +889,22 @@ def validate_kt_prequantized_loading_info(
     loading_info: Any,
     model: Any | None = None,
 ) -> None:
-    """Fail closed after native FP8/INT8 routed experts were skipped.
+    """Fail closed after native quantized routed experts were skipped.
 
     This covers the pre-quantized path without a BF16 non-expert load plan.
     The plan-based path additionally calls :func:`validate_kt_pretrained_load`
     to compare the instantiated model against the cache's exact key set.
     """
 
-    weight_format = str(_config_value(kt_config, "kt_expert_weight_format", "")).lower()
+    weight_format = _config_expert_weight_format(kt_config)
     skip_loading = _config_value(kt_config, "kt_skip_expert_loading", True)
-    if weight_format not in {"int8", "fp8"} or not bool(skip_loading):
+    if weight_format not in {"int8", "fp8", "rawint4"} or not bool(skip_loading):
         return
     config = getattr(model, "config", None)
-    model_type = getattr(config, "model_type", None)
-    layer_count = getattr(config, "num_hidden_layers", None)
+    text_config = getattr(config, "text_config", None)
+    effective_config = text_config if text_config is not None else config
+    model_type = getattr(effective_config, "model_type", None)
+    layer_count = getattr(effective_config, "num_hidden_layers", None)
     mtp_prefix = (
         f"model.layers.{layer_count}."
         if model_type == "deepseek_v3" and isinstance(layer_count, int) and not isinstance(layer_count, bool)
@@ -667,7 +964,7 @@ def resolve_kt_pretrained_artifacts(
     cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
     if not cache_path:
         return None
-    if str(_config_value(kt_config, "kt_expert_weight_format", "")).lower() != "int8":
+    if _config_expert_weight_format(kt_config) != "int8":
         raise KTArtifactError("kt_non_expert_weight_path requires routed INT8 expert weights")
     if quantization_config is not None:
         raise KTArtifactError(
@@ -1343,6 +1640,51 @@ def _runtime_expert_weight_format(
     return "bf16"
 
 
+def _runtime_rawint4_quantization(model: Any) -> dict[str, Any]:
+    """Resolve and strictly validate RAWINT4 checkpoint/runtime provenance."""
+
+    expected = {
+        "bits": 4,
+        "group_size": 32,
+        "signed": True,
+        "symmetric": True,
+        "zero_point": False,
+        "format": "pack-quantized",
+        "weight_layout": RAWINT4_WEIGHT_LAYOUT,
+    }
+    provenance: list[tuple[str, Any]] = []
+    queue = [model]
+    visited: set[int] = set()
+    while queue:
+        candidate = queue.pop(0)
+        if candidate is None or id(candidate) in visited:
+            continue
+        visited.add(id(candidate))
+        value = getattr(candidate, "_kt_rawint4_quantization", None)
+        if value is not None:
+            provenance.append((type(candidate).__name__, value))
+        for attribute in ("base_model", "model", "module"):
+            child = getattr(candidate, attribute, None)
+            if child is not None and child is not candidate:
+                queue.append(child)
+    for wrapper in _find_wrappers(model):
+        value = getattr(wrapper, "_kt_rawint4_quantization", None)
+        if value is not None:
+            provenance.append((f"KT wrapper layer {getattr(wrapper, 'layer_idx', '?')}", value))
+    if not provenance:
+        raise KTArtifactError("RAWINT4 runtime lacks quantization provenance")
+    for source, value in provenance:
+        if not isinstance(value, Mapping) or set(value) != set(expected):
+            raise KTArtifactError(f"invalid {source} RAWINT4 quantization provenance {value!r}")
+        for name, expected_value in expected.items():
+            observed = value[name]
+            if type(observed) is not type(expected_value) or observed != expected_value:
+                raise KTArtifactError(
+                    f"invalid {source} RAWINT4 {name}: expected " f"{expected_value!r}, got {observed!r}"
+                )
+    return expected
+
+
 def _dtype_name(dtype: Any) -> str:
     values = {
         "torch.bfloat16": "BF16",
@@ -1500,11 +1842,17 @@ def _adapter_provenance(model: Any, plan: KTPretrainedLoadPlan | None) -> dict[s
         raise KTArtifactError(
             "a KT non-expert load plan requires INT8 routed expert provenance"
         )
+    base_model_name = _base_model_name(model, plan)
     payload: dict[str, Any] = {
         "expert_weight_format": expert_weight_format,
-        "base": {"model_name_or_path": _base_model_name(model, plan)},
+        "base": {"model_name_or_path": base_model_name},
         "lora": {"rank": rank, "alpha": float(alpha)},
     }
+    if expert_weight_format == "rawint4":
+        payload["expert_quantization"] = _runtime_rawint4_quantization(model)
+        if not isinstance(base_model_name, str) or not base_model_name:
+            raise KTArtifactError("RAWINT4 adapter provenance requires a local base checkpoint path")
+        payload["base"] = _rawint4_base_identity(base_model_name)
     if plan is not None:
         source = plan.manifest.get("source")
         if not isinstance(source, Mapping):
@@ -1619,10 +1967,16 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
         saved_format = "int8"
     if saved_format != expected_provenance["expert_weight_format"]:
         raise KTArtifactError(f"{manifest_path}: expert_weight_format does not match the runtime")
-    for field in ("base", "lora"):
-        if payload.get(field) != expected_provenance[field]:
-            raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
-    for field in ("non_expert_cache", "int8_experts"):
+    if saved_format == "rawint4":
+        _validate_rawint4_base_identity(
+            payload.get("base"), expected_provenance["base"], manifest_path
+        )
+    elif payload.get("base") != expected_provenance["base"]:
+        # Keep the existing BF16/FP8/INT8 path-bound contract unchanged.
+        raise KTArtifactError(f"{manifest_path}: base does not match the runtime")
+    if payload.get("lora") != expected_provenance["lora"]:
+        raise KTArtifactError(f"{manifest_path}: lora does not match the runtime")
+    for field in ("non_expert_cache", "int8_experts", "expert_quantization"):
         if payload.get(field) != expected_provenance.get(field):
             raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
     artifacts = payload.get("artifacts")
@@ -1686,6 +2040,7 @@ __all__ = [
     "is_kt_routed_expert_base_parameter",
     "is_kt_routed_expert_parameter_name",
     "is_kt_supported_moe_model",
+    "get_kt_fused_lora_exclude_modules",
     "load_kt_adapter_artifacts",
     "mark_kt_int8_routed_expert_base_parameters",
     "prepare_kt_int8_non_expert_device_map",
@@ -1694,6 +2049,7 @@ __all__ = [
     "project_kt_routed_experts_out_of_device_map",
     "resolve_kt_pretrained_artifacts",
     "save_kt_adapter_artifacts",
+    "should_disable_kt_source_quantizer",
     "validate_kt_prequantized_loading_info",
     "validate_kt_pretrained_load",
     "write_kt_non_expert_cache_manifest",

@@ -54,6 +54,7 @@ static const bool _is_plain_ = false;
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
 #include "operators/amx/mxfp8-moe.hpp"  // MXFP8 MoE: FP8 E4M3fn weights × BF16 activations (MiniMax M3)
+#include "operators/amx/sft-k2-moe.hpp"
 #include "operators/amx/sft_moe.hpp"
 #include "operators/moe-sft-tp.hpp"
 #endif
@@ -560,6 +561,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__int8_kernel__") = "unsupported";
 #endif
   m.attr("__int8_weight_layout__") = "kt-int8-n32-k64-vnni-v1";
+#if defined(USE_AMX_AVX_KERNEL) && defined(__AVX512BF16__)
+  m.attr("__rawint4_kernel__") = "amx-int4-kgroup-g32";
+#else
+  m.attr("__rawint4_kernel__") = "unsupported";
+#endif
+  m.attr("__rawint4_weight_layout__") = "compressed-tensors-rawint4-g32-v1";
 #if defined(__AVX512BF16__) && defined(__AVX512VBMI__)
   m.attr("__fp8_kernel__") = "avx512-fp8-decode-bf16";
 #else
@@ -967,8 +974,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_SFT_MOE");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup, AMX_AWQ_MOE_TP>>(moe_module,
   //                                                                                         "AMXInt4_1KGroup_SFT_MOE");
-  // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4SmallKGroup, AMX_K2_MOE_TP>>(moe_module,
-  //                                                                                       "AMXInt4_KGroup_SFT_MOE");
+  bind_moe_sft_module<AMX_K2_SFT_MOE_TP<>>(moe_module, "AMXInt4_KGroup_SFT_MOE");
   // SFT MoE with SkipLoRA=true (skip all LoRA computation in backward, only compute base weight grad_input)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP, true>>(moe_module,
                                                                                      "AMXBF16_SFT_MOE_SkipLoRA");

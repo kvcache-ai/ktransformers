@@ -44,8 +44,14 @@ _stub_module(
     "backend",
     FP8_BACKEND="FP8",
     INT8_BACKEND="INT8",
+    RAWINT4_BACKEND="RAWINT4",
+    RAWINT4_GROUP_SIZE=32,
+    RAWINT4_SFT_METHOD="RAWINT4_SFT",
+    RAWINT4_WEIGHT_LAYOUT="compressed-tensors-rawint4-g32-v1",
     get_fp8_runtime=lambda: None,
     get_int8_runtime=lambda: None,
+    get_rawint4_checkpoint_contract=lambda config: None,
+    get_rawint4_runtime=lambda: None,
 )
 checkpoint_module = _stub_module(
     "checkpoint",
@@ -59,6 +65,7 @@ _stub_module(
     extract_moe_weights=lambda *args, **kwargs: None,
     load_block_fp8_experts_from_checkpoint_files=lambda *args, **kwargs: None,
     load_experts_from_checkpoint_files=lambda *args, **kwargs: None,
+    load_rawint4_experts_from_checkpoint_files=lambda *args, **kwargs: None,
 )
 
 spec = importlib.util.spec_from_file_location(
@@ -162,9 +169,54 @@ def test_get_kt_config_resolves_raw_nested_and_transformers_mappings(monkeypatch
     assert transformers_wrapper.kt_skip_expert_loading is True
 
 
-def test_load_kt_model_keeps_fp8_path_as_provenance_and_skips_hf_experts(monkeypatch):
+def test_kimi_nested_text_config_device_maps_use_text_contract(monkeypatch):
+    config = SimpleNamespace(
+        architectures=["KimiK25ForConditionalGeneration"],
+        model_type="kimi_k25",
+        text_config=SimpleNamespace(
+            model_type="kimi_k2",
+            num_hidden_layers=2,
+        ),
+    )
+    moe_config = SimpleNamespace(
+        expert_num=4,
+        moe_layer_attr="mlp",
+        experts_attr="experts",
+    )
+    cfg = SimpleNamespace(kt_num_gpu_experts=0)
+    monkeypatch.setattr(wrapper, "get_moe_arch_config", lambda _: moe_config)
+    monkeypatch.setattr(
+        wrapper,
+        "_get_layers_prefix",
+        lambda _: "language_model.model.layers",
+    )
+    monkeypatch.setattr(wrapper, "_get_kt_config", lambda _: cfg)
+
+    full = wrapper.build_kt_device_map(config, cfg)
+    simplified = wrapper.build_kt_device_map_simplified(config, cfg)
+
+    expected_roots = {
+        "language_model.model.embed_tokens": "cuda:0",
+        "language_model.model.norm": "cuda:0",
+        "language_model.lm_head": "cuda:0",
+    }
+    assert {name: full[name] for name in expected_roots} == expected_roots
+    assert {name: simplified[name] for name in expected_roots} == expected_roots
+    assert "language_model.model.layers.1" in full
+    assert "language_model.model.layers.1" in simplified
+    assert "model.embed_tokens" not in full
+
+
+def test_wrapper_distinguishes_rawint4_ordinary_retain_from_checkpoint_reuse():
+    wrapper._validate_rawint4_activation_policy("rawint4", SimpleNamespace(cpu="retain", gpu="retain"))
+    with pytest.raises(_KTConfigError, match="checkpoint-forward reuse"):
+        wrapper._validate_rawint4_activation_policy("rawint4", SimpleNamespace(cpu="retain", gpu="recompute"))
+
+
+@pytest.mark.parametrize("expert_weight_format", ["fp8", "rawint4"])
+def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monkeypatch, expert_weight_format):
     cfg = SimpleNamespace(
-        kt_expert_weight_format="fp8",
+        kt_expert_weight_format=expert_weight_format,
         kt_weight_path="/models/deepseek-v3.1",
         kt_checkpoint_files=None,
         kt_sharded_metadata=None,
@@ -230,13 +282,16 @@ def test_load_kt_model_keeps_fp8_path_as_provenance_and_skips_hf_experts(monkeyp
     assert captured["plugin"] is cfg
 
 
+@pytest.mark.parametrize("expert_weight_format", ["fp8", "rawint4"])
 @pytest.mark.parametrize(
     "checkpoint_files",
     [None, ["/models/deepseek-v3.1/pytorch_model-00001-of-00002.bin"]],
 )
-def test_load_kt_model_fp8_fails_closed_before_hf_load(monkeypatch, checkpoint_files):
+def test_load_kt_model_native_quantized_fails_closed_before_hf_load(
+    monkeypatch, checkpoint_files, expert_weight_format
+):
     cfg = SimpleNamespace(
-        kt_expert_weight_format="fp8",
+        kt_expert_weight_format=expert_weight_format,
         kt_weight_path="/models/deepseek-v3.1",
         kt_checkpoint_files=None,
         kt_sharded_metadata=None,

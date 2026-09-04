@@ -150,3 +150,96 @@ def test_raw_fp8_loader_rejects_wrong_block_size(tmp_path):
             hidden_size=128,
             block_size=(64, 128),
         )
+
+
+def _write_rawint4_checkpoint(
+    tmp_path: Path,
+    *,
+    omit_key: str | None = None,
+    add_zero_point: bool = False,
+    bad_scale: bool = False,
+):
+    tensors = {}
+    prefix = "language_model.model.layers.0.mlp.experts"
+    for expert_idx in range(2):
+        for projection in ("gate_proj", "up_proj", "down_proj"):
+            base = f"{prefix}.{expert_idx}.{projection}"
+            tensors[f"{base}.weight_packed"] = torch.arange(32 * 4, dtype=torch.int32).reshape(32, 4)
+            scale_shape = (32, 2) if bad_scale and expert_idx == 1 else (32, 1)
+            scale_dtype = torch.bfloat16 if expert_idx == 0 else torch.float32
+            tensors[f"{base}.weight_scale"] = torch.ones(scale_shape, dtype=scale_dtype)
+            tensors[f"{base}.weight_shape"] = torch.tensor([32, 32], dtype=torch.int64)
+    if add_zero_point:
+        tensors[f"{prefix}.0.gate_proj.weight_zero_point"] = torch.zeros((32, 1), dtype=torch.int32)
+    if omit_key is not None:
+        tensors.pop(omit_key)
+    checkpoint = tmp_path / "model.safetensors"
+    safetensors_torch.save_file(tensors, checkpoint)
+    metadata = {"weight_map": {key: checkpoint.name for key in tensors}}
+    return checkpoint, metadata
+
+
+def test_rawint4_loader_normalizes_real_compressed_tensors_layout(tmp_path):
+    checkpoint, metadata = _write_rawint4_checkpoint(tmp_path)
+
+    loaded = weights.load_rawint4_experts_from_checkpoint_files(
+        [str(checkpoint)],
+        metadata,
+        "language_model.model.layers",
+        _moe_config(intermediate_size=32),
+        layer_idx=0,
+        hidden_size=32,
+    )
+
+    assert isinstance(loaded, weights.RAWINT4ExpertWeights)
+    assert loaded.group_size == 32
+    for packed in (loaded.gate_proj, loaded.up_proj, loaded.down_proj):
+        assert packed.dtype == torch.uint8
+        assert tuple(packed.shape) == (2, 32, 16)
+        assert packed.device.type == "cpu"
+        assert packed.is_contiguous()
+    for scale in (loaded.gate_scale, loaded.up_scale, loaded.down_scale):
+        assert scale.dtype == torch.bfloat16
+        assert tuple(scale.shape) == (2, 32, 1)
+        assert scale.device.type == "cpu"
+        assert scale.is_contiguous()
+
+
+def test_rawint4_loader_rejects_any_zero_point_tensor(tmp_path):
+    checkpoint, metadata = _write_rawint4_checkpoint(tmp_path, add_zero_point=True)
+    with pytest.raises(ValueError, match="without zero-point tensors"):
+        weights.load_rawint4_experts_from_checkpoint_files(
+            [str(checkpoint)],
+            metadata,
+            "language_model.model.layers",
+            _moe_config(intermediate_size=32),
+            layer_idx=0,
+            hidden_size=32,
+        )
+
+
+def test_rawint4_loader_requires_exact_scale_shape(tmp_path):
+    checkpoint, metadata = _write_rawint4_checkpoint(tmp_path, bad_scale=True)
+    with pytest.raises(ValueError, match="scale shape mismatch"):
+        weights.load_rawint4_experts_from_checkpoint_files(
+            [str(checkpoint)],
+            metadata,
+            "language_model.model.layers",
+            _moe_config(intermediate_size=32),
+            layer_idx=0,
+            hidden_size=32,
+        )
+
+
+def test_rawint4_loader_requires_every_shape_tensor(tmp_path):
+    missing = "language_model.model.layers.0.mlp.experts.1.down_proj.weight_shape"
+    checkpoint, metadata = _write_rawint4_checkpoint(tmp_path, omit_key=missing)
+    with pytest.raises(FileNotFoundError, match="missing 1 RAWINT4 tensor"):
+        weights.load_rawint4_experts_from_checkpoint_files(
+            [str(checkpoint)],
+            metadata,
+            "language_model.model.layers",
+            _moe_config(intermediate_size=32),
+            layer_idx=0,
+            hidden_size=32,
+        )
