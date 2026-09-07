@@ -135,6 +135,11 @@ class KTMoEWrapper:
         # Inference-specific parameters
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
+        # When set, back the CPU-resident per-expert BufferB weight blocks with a
+        # MAP_SHARED file under this directory instead of anonymous RAM. Lets a
+        # host with barely enough RAM for the CPU expert working set serve the
+        # model. Inference only; ignored in SFT mode. (--kt-mmap-experts-dir)
+        mmap_experts_dir: Optional[str] = None,
         # Mode and method selection
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
@@ -227,6 +232,7 @@ class KTMoEWrapper:
                 chunked_prefill_size=chunked_prefill_size,
                 cpu_save=cpu_save,
                 max_deferred_experts_per_token=max_deferred_experts_per_token,
+                mmap_experts_dir=mmap_experts_dir,
                 method=method,
                 numa_nodes=numa_nodes,
                 swiglu_limit=swiglu_limit,
@@ -331,6 +337,7 @@ def _create_inference_wrapper(
     numa_nodes: Optional[List[int]] = None,
     swiglu_limit: float = 0.0,
     swiglu_alpha: float = 0.0,
+    mmap_experts_dir: Optional[str] = None,
 ) -> BaseMoEWrapper:
     """
     Create an inference wrapper based on the method.
@@ -388,7 +395,7 @@ def _create_inference_wrapper(
             "FP8/MXFP4/MXFP8/LLAMAFILE weights — either unset the env or select a "
             "matching --kt-method."
         )
-    return backend_cls(
+    wrapper = backend_cls(
         layer_idx=layer_idx,
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
@@ -405,6 +412,12 @@ def _create_inference_wrapper(
         numa_nodes=numa_nodes,
         **extra_kwargs,
     )
+    # Consumed in each backend's load_weights() -> MOEConfig.mmap_weights_dir.
+    # Set as an attribute rather than a ctor arg so backend __init__ signatures
+    # stay untouched; BaseMoEWrapper defaults it to "".
+    if mmap_experts_dir:
+        wrapper.mmap_experts_dir = mmap_experts_dir
+    return wrapper
 
 
 def _create_sft_wrapper(

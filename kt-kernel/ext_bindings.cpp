@@ -901,6 +901,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("path", &GeneralMOEConfig::path)
       .def_readwrite("save", &GeneralMOEConfig::save)
       .def_readwrite("load", &GeneralMOEConfig::load)
+      .def_readwrite("mmap_weights_dir", &GeneralMOEConfig::mmap_weights_dir)
       .def_readwrite("share_backward_bb", &GeneralMOEConfig::share_backward_bb)
       .def_readwrite("share_cache_pool", &GeneralMOEConfig::share_cache_pool)
       .def_readwrite("m_block", &GeneralMOEConfig::m_block)
