@@ -675,7 +675,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     def _wait_for_pending_backward_repack(self) -> None:
         if getattr(self, "_backward_repack_pending", False):
-            self.wait_backward_repack()
+            with torch.profiler.record_function("kt.sft.wait_backward_repack"):
+                self.wait_backward_repack()
 
     def forward(
         self,

@@ -287,28 +287,7 @@ class KTMoEFunction(torch.autograd.Function):
         dist_on = ctx.dist_on
         rank = dist.get_rank() if dist.is_initialized() else 0
 
-        # Wait for any in-flight async repack before recompute forward uses the pool
-        repack_wait_error = None
-        if (not dist_on or rank == 0) and getattr(ctx.wrapper, "share_backward_bb", False):
-            try:
-                with torch.profiler.record_function("kt.sft.wait_backward_repack"):
-                    ctx.wrapper.wait_backward_repack()
-            except Exception as exc:
-                repack_wait_error = exc
-                if ctx.cache_checkpoint_forward or ctx.reuse_cached_forward:
-                    _poison_checkpoint_cache(ctx.wrapper, exc)
-        if dist_on:
-            _sync_rank0_exception(
-                repack_wait_error,
-                device=ctx.original_device,
-                context=f"Layer {ctx.layer_idx} backward repack wait failed",
-            )
-        elif repack_wait_error is not None:
-            raise repack_wait_error
-
-        # Access saved_tensors FIRST — under non-reentrant checkpoint this
-        # triggers the unpack hook which runs a full decoder-layer recompute,
-        # populating the C++ cache before we call wrapper.backward().
+        # Trigger checkpoint recompute before the CPU wrapper waits for BufferB.
         recompute_error = None
         try:
             with torch.profiler.record_function("kt.sft.checkpoint_recompute"):
