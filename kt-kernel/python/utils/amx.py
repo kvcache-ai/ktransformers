@@ -39,6 +39,7 @@ AVX2RawInt4_MOE = getattr(_moe_mod, "AVX2RawInt4_MOE", None)
 AVX2MXFP4_MOE = getattr(_moe_mod, "AVX2MXFP4_MOE", None)
 AVX2MXFP8_MOE = getattr(_moe_mod, "AVX2MXFP8_MOE", None)
 AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
+AVXVNNI256GPTQInt4Packed_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4Packed_MOE", None)
 AVXVNNI256RawInt4_MOE = getattr(_moe_mod, "AVXVNNI256RawInt4_MOE", None)
 SYCLGPTQInt4_MOE = getattr(_moe_mod, "SYCLGPTQInt4_MOE", None)
 
@@ -58,9 +59,11 @@ _HAS_AVX2_RAWINT4_SUPPORT = AVX2RawInt4_MOE is not None
 _HAS_AVX2_MXFP4_SUPPORT = AVX2MXFP4_MOE is not None
 _HAS_AVX2_MXFP8_SUPPORT = AVX2MXFP8_MOE is not None
 _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
+_HAS_AVXVNNI256_PACKED_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4Packed_MOE is not None
 _HAS_AVXVNNI256_RAW_INT4_SUPPORT = AVXVNNI256RawInt4_MOE is not None
 _HAS_SYCL_GPTQ_INT4_SUPPORT = SYCLGPTQInt4_MOE is not None
 _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
+_AVXVNNI256_PACKED_GPTQ_INT4_MAX_GROUP_SIZE = 2048
 _AVXVNNI256_RAW_INT4_MAX_GROUP_SIZE = 256
 
 
@@ -99,6 +102,12 @@ def _supports_avxvnni256_gptq_int4_group_size(group_size: Optional[int]) -> bool
     return group_size > 0 and group_size % 32 == 0 and group_size <= _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE
 
 
+def _supports_avxvnni256_packed_gptq_int4_group_size(group_size: Optional[int]) -> bool:
+    if group_size is None:
+        return True
+    return group_size > 0 and group_size % 32 == 0 and group_size <= _AVXVNNI256_PACKED_GPTQ_INT4_MAX_GROUP_SIZE
+
+
 def _supports_avxvnni256_rawint4_group_size(group_size: Optional[int]) -> bool:
     if group_size is None:
         return True
@@ -108,8 +117,31 @@ def _supports_avxvnni256_rawint4_group_size(group_size: Optional[int]) -> bool:
 def _select_gptq_int4_backend(group_size: Optional[int] = None):
     forced = os.getenv("KT_GPTQ_INT4_BACKEND", "").strip().lower()
     avxvnni_group_supported = _supports_avxvnni256_gptq_int4_group_size(group_size)
+    packed_group_supported = _supports_avxvnni256_packed_gptq_int4_group_size(group_size)
+
+    # The packed backend keeps the int4 weights resident (~0.56 B/weight incl.
+    # scales + c2) instead of pre-unpacking them into an int8 [N, K] copy
+    # (~1.05 B/weight), so it is preferred whenever it is available. Shape
+    # limits beyond group_size (the k % group_size / k % 8 alignment) are
+    # enforced by the C++ BufferA/BufferB init with the real config; there is
+    # no hidden/intermediate size cap (the kernel staging auto-sizes).
+    if forced in {"packed", "avxvnni-packed", "avxvnni256-packed"}:
+        if not _HAS_AVXVNNI256_PACKED_GPTQ_INT4_SUPPORT:
+            raise RuntimeError(
+                "KT_GPTQ_INT4_BACKEND=packed requested, but AVXVNNI256GPTQInt4Packed_MOE is not compiled in."
+            )
+        if not _HOST_HAS_AVX_VNNI:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=packed requested, but the current CPU does not support avx_vnni.")
+        if not packed_group_supported:
+            raise RuntimeError(
+                "KT_GPTQ_INT4_BACKEND=packed requested, but "
+                f"group_size={group_size} is unsupported. The packed AVX-VNNI-256 GPTQ_INT4 backend supports "
+                f"positive multiples of 32 up to {_AVXVNNI256_PACKED_GPTQ_INT4_MAX_GROUP_SIZE}."
+            )
+        return AVXVNNI256GPTQInt4Packed_MOE
 
     if forced in {"avxvnni", "avxvnni256"}:
+        # Escape hatch: keep the pre-unpacked (int8-resident) AVX-VNNI backend.
         if not _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT:
             raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but AVXVNNI256GPTQInt4_MOE is not compiled in.")
         if not _HOST_HAS_AVX_VNNI:
@@ -127,6 +159,8 @@ def _select_gptq_int4_backend(group_size: Optional[int] = None):
             raise RuntimeError("KT_GPTQ_INT4_BACKEND=avx2 requested, but AVX2GPTQInt4_MOE is not compiled in.")
         return AVX2GPTQInt4_MOE
 
+    if _HAS_AVXVNNI256_PACKED_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI and packed_group_supported:
+        return AVXVNNI256GPTQInt4Packed_MOE
     if _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI and avxvnni_group_supported:
         return AVXVNNI256GPTQInt4_MOE
     if _HAS_AVX2_GPTQ_INT4_SUPPORT:
@@ -615,11 +649,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
-        if method == "GPTQ_INT4" and not (_HAS_AVX2_GPTQ_INT4_SUPPORT or _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT):
+        if method == "GPTQ_INT4" and not (
+            _HAS_AVX2_GPTQ_INT4_SUPPORT or _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT or _HAS_AVXVNNI256_PACKED_GPTQ_INT4_SUPPORT
+        ):
             raise RuntimeError(
                 "GPTQ_INT4 backend not available.\n"
                 "Please recompile kt_kernel_ext with GPTQ INT4 support enabled.\n"
-                "AVX-VNNI-256 will be selected automatically when available on the current CPU."
+                "The packed AVX-VNNI-256 backend is selected automatically when available on the current CPU."
             )
         if method == "SYCL_GPTQ_INT4" and not _HAS_SYCL_GPTQ_INT4_SUPPORT:
             raise RuntimeError(
