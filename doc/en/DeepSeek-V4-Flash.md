@@ -17,6 +17,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
+    - [Reasoning and tool calling](#reasoning-and-tool-calling)
 
 ## Hardware Requirements
 
@@ -219,5 +220,74 @@ The `kt` CLI ships with an OpenAI-compatible chat client that talks to the SGLan
 ```bash
 kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 ```
+
+### Reasoning and tool calling
+
+The `dsv4` Docker image enables DeepSeek-V4 reasoning and tool calling by
+default. For a native source launch, set:
+
+```bash
+export SGLANG_DSV4_MODE=2604
+export SGLANG_DSV4_2604_SUBMODE=2604B
+```
+
+and append these arguments to the launch command in Step 2:
+
+```bash
+  --reasoning-parser deepseek-v4 \
+  --tool-call-parser deepseekv4
+```
+
+Supported reasoning efforts are `low`, `high`, `max`, and `none`. If the field
+is omitted or set to `null`, the server uses thinking + `max`.
+
+#### Chat Completions
+
+```bash
+curl http://127.0.0.1:30000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "Call get_weather for Shanghai."}],
+    "reasoning_effort": "high",
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+#### Responses API (Codex-compatible)
+
+```bash
+curl http://127.0.0.1:30000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "input": "Call get_weather for Shanghai.",
+    "reasoning": {"effort": "max", "summary": "auto"},
+    "tools": [{
+      "type": "function",
+      "name": "get_weather",
+      "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+SGLang returns the function name and arguments; the client is responsible for
+executing the function.
 
 See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for the complete parameter reference.

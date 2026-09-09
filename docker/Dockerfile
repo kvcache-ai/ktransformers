@@ -1,4 +1,5 @@
 ARG CUDA_VERSION=12.8.1
+ARG DSV4_BASE_IMAGE=docker.m.daocloud.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 FROM docker.1ms.run/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
@@ -179,6 +180,337 @@ RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkg
 RUN conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main \
     && conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free \
     && conda config --set show_channel_urls yes
+
+########################################################
+########## DeepSeek-V4-Flash one-click image ############
+########################################################
+
+# This target is self-contained so the DSV4 image and its merged SGLang API
+# support can be reviewed as a Dockerfile-only change.
+FROM ${DSV4_BASE_IMAGE} AS dsv4
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG IMAGE_VERSION=dev
+ARG BUILD_DATE=unknown
+ARG KTRANSFORMERS_REPOSITORY=https://github.com/kvcache-ai/ktransformers.git
+ARG KTRANSFORMERS_REF=6d460cc10780f2e0ad541b5d58ad28086dd32ef0
+ARG SGLANG_REPOSITORY=https://github.com/kvcache-ai/sglang.git
+ARG SGLANG_REF=0980b6da258192896a9d884fbe564fd1f9ec07e3
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG TORCH_VERSION=2.9.1
+ARG SGL_KERNEL_VERSION=0.3.21
+ARG FLASHINFER_VERSION=0.6.15.post1
+ARG TRANSFORMERS_VERSION=4.57.1
+ARG TILELANG_VERSION=0.1.10
+ARG TVM_FFI_VERSION=0.1.11
+ARG CPUINFER_CUDA_ARCHS=80;86;89;90;100;120
+ARG BUILD_JOBS=16
+
+ENV CUDA_HOME=/usr/local/cuda \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=false \
+    MODEL_PATH=/model \
+    PORT=30000 \
+    DSV4_REASONING_EFFORT_PROFILE=official \
+    REASONING_PARSER=deepseek-v4 \
+    TOOL_CALL_PARSER=deepseekv4 \
+    PATH=/opt/venv/bin:/usr/local/bin:${PATH}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libhwloc-dev \
+        libnuma-dev \
+        libopenmpi-dev \
+        numactl \
+        pkg-config \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-dev \
+        python3.11-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.11 -m venv /opt/venv
+
+RUN python -m pip config set global.index-url "${PIP_INDEX_URL}" \
+    && python -m pip install --upgrade setuptools wheel \
+    && python -m pip install "cmake>=3.31,<4" ninja
+
+RUN python -m pip install \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==0.24.1" \
+        "torchaudio==${TORCH_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        --extra-index-url "${PIP_INDEX_URL}" \
+        --retries 10 \
+        --timeout 120
+
+ARG FLASHINFER_CUBIN_INDEX_URL=https://flashinfer.ai/whl
+ARG FLASHINFER_CUBIN_TRUSTED_HOST=flashinfer.ai
+
+RUN python -m pip install \
+        "sgl-kernel==${SGL_KERNEL_VERSION}" \
+        "flashinfer-python==${FLASHINFER_VERSION}" \
+        "transformers==${TRANSFORMERS_VERSION}" \
+        "tilelang==${TILELANG_VERSION}" \
+        "apache-tvm-ffi==${TVM_FFI_VERSION}" \
+        "cuda-python==13.2.0" \
+        "nvidia-cutlass-dsl==4.6.1" \
+        IPython \
+        aiohttp \
+        'anthropic>=0.20.0' \
+        blobfile==3.0.0 \
+        build \
+        compressed-tensors \
+        datasets \
+        decord2 \
+        einops \
+        fastapi \
+        gguf \
+        'grpcio>=1.78.0' \
+        'grpcio-health-checking>=1.78.0' \
+        'grpcio-reflection>=1.78.0' \
+        hf_transfer \
+        'huggingface_hub<1.0' \
+        interegular \
+        'llguidance>=0.7.11,<0.8.0' \
+        modelscope \
+        msgspec \
+        numpy \
+        nvidia-ml-py \
+        openai==2.6.1 \
+        openai-harmony==0.0.4 \
+        orjson \
+        outlines==0.1.11 \
+        packaging \
+        partial_json_parser \
+        pillow \
+        'prometheus-client>=0.20.0' \
+        psutil \
+        py-spy \
+        pybase64 \
+        pydantic \
+        python-multipart \
+        'pyzmq>=25.1.2' \
+        requests \
+        scipy \
+        sentencepiece \
+        setproctitle \
+        'smg-grpc-proto>=0.3.3' \
+        soundfile==0.13.1 \
+        tiktoken \
+        timm==1.0.16 \
+        torch_memory_saver==0.0.9 \
+        torchao==0.9.0 \
+        torchcodec==0.8.0 \
+        tqdm \
+        uvicorn \
+        uvloop \
+        xgrammar==0.1.27 \
+    && python -m pip install \
+        --index-url "${FLASHINFER_CUBIN_INDEX_URL}" \
+        --trusted-host "${FLASHINFER_CUBIN_TRUSTED_HOST}" \
+        --no-deps \
+        "flashinfer-cubin==${FLASHINFER_VERSION}" \
+    && python -m pip install --no-deps quack-kernels==0.2.4
+
+RUN git clone --filter=blob:none "${KTRANSFORMERS_REPOSITORY}" /workspace/ktransformers \
+    && git -C /workspace/ktransformers checkout --detach "${KTRANSFORMERS_REF}" \
+    && git -C /workspace/ktransformers submodule update --init --recursive \
+    && git -C /workspace/ktransformers/third_party/sglang fetch \
+        --depth 1 "${SGLANG_REPOSITORY}" "${SGLANG_REF}" \
+    && git -C /workspace/ktransformers/third_party/sglang checkout --detach FETCH_HEAD
+
+RUN export SGLANG_KT_VERSION="$(python -c "exec(open('/workspace/ktransformers/version.py').read()); print(__version__)")" \
+    && python -m pip install --no-deps \
+        /workspace/ktransformers/third_party/sglang/python \
+    && cd /workspace/ktransformers/kt-kernel \
+    && CPUINFER_BUILD_ALL_VARIANTS=1 \
+       CPUINFER_USE_CUDA=1 \
+       CPUINFER_CUDA_ARCHS="${CPUINFER_CUDA_ARCHS}" \
+       CPUINFER_PARALLEL="${BUILD_JOBS}" \
+       ./install.sh build \
+    && python -m pip install --no-deps /workspace/ktransformers \
+    && rm -rf /workspace/ktransformers/kt-kernel/build
+
+RUN python - <<'PY'
+import importlib.metadata
+
+from sglang.srt.entrypoints.openai import encoding_dsv4
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+expected = {
+    "ktransformers": "0.7.0.post1",
+    "kt-kernel": "0.7.0.post1",
+    "sglang-kt": "0.7.0.post1",
+    "torch": "2.9.1+cu128",
+    "flashinfer-python": "0.6.15.post1",
+    "transformers": "4.57.1",
+}
+for distribution, version in expected.items():
+    actual = importlib.metadata.version(distribution)
+    if actual != version:
+        raise RuntimeError(f"{distribution}: expected {version}, got {actual}")
+
+if set(encoding_dsv4.REASONING_EFFORT_PROFILES["official"]) != {
+    "low",
+    "high",
+    "max",
+}:
+    raise RuntimeError("missing official DeepSeek-V4 reasoning effort profile")
+if "deepseekv4" not in FunctionCallParser.ToolCallParserEnum:
+    raise RuntimeError("missing DeepSeek-V4 tool-call parser")
+PY
+
+COPY --chmod=0755 <<'ENTRYPOINT' /usr/local/bin/entrypoint-dsv4
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '[dsv4-entrypoint] %s\n' "$*" >&2
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+if [[ $# -gt 0 && "$1" != --* ]]; then
+  exec "$@"
+fi
+
+MODEL_PATH="${MODEL_PATH:-/model}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-30000}"
+TP="${TP:-1}"
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-16384}"
+MEM_FRACTION="${MEM_FRACTION:-0.90}"
+KT_GPU_EXPERTS="${KT_GPU_EXPERTS:-0}"
+KT_GPU_PREFILL_TOKEN_THRESHOLD="${KT_GPU_PREFILL_TOKEN_THRESHOLD:-2048}"
+CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-4096}"
+MAX_PREFILL_TOKENS="${MAX_PREFILL_TOKENS:-$CHUNKED_PREFILL_SIZE}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-2}"
+SWA_FULL_TOKENS_RATIO="${SWA_FULL_TOKENS_RATIO:-0.4}"
+WATCHDOG_TIMEOUT="${WATCHDOG_TIMEOUT:-1200}"
+DSV4_REASONING_EFFORT_PROFILE="${DSV4_REASONING_EFFORT_PROFILE:-official}"
+REASONING_PARSER="${REASONING_PARSER:-deepseek-v4}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-deepseekv4}"
+
+[[ "$TP" =~ ^[1-9][0-9]*$ ]] || die "TP must be a positive integer"
+[[ -r "$MODEL_PATH/config.json" ]] || die "missing $MODEL_PATH/config.json"
+find "$MODEL_PATH" -maxdepth 1 -type f \
+  \( -name '*.safetensors' -o -name '*.gguf' \) -print -quit | grep -q . ||
+  die "no model weight files found in $MODEL_PATH"
+
+GPU_INFO="$(TP="$TP" python - <<'PY'
+import os
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("PyTorch cannot access CUDA")
+tp = int(os.environ["TP"])
+if torch.cuda.device_count() < tp:
+    raise SystemExit(f"TP={tp} exceeds the visible GPU count")
+
+supported = {
+    (8, 0): ("8.0", "8.0"),
+    (8, 6): ("8.6", "8.6"),
+    (8, 9): ("8.9", "8.9"),
+    (9, 0): ("9.0+PTX", "9.0a"),
+    (10, 0): ("10.0+PTX", "10.0a"),
+    (12, 0): ("12.0+PTX", "12.0a"),
+}
+torch_arches = []
+flashinfer_arches = []
+for index in range(tp):
+    capability = torch.cuda.get_device_capability(index)
+    if capability not in supported:
+        raise SystemExit(f"unsupported GPU capability: SM{capability[0]}{capability[1]}")
+    torch_arch, flashinfer_arch = supported[capability]
+    if torch_arch not in torch_arches:
+        torch_arches.append(torch_arch)
+    if flashinfer_arch not in flashinfer_arches:
+        flashinfer_arches.append(flashinfer_arch)
+print("|".join((";".join(torch_arches), ";".join(flashinfer_arches))))
+PY
+)" || die "GPU validation failed"
+IFS='|' read -r DEFAULT_TORCH_ARCH DEFAULT_FLASHINFER_ARCH <<< "$GPU_INFO"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$DEFAULT_TORCH_ARCH}"
+export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-$DEFAULT_FLASHINFER_ARCH}"
+export SGLANG_DSV4_MODE="${SGLANG_DSV4_MODE:-2604}"
+export SGLANG_DSV4_2604_SUBMODE="${SGLANG_DSV4_2604_SUBMODE:-2604B}"
+
+if [[ -z "${KT_CPUINFER_THREADS:-}" ]]; then
+  PHYSICAL_CORES="$(lscpu -p=CORE,SOCKET | awk -F, '!/^#/ {print $1 "," $2}' | sort -u | wc -l)"
+  (( PHYSICAL_CORES > 4 )) && KT_CPUINFER_THREADS=$((PHYSICAL_CORES - 4)) || KT_CPUINFER_THREADS="$PHYSICAL_CORES"
+fi
+if [[ -z "${KT_THREADPOOL_COUNT:-}" ]]; then
+  KT_THREADPOOL_COUNT="$(lscpu -p=NODE | awk -F, '!/^#/ && $1 >= 0 {print $1}' | sort -u | wc -l)"
+  (( KT_THREADPOOL_COUNT > 0 )) || KT_THREADPOOL_COUNT=1
+fi
+
+cmd=(
+  python -m sglang.launch_server
+  --host "$HOST"
+  --port "$PORT"
+  --model "$MODEL_PATH"
+  --kt-weight-path "$MODEL_PATH"
+  --kt-method MXFP4
+  --kt-num-gpu-experts "$KT_GPU_EXPERTS"
+  --kt-cpuinfer "$KT_CPUINFER_THREADS"
+  --kt-threadpool-count "$KT_THREADPOOL_COUNT"
+  --kt-gpu-prefill-token-threshold "$KT_GPU_PREFILL_TOKEN_THRESHOLD"
+  --kt-enable-dynamic-expert-update
+  --tensor-parallel-size "$TP"
+  --context-length "$CONTEXT_LENGTH"
+  --attention-backend flashinfer
+  --mem-fraction-static "$MEM_FRACTION"
+  --chunked-prefill-size "$CHUNKED_PREFILL_SIZE"
+  --max-prefill-tokens "$MAX_PREFILL_TOKENS"
+  --max-running-requests "$MAX_RUNNING_REQUESTS"
+  --swa-full-tokens-ratio "$SWA_FULL_TOKENS_RATIO"
+  --watchdog-timeout "$WATCHDOG_TIMEOUT"
+  --disable-shared-experts-fusion
+  --trust-remote-code
+  --cuda-graph-bs 1
+  --cuda-graph-max-bs 1
+  --disable-radix-cache
+  --skip-server-warmup
+  --reasoning-parser "$REASONING_PARSER"
+  --tool-call-parser "$TOOL_CALL_PARSER"
+  --json-model-override-args "{\"dsv4_reasoning_effort_profile\":\"$DSV4_REASONING_EFFORT_PROFILE\"}"
+)
+cmd+=("$@")
+
+printf '[dsv4-entrypoint] launching:' >&2
+printf ' %q' "${cmd[@]}" >&2
+printf '\n' >&2
+exec numactl --interleave=all "${cmd[@]}"
+ENTRYPOINT
+
+LABEL org.opencontainers.image.title="KTransformers DeepSeek-V4-Flash" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      io.ktransformers.source-revision="${KTRANSFORMERS_REF}" \
+      io.ktransformers.sglang-revision="${SGLANG_REF}" \
+      io.ktransformers.reasoning-effort-profile="official"
+
+WORKDIR /workspace
+EXPOSE 30000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15m --retries=20 \
+  CMD curl --fail --silent --show-error "http://127.0.0.1:$PORT/health" >/dev/null || exit 1
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/entrypoint-dsv4"]
+CMD []
 
 ########################################################
 ########## Dual Conda Environment Setup ################
