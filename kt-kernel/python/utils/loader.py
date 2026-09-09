@@ -1220,17 +1220,41 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
         return list(dict.fromkeys(candidates))
 
     @staticmethod
-    def _ue8m0_to_bf16(scale_t: torch.Tensor) -> torch.Tensor:
+    def _ue8m0_to_bf16(
+        scale_t: torch.Tensor, *, reject_non_finite: bool = False
+    ) -> torch.Tensor:
+        if reject_non_finite:
+            valid_dtypes = {torch.uint8}
+            native_ue8m0 = getattr(torch, "float8_e8m0fnu", None)
+            if native_ue8m0 is not None:
+                valid_dtypes.add(native_ue8m0)
+            if scale_t.dtype not in valid_dtypes:
+                raise TypeError(
+                    "MXFP4 SFT requires raw uint8/float8_e8m0fnu scales, "
+                    f"got {scale_t.dtype}"
+                )
         if scale_t.dtype != torch.uint8:
             scale_t = scale_t.view(torch.uint8)
-        # bf16 = [sign(1) | exp(8) | mant(7)]; setting mant=0, exp=e gives 2^(e-127),
-        # which is exactly the value encoded by ue8m0 for e ∈ [1, 254]. e=0 → bf16 +0
-        # (acceptable: ue8m0=0 represents 2^-127, below bf16 normal range), e=255 → +inf.
-        # Compute in int32 then narrow to int16 (max value is 255<<7=32640, fits int16),
-        # because torch CPU has no lshift kernel for uint16.
-        return (scale_t.to(torch.int32) << 7).to(torch.int16).view(torch.bfloat16).contiguous()
+        if reject_non_finite and torch.any(scale_t == 0xFF).item():
+            raise ValueError(
+                "MXFP4 SFT rejects reserved UE8M0 scale 0xff because it "
+                "would decode to a non-finite BF16 value"
+            )
+        # BF16 normal exponent bits reproduce UE8M0 codes 1..254 exactly.
+        # UE8M0 code 0 is 2^-127, represented by BF16 subnormal bits 0x0040.
+        # Build through int32 because torch CPU has no lshift kernel for uint16.
+        scale_i32 = scale_t.to(torch.int32)
+        bf16_bits = scale_i32 << 7
+        bf16_bits = torch.where(scale_i32 == 0, 0x0040, bf16_bits)
+        return bf16_bits.to(torch.int16).view(torch.bfloat16).contiguous()
 
-    def load_experts(self, base_key: str, device: str = "cpu"):
+    def load_experts(
+        self,
+        base_key: str,
+        device: str = "cpu",
+        *,
+        reject_non_finite_scales: bool = False,
+    ):
         gate_name, up_name, down_name = self.PROJ_NAMES
         prefix = None
         expert_count = 0
@@ -1270,7 +1294,9 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
                 (down_name, down_scales),
             ):
                 s = self.load_tensor(f"{prefix}.{exp_id}.{proj}.scale", device)
-                dst[exp_id] = self._ue8m0_to_bf16(s)
+                dst[exp_id] = self._ue8m0_to_bf16(
+                    s, reject_non_finite=reject_non_finite_scales
+                )
 
         print(f"[MXFP4SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
         return {

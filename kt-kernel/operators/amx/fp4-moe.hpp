@@ -234,30 +234,33 @@ struct GemmKernel224MXFP4SmallKGroup {
     static size_t required_size(int n, int k, int k_group_size) { return Base::required_size(n, k, k_group_size); }
 
     BufferB(int n_, int k_, int k_group_size_, void* ptr) : Base(n_, k_, k_group_size_, ptr) {
-      // The compact bytes replace the FP32 contents in-place after validation.
-      // Forward compression is overlap-safe: byte i is always written below
-      // the first byte of every not-yet-read float j > i.
+      // Reuse the existing scale storage for native one-byte UE8M0 codes.
       scale_e8 = reinterpret_cast<uint8_t*>(d);
     }
 
-    void finalize_scale_e8() {
+    void load_scale_e8(const ggml_bf16_t* source) {
+      // Read storage bits directly so UE8M0 code 0 survives FTZ/DAZ.
       const size_t count = static_cast<size_t>(n) * k_group_count;
       bool valid = true;
       for (size_t i = 0; i < count; ++i) {
-        uint32_t bits;
-        std::memcpy(&bits, d + i, sizeof(bits));
-        const uint32_t exponent = (bits >> 23) & 0xFFu;
-        const bool is_positive_power_of_two =
-            (bits & 0x80000000u) == 0 && (bits & 0x007FFFFFu) == 0 && exponent != 0 && exponent != 0xFFu;
-        valid = valid && is_positive_power_of_two;
+        uint16_t bits;
+        std::memcpy(&bits, source + i, sizeof(bits));
+        const uint16_t exponent = (bits >> 7) & 0xFFu;
+        const bool is_code_zero = bits == 0x0040u;  // 2^-127
+        const bool is_normal_ue8m0 =
+            (bits & 0x8000u) == 0 && (bits & 0x007Fu) == 0 && exponent != 0 && exponent != 0xFFu;
+        const bool is_ue8m0_value = is_code_zero || is_normal_ue8m0;
+        valid = valid && is_ue8m0_value;
       }
       scale_e8_valid = valid;
       if (valid) {
         for (size_t i = 0; i < count; ++i) {
-          uint32_t bits;
-          std::memcpy(&bits, d + i, sizeof(bits));
-          scale_e8[i] = static_cast<uint8_t>((bits >> 23) & 0xFFu);
+          uint16_t bits;
+          std::memcpy(&bits, source + i, sizeof(bits));
+          scale_e8[i] = bits == 0x0040u ? 0 : static_cast<uint8_t>((bits >> 7) & 0xFFu);
         }
+      } else {
+        convert_or_copy(d, source, count);
       }
     }
 
@@ -280,11 +283,14 @@ struct GemmKernel224MXFP4SmallKGroup {
       int group = 0;
       for (; group + 16 <= group_count; group += 16) {
         const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + group));
-        const __m512i exponents = _mm512_slli_epi32(_mm512_cvtepu8_epi32(packed), 23);
-        _mm512_store_ps(destination + group, _mm512_castsi512_ps(exponents));
+        const __m512i codes = _mm512_cvtepu8_epi32(packed);
+        __m512i bits = _mm512_slli_epi32(codes, 23);
+        const __mmask16 zero_codes = _mm512_cmpeq_epi32_mask(codes, _mm512_setzero_si512());
+        bits = _mm512_mask_mov_epi32(bits, zero_codes, _mm512_set1_epi32(0x00400000));
+        _mm512_store_ps(destination + group, _mm512_castsi512_ps(bits));
       }
       for (; group < group_count; ++group) {
-        const uint32_t bits = static_cast<uint32_t>(source[group]) << 23;
+        const uint32_t bits = source[group] == 0 ? 0x00400000u : static_cast<uint32_t>(source[group]) << 23;
         std::memcpy(destination + group, &bits, sizeof(bits));
       }
       return destination;
@@ -293,16 +299,93 @@ struct GemmKernel224MXFP4SmallKGroup {
     void copy_scale_to_bf16(ggml_bf16_t* destination, size_t offset, size_t count) const {
       if (scale_e8_valid) {
         for (size_t i = 0; i < count; ++i) {
-          const uint16_t bits = static_cast<uint16_t>(scale_e8[offset + i]) << 7;
+          const uint16_t bits =
+              scale_e8[offset + i] == 0 ? 0x0040u : static_cast<uint16_t>(scale_e8[offset + i]) << 7;
           std::memcpy(destination + i, &bits, sizeof(bits));
         }
       } else {
         for (size_t i = 0; i < count; ++i) destination[i] = GGML_FP32_TO_BF16(d[offset + i]);
       }
     }
+
+    float scale_at(int row, int group) const {
+      const size_t offset = static_cast<size_t>(row) * k_group_count + group;
+      if (!scale_e8_valid) return d[offset];
+      const uint32_t bits = scale_e8[offset] == 0 ? 0x00400000u : static_cast<uint32_t>(scale_e8[offset]) << 23;
+      float value;
+      std::memcpy(&value, &bits, sizeof(value));
+      return value;
+    }
   };
 
   using BufferC = BufferCReduceImpl<GemmKernel224MXFP4SmallKGroup>;  // FP32 reduce
+
+  // Compute dX = dY @ W directly from the native row-major packed MXFP4
+  // forward weight.  Each worker owns complete 32-column K groups, so the
+  // FP32 accumulators need neither atomics nor a persistent transposed weight.
+  // Only one 32-value weight group is decoded at a time.
+  static void transpose_free_dx(int m, int n, int k, const ggml_bf16_t* grad_output, BufferB* weight,
+                                ggml_bf16_t* grad_input, int ith, int nth) {
+#if !defined(__AVX512BF16__)
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)grad_output;
+    (void)weight;
+    (void)grad_input;
+    (void)ith;
+    (void)nth;
+    throw std::runtime_error("MXFP4 SFT backward requires AVX512-BF16");
+#else
+    if (m < 0 || n <= 0 || k <= 0 || grad_output == nullptr || weight == nullptr || grad_input == nullptr) {
+      throw std::invalid_argument("MXFP4 transpose-free dX received invalid input");
+    }
+    if (weight->n != n || weight->k != k || weight->k_group_size != 32 || k % 32 != 0) {
+      throw std::invalid_argument("MXFP4 transpose-free dX requires a matching group-32 weight");
+    }
+    if (ith < 0 || nth <= 0 || ith >= nth) {
+      throw std::invalid_argument("MXFP4 transpose-free dX received an invalid worker partition");
+    }
+
+    const int group_count = k / 32;
+    const int group_begin = group_count * ith / nth;
+    const int group_end = group_count * (ith + 1) / nth;
+    alignas(64) ggml_bf16_t decoded[32];
+
+    for (int token_begin = 0; token_begin < m; token_begin += 4) {
+      const int token_count = std::min(4, m - token_begin);
+      for (int group = group_begin; group < group_end; ++group) {
+        __m512 accum_lo[4] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(),
+                              _mm512_setzero_ps()};
+        __m512 accum_hi[4] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(),
+                              _mm512_setzero_ps()};
+        const int k_begin = group * 32;
+
+        for (int row = 0; row < n; ++row) {
+          const auto* packed = reinterpret_cast<const __m128i*>(weight->get_submat(n, k, row, k_begin));
+          const __m512i weight_bf16 = mxfp4_to_bf16_32(_mm_loadu_si128(packed));
+          _mm512_store_si512(reinterpret_cast<__m512i*>(decoded), weight_bf16);
+          __m512 weight_lo;
+          __m512 weight_hi;
+          avx512_32xbf16_to_32xfp32(reinterpret_cast<__m512i*>(decoded), &weight_lo, &weight_hi);
+          const float scale = weight->scale_at(row, group);
+
+          for (int token = 0; token < token_count; ++token) {
+            const float dy = GGML_BF16_TO_FP32(grad_output[static_cast<size_t>(token_begin + token) * n + row]);
+            const __m512 coefficient = _mm512_set1_ps(dy * scale);
+            accum_lo[token] = _mm512_fmadd_ps(weight_lo, coefficient, accum_lo[token]);
+            accum_hi[token] = _mm512_fmadd_ps(weight_hi, coefficient, accum_hi[token]);
+          }
+        }
+
+        for (int token = 0; token < token_count; ++token) {
+          auto* destination = grad_input + static_cast<size_t>(token_begin + token) * k + k_begin;
+          avx512_32xfp32_to_32xbf16(&accum_lo[token], &accum_hi[token], reinterpret_cast<__m512i*>(destination));
+        }
+      }
+    }
+#endif
+  }
 
   // 4 个 zmm 的 horizontal reduce → 4 个连续 fp32。
   // 4 次 reduce_add_ps 之间无依赖，编译器/CPU 可并行调度。
@@ -391,11 +474,14 @@ struct GemmKernel224MXFP4SmallKGroup {
     int group = 0;
     for (; group + 16 <= count; group += 16) {
       const __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + group));
-      const __m512i exponents = _mm512_slli_epi32(_mm512_cvtepu8_epi32(packed), 23);
-      _mm512_store_ps(destination + group, _mm512_castsi512_ps(exponents));
+      const __m512i codes = _mm512_cvtepu8_epi32(packed);
+      __m512i bits = _mm512_slli_epi32(codes, 23);
+      const __mmask16 zero_codes = _mm512_cmpeq_epi32_mask(codes, _mm512_setzero_si512());
+      bits = _mm512_mask_mov_epi32(bits, zero_codes, _mm512_set1_epi32(0x00400000));
+      _mm512_store_ps(destination + group, _mm512_castsi512_ps(bits));
     }
     for (; group < count; ++group) {
-      const uint32_t bits = static_cast<uint32_t>(source[group]) << 23;
+      const uint32_t bits = source[group] == 0 ? 0x00400000u : static_cast<uint32_t>(source[group]) << 23;
       std::memcpy(destination + group, &bits, sizeof(bits));
     }
   }
@@ -677,6 +763,7 @@ inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
 // ============================================================================
 template <class T = amx::GemmKernel224MXFP4SmallKGroup>
 class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
+ protected:
   using Base = AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>>;
   using Base::config_;
   using Base::down_ba_;
@@ -844,15 +931,12 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
           uint64_t expert_idx = task_id;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           size_t scale_elem_count = (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
-          convert_or_copy(gate_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
-          convert_or_copy(up_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
-          convert_or_copy(down_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
-          gate_bb_[expert_idx]->finalize_scale_e8();
-          up_bb_[expert_idx]->finalize_scale_e8();
-          down_bb_[expert_idx]->finalize_scale_e8();
+          gate_bb_[expert_idx]->load_scale_e8(
+              (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count));
+          up_bb_[expert_idx]->load_scale_e8(
+              (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count));
+          down_bb_[expert_idx]->load_scale_e8(
+              (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count));
         },
         nullptr);
   }

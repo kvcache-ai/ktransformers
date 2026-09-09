@@ -20,6 +20,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -211,6 +212,171 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
   }
 
+  struct MXFP4TPStaging {
+    std::unique_ptr<uint8_t[]> gate;
+    std::unique_ptr<uint8_t[]> up;
+    std::unique_ptr<uint8_t[]> down;
+    std::unique_ptr<ggml_bf16_t[]> gate_scale;
+    std::unique_ptr<ggml_bf16_t[]> up_scale;
+    std::unique_ptr<ggml_bf16_t[]> down_scale;
+
+    void allocate(int experts, int hidden, int intermediate, int group_size) {
+      const size_t weight_elements = static_cast<size_t>(experts) * hidden * intermediate;
+      const size_t scale_elements = weight_elements / group_size;
+      gate = std::make_unique<uint8_t[]>(weight_elements / 2);
+      up = std::make_unique<uint8_t[]>(weight_elements / 2);
+      down = std::make_unique<uint8_t[]>(weight_elements / 2);
+      gate_scale = std::make_unique<ggml_bf16_t[]>(scale_elements);
+      up_scale = std::make_unique<ggml_bf16_t[]>(scale_elements);
+      down_scale = std::make_unique<ggml_bf16_t[]>(scale_elements);
+    }
+  };
+
+  void load_mxfp4_weights_with_tp_staging() {
+    if (config.quant_config.group_size != 32 || config.quant_config.zero_point) {
+      throw std::runtime_error("MXFP4 SFT TP staging requires zero-point-free group-32 weights");
+    }
+    if (config.physical_to_logical_map == nullptr) {
+      throw std::runtime_error("MXFP4 SFT requires a physical-to-logical expert map");
+    }
+    const auto* physical_to_logical_map = static_cast<const uint64_t*>(config.physical_to_logical_map);
+    std::vector<bool> seen_logical_experts(config.expert_num, false);
+    for (int physical_expert = 0; physical_expert < config.expert_num; ++physical_expert) {
+      const uint64_t logical_expert = physical_to_logical_map[physical_expert];
+      if (logical_expert >= static_cast<uint64_t>(config.expert_num) || seen_logical_experts[logical_expert]) {
+        throw std::runtime_error("MXFP4 SFT physical-to-logical expert map must be a permutation");
+      }
+      seen_logical_experts[logical_expert] = true;
+    }
+    const bool per_expert = !config.gate_projs.empty();
+    auto validate_projection_vectors = [&](const std::vector<std::vector<void*>>& values, const char* name) {
+      if (values.empty() || values[0].size() < static_cast<size_t>(config.expert_num)) {
+        throw std::runtime_error(std::string("MXFP4 SFT missing per-expert ") + name + " pointers");
+      }
+      for (int expert = 0; expert < config.expert_num; ++expert) {
+        if (values[0][expert] == nullptr) {
+          throw std::runtime_error(std::string("MXFP4 SFT has a null ") + name + " pointer");
+        }
+      }
+    };
+    if (per_expert) {
+      validate_projection_vectors(config.gate_projs, "gate weight");
+      validate_projection_vectors(config.up_projs, "up weight");
+      validate_projection_vectors(config.down_projs, "down weight");
+      validate_projection_vectors(config.gate_scales, "gate scale");
+      validate_projection_vectors(config.up_scales, "up scale");
+      validate_projection_vectors(config.down_scales, "down scale");
+    } else if (config.gate_proj == nullptr || config.up_proj == nullptr || config.down_proj == nullptr ||
+               config.gate_scale == nullptr || config.up_scale == nullptr || config.down_scale == nullptr) {
+      throw std::runtime_error("MXFP4 SFT requires all packed weight and scale pointers");
+    }
+
+    std::vector<int> intermediate_offsets(tp_count);
+    int intermediate_offset = 0;
+    for (int i = 0; i < tp_count; ++i) {
+      const auto& local = tp_configs[i];
+      if (local.hidden_size != config.hidden_size || local.expert_num != config.expert_num ||
+          local.intermediate_size % 32 != 0 || intermediate_offset % 32 != 0) {
+        throw std::runtime_error("MXFP4 SFT TP slices must be group-32 aligned");
+      }
+      intermediate_offsets[i] = intermediate_offset;
+      intermediate_offset += local.intermediate_size;
+      tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+    }
+    if (intermediate_offset != config.intermediate_size) {
+      throw std::runtime_error("MXFP4 SFT TP slices do not cover the full intermediate size");
+    }
+
+    const int group_size = config.quant_config.group_size;
+    std::vector<MXFP4TPStaging> staging(tp_count);
+    try {
+      run_numa_job_checked("native MXFP4 TP staging", [&](int numa_id) {
+        const auto& local = tp_configs[numa_id];
+        const int local_i = local.intermediate_size;
+        const int i_offset = intermediate_offsets[numa_id];
+        const int hidden = config.hidden_size;
+        const size_t local_weight_elements = static_cast<size_t>(local_i) * hidden;
+        const size_t local_weight_bytes = local_weight_elements / 2;
+        const size_t local_scale_elements = local_weight_elements / group_size;
+        auto& dst = staging[numa_id];
+        dst.allocate(config.expert_num, hidden, local_i, group_size);
+
+        config.pool->get_subpool(numa_id)->do_work_stealing_job(
+            config.expert_num, nullptr,
+            [&](int physical_expert) {
+              const size_t logical_expert = expert_map(physical_to_logical_map, physical_expert);
+              const uint8_t* gate_source =
+                  per_expert
+                      ? static_cast<const uint8_t*>(config.gate_projs[0][logical_expert])
+                      : static_cast<const uint8_t*>(config.gate_proj) +
+                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+              const uint8_t* up_source =
+                  per_expert
+                      ? static_cast<const uint8_t*>(config.up_projs[0][logical_expert])
+                      : static_cast<const uint8_t*>(config.up_proj) +
+                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+              const uint8_t* down_source =
+                  per_expert
+                      ? static_cast<const uint8_t*>(config.down_projs[0][logical_expert])
+                      : static_cast<const uint8_t*>(config.down_proj) +
+                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+              const auto* gate_scale_source =
+                  per_expert
+                      ? static_cast<const ggml_bf16_t*>(config.gate_scales[0][logical_expert])
+                      : static_cast<const ggml_bf16_t*>(config.gate_scale) +
+                            logical_expert * static_cast<size_t>(config.intermediate_size) * (hidden / group_size);
+              const auto* up_scale_source =
+                  per_expert
+                      ? static_cast<const ggml_bf16_t*>(config.up_scales[0][logical_expert])
+                      : static_cast<const ggml_bf16_t*>(config.up_scale) +
+                            logical_expert * static_cast<size_t>(config.intermediate_size) * (hidden / group_size);
+              const auto* down_scale_source =
+                  per_expert
+                      ? static_cast<const ggml_bf16_t*>(config.down_scales[0][logical_expert])
+                      : static_cast<const ggml_bf16_t*>(config.down_scale) +
+                            logical_expert * static_cast<size_t>(hidden) * (config.intermediate_size / group_size);
+
+              const size_t dst_weight_offset = logical_expert * local_weight_bytes;
+              const size_t dst_scale_offset = logical_expert * local_scale_elements;
+              const size_t gate_up_weight_offset = static_cast<size_t>(i_offset) * hidden / 2;
+              const size_t gate_up_scale_offset = static_cast<size_t>(i_offset) * (hidden / group_size);
+              std::memcpy(dst.gate.get() + dst_weight_offset, gate_source + gate_up_weight_offset,
+                          local_weight_bytes);
+              std::memcpy(dst.up.get() + dst_weight_offset, up_source + gate_up_weight_offset, local_weight_bytes);
+              std::memcpy(dst.gate_scale.get() + dst_scale_offset, gate_scale_source + gate_up_scale_offset,
+                          local_scale_elements * sizeof(ggml_bf16_t));
+              std::memcpy(dst.up_scale.get() + dst_scale_offset, up_scale_source + gate_up_scale_offset,
+                          local_scale_elements * sizeof(ggml_bf16_t));
+
+              const size_t full_down_row_bytes = static_cast<size_t>(config.intermediate_size) / 2;
+              const size_t local_down_row_bytes = static_cast<size_t>(local_i) / 2;
+              const size_t full_down_row_scales = static_cast<size_t>(config.intermediate_size) / group_size;
+              const size_t local_down_row_scales = static_cast<size_t>(local_i) / group_size;
+              for (int row = 0; row < hidden; ++row) {
+                std::memcpy(dst.down.get() + dst_weight_offset + static_cast<size_t>(row) * local_down_row_bytes,
+                            down_source + static_cast<size_t>(row) * full_down_row_bytes + i_offset / 2,
+                            local_down_row_bytes);
+                std::memcpy(dst.down_scale.get() + dst_scale_offset + static_cast<size_t>(row) * local_down_row_scales,
+                            down_scale_source + static_cast<size_t>(row) * full_down_row_scales + i_offset / group_size,
+                            local_down_row_scales * sizeof(ggml_bf16_t));
+              }
+            },
+            nullptr);
+
+        tps[numa_id]->set_staged_weight_pointers(dst.gate.get(), dst.up.get(), dst.down.get(), dst.gate_scale.get(),
+                                                 dst.up_scale.get(), dst.down_scale.get());
+      });
+      run_numa_job_checked("native MXFP4 TP forward weight load", [this](int numa_id) {
+        tps[numa_id]->load_weights();
+        tps[numa_id]->validate_mxfp4_scales();
+      });
+    } catch (...) {
+      for (auto& tp : tps) tp->clear_staged_weight_pointers();
+      throw;
+    }
+    for (auto& tp : tps) tp->clear_staged_weight_pointers();
+  }
+
   void load_fp8_weights_with_tp_staging() {
     amx::validate_block_fp8_tp_source(config);
     const int group_size = config.quant_config.group_size;
@@ -325,6 +491,14 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if (config.full_weight_grad && T::kIsFP8Backend) {
       throw std::runtime_error("FP8 SFT phase one supports frozen-base LoRA only");
     }
+    if (config.full_weight_grad && T::kIsMXFP4Backend) {
+      throw std::runtime_error("MXFP4 SFT supports frozen-base LoRA only");
+    }
+    if constexpr (T::kIsMXFP4Backend) {
+      if (tp_count != 1 && tp_count != 2) {
+        throw std::invalid_argument("MXFP4 SFT currently supports TP1 or TP2");
+      }
+    }
 
     backward_temp_pools_.assign(tp_count, nullptr);
     backward_temp_pool_bytes_.assign(tp_count, 0);
@@ -375,6 +549,27 @@ class TP_MOE_SFT : public TP_MOE<T> {
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BaseWeightReload);
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+
+    if constexpr (T::kIsMXFP4Backend) {
+      if (weights_loaded) {
+        throw std::logic_error("MXFP4 SFT weights are immutable and already loaded");
+      }
+      load_mxfp4_weights_with_tp_staging();
+      config.gate_proj = nullptr;
+      config.up_proj = nullptr;
+      config.down_proj = nullptr;
+      config.gate_scale = nullptr;
+      config.up_scale = nullptr;
+      config.down_scale = nullptr;
+      config.gate_projs.clear();
+      config.up_projs.clear();
+      config.down_projs.clear();
+      config.gate_scales.clear();
+      config.up_scales.clear();
+      config.down_scales.clear();
+      weights_loaded = true;
+      return;
+    }
 
     if constexpr (T::kIsFP8Backend) {
       load_fp8_weights_with_tp_staging();
@@ -723,6 +918,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
                 void* grad_down_proj = nullptr, bool accumulate_optimizer_grads = false,
                 float optimizer_grad_scale = 1.0f) {
+    if constexpr (T::kIsMXFP4Backend) {
+      if (grad_gate_proj != nullptr || grad_up_proj != nullptr || grad_down_proj != nullptr) {
+        throw std::invalid_argument("MXFP4 SFT does not accept routed-expert base-gradient outputs");
+      }
+    }
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
     auto stage_start = profiler_.start();
     auto pool = config.pool;
@@ -1373,6 +1573,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * @param path Output directory path
    */
   void prepare_and_save_bwd(void* gate, void* up, void* down, const std::string& path) {
+    if constexpr (T::kIsMXFP4Backend) {
+      throw std::logic_error("MXFP4 SFT backward reads native packed forward weights and has no BF16 backward copy");
+    }
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -1428,7 +1631,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Block-FP8 publishes a single-layer shared backward pool synchronously
     // inside backward(). This avoids an async producer overwriting packed FP8
     // weights or their scale grid while a consumer is running.
-    if constexpr (T::kIsFP8Backend) {
+    if constexpr (T::kIsFP8Backend || T::kIsMXFP4Backend) {
       wait_backward_repack();
       return;
     }
@@ -1490,6 +1693,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * vs ~1.9s/layer for full object recreation).
    */
   void set_base_weight_pointers(void* gate, void* up, void* down) {
+    if constexpr (T::kIsMXFP4Backend) {
+      throw std::logic_error("MXFP4 SFT base weights are frozen packed tensors with separate scale pointers");
+    }
     config.gate_proj = gate;
     config.up_proj = up;
     config.down_proj = down;
