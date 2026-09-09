@@ -223,14 +223,39 @@ kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 
 ### Reasoning and tool calling
 
-Enable the DeepSeek-V4 reasoning and DSML tool-call parsers by appending these
-arguments to the launch command in Step 2:
+The KTransformers revision used by this tutorial still records an older SGLang
+submodule commit. After completing the source installation above, install the
+merged DeepSeek-V4 API adapter once from the repository root:
+
+```bash
+git -C third_party/sglang fetch --depth 1 origin \
+  0980b6da258192896a9d884fbe564fd1f9ec07e3
+git -C third_party/sglang switch --detach \
+  0980b6da258192896a9d884fbe564fd1f9ec07e3
+export SGLANG_KT_VERSION="$(python -c \
+  "exec(open('version.py').read()); print(__version__)")"
+python -m pip install -e './third_party/sglang/python[all]'
+```
+
+Do this after `./install.sh`, because that installer restores the recorded
+submodule commit. Then select the DeepSeek-V4 prompt mode before launch:
+
+```bash
+export SGLANG_DSV4_MODE=2604
+export SGLANG_DSV4_2604_SUBMODE=2604B
+```
+
+Enable the reasoning and DSML tool-call parsers by appending these arguments to
+the launch command in Step 2:
 
 ```bash
   --reasoning-parser deepseek-v4 \
   --tool-call-parser deepseekv4 \
   --json-model-override-args '{"dsv4_reasoning_effort_profile":"official"}'
 ```
+
+On a 32 GB RTX 5090, if the launch command cannot reserve both ten GPU experts
+and the layerwise-prefill slots, set `--kt-gpu-prefill-token-threshold 0`.
 
 The `dsv4` Docker target enables the same settings by default. Build it from
 the repository root and use `ktransformers:dsv4-flash` in place of the image
