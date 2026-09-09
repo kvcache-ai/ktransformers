@@ -223,66 +223,37 @@ kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 
 ### Reasoning and tool calling
 
-The KTransformers revision used by this tutorial still records an older SGLang
-submodule commit. After completing the source installation above, install the
-merged DeepSeek-V4 API adapter once from the repository root:
-
-```bash
-git -C third_party/sglang fetch --depth 1 origin \
-  0980b6da258192896a9d884fbe564fd1f9ec07e3
-git -C third_party/sglang switch --detach \
-  0980b6da258192896a9d884fbe564fd1f9ec07e3
-export SGLANG_KT_VERSION="$(python -c \
-  "exec(open('version.py').read()); print(__version__)")"
-python -m pip install -e './third_party/sglang/python[all]'
-```
-
-Do this after `./install.sh`, because that installer restores the recorded
-submodule commit. Then select the DeepSeek-V4 prompt mode before launch:
+The `dsv4` Docker image enables DeepSeek-V4 reasoning and tool calling by
+default. For a native source launch, set:
 
 ```bash
 export SGLANG_DSV4_MODE=2604
 export SGLANG_DSV4_2604_SUBMODE=2604B
 ```
 
-Enable the reasoning and DSML tool-call parsers by appending these arguments to
-the launch command in Step 2:
+and append these arguments to the launch command in Step 2:
 
 ```bash
   --reasoning-parser deepseek-v4 \
-  --tool-call-parser deepseekv4 \
-  --json-model-override-args '{"dsv4_reasoning_effort_profile":"official"}'
+  --tool-call-parser deepseekv4
 ```
 
-On a 32 GB RTX 5090, if the launch command cannot reserve both ten GPU experts
-and the layerwise-prefill slots, set `--kt-gpu-prefill-token-threshold 0`.
+Supported reasoning efforts are `low`, `high`, `max`, and `none`. If the field
+is omitted or set to `null`, the server uses thinking + `max`.
 
-The `dsv4` Docker target enables the same settings by default. Build it from
-the repository root and use `ktransformers:dsv4-flash` in place of the image
-name in the Docker command above:
+#### Chat Completions
 
 ```bash
-docker buildx build --file docker/Dockerfile --target dsv4 \
-  --tag ktransformers:dsv4-flash --load .
-```
-
-Chat Completions accepts `reasoning_effort` as a top-level field. The supported
-values are `low`, `high`, `max`, and `none`. Omitted or null values default to
-thinking + `max`; `none` disables thinking; unsupported values emit a warning
-and fall back to thinking + `max`.
-
-```bash
-curl -s http://127.0.0.1:30000/v1/chat/completions \
+curl http://127.0.0.1:30000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "default",
-    "messages": [{"role": "user", "content": "Use get_weather for Shanghai."}],
+    "messages": [{"role": "user", "content": "Call get_weather for Shanghai."}],
     "reasoning_effort": "high",
     "tools": [{
       "type": "function",
       "function": {
         "name": "get_weather",
-        "description": "Get weather for a city.",
         "parameters": {
           "type": "object",
           "properties": {"city": {"type": "string"}},
@@ -294,20 +265,18 @@ curl -s http://127.0.0.1:30000/v1/chat/completions \
   }'
 ```
 
-Responses clients, including Codex-compatible clients, use the nested
-`reasoning` object and the Responses-style top-level function schema:
+#### Responses API (Codex-compatible)
 
 ```bash
-curl -s http://127.0.0.1:30000/v1/responses \
+curl http://127.0.0.1:30000/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "default",
-    "input": "Use get_weather for Shanghai.",
+    "input": "Call get_weather for Shanghai.",
     "reasoning": {"effort": "max", "summary": "auto"},
     "tools": [{
       "type": "function",
       "name": "get_weather",
-      "description": "Get weather for a city.",
       "parameters": {
         "type": "object",
         "properties": {"city": {"type": "string"}},
@@ -318,23 +287,7 @@ curl -s http://127.0.0.1:30000/v1/responses \
   }'
 ```
 
-The client executes the returned function call. For Responses, send its result
-back with the returned response and call IDs:
-
-```json
-{
-  "previous_response_id": "resp_REPLACE_ME",
-  "input": [{
-    "type": "function_call_output",
-    "call_id": "call_REPLACE_ME",
-    "output": "{\"temperature_c\":22}"
-  }]
-}
-```
-
-Only top-level `function` tools are exposed to the model on this Responses
-path. The server does not execute tools. `chat_template_kwargs` remains an
-SGLang compatibility extension; use the standard endpoint fields above for
-new clients.
+SGLang returns the function name and arguments; the client is responsible for
+executing the function.
 
 See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for the complete parameter reference.
