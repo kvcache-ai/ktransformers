@@ -17,6 +17,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
+    - [Reasoning and tool calling](#reasoning-and-tool-calling)
 
 ## Hardware Requirements
 
@@ -219,5 +220,96 @@ The `kt` CLI ships with an OpenAI-compatible chat client that talks to the SGLan
 ```bash
 kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 ```
+
+### Reasoning and tool calling
+
+Enable the DeepSeek-V4 reasoning and DSML tool-call parsers by appending these
+arguments to the launch command in Step 2:
+
+```bash
+  --reasoning-parser deepseek-v4 \
+  --tool-call-parser deepseekv4 \
+  --json-model-override-args '{"dsv4_reasoning_effort_profile":"official"}'
+```
+
+The `dsv4` Docker target enables the same settings by default. Build it from
+the repository root and use `ktransformers:dsv4-flash` in place of the image
+name in the Docker command above:
+
+```bash
+docker buildx build --file docker/Dockerfile --target dsv4 \
+  --tag ktransformers:dsv4-flash --load .
+```
+
+Chat Completions accepts `reasoning_effort` as a top-level field. The supported
+values are `low`, `high`, `max`, and `none`. Omitted or null values default to
+thinking + `max`; `none` disables thinking; unsupported values emit a warning
+and fall back to thinking + `max`.
+
+```bash
+curl -s http://127.0.0.1:30000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "Use get_weather for Shanghai."}],
+    "reasoning_effort": "high",
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+Responses clients, including Codex-compatible clients, use the nested
+`reasoning` object and the Responses-style top-level function schema:
+
+```bash
+curl -s http://127.0.0.1:30000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "input": "Use get_weather for Shanghai.",
+    "reasoning": {"effort": "max", "summary": "auto"},
+    "tools": [{
+      "type": "function",
+      "name": "get_weather",
+      "description": "Get weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+The client executes the returned function call. For Responses, send its result
+back with the returned response and call IDs:
+
+```json
+{
+  "previous_response_id": "resp_REPLACE_ME",
+  "input": [{
+    "type": "function_call_output",
+    "call_id": "call_REPLACE_ME",
+    "output": "{\"temperature_c\":22}"
+  }]
+}
+```
+
+Only top-level `function` tools are exposed to the model on this Responses
+path. The server does not execute tools. `chat_template_kwargs` remains an
+SGLang compatibility extension; use the standard endpoint fields above for
+new clients.
 
 See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for the complete parameter reference.
