@@ -1,5 +1,5 @@
 ARG CUDA_VERSION=12.8.1
-ARG DSV4_BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+ARG DSV4_BASE_IMAGE=docker.m.daocloud.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 FROM docker.1ms.run/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
