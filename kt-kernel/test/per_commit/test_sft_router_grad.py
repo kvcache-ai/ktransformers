@@ -224,26 +224,20 @@ def _make_topk_layer(*, wrapper=None):
     return layer
 
 
-def _make_deepseek_topk_layer(*, native=False):
-    original_router = (
-        _NativeDeepseekTopKRouter() if native else _DeepseekTopKRouter()
-    )
-    original_moe = (
-        _NativeDeepseekMoE(original_router)
-        if native
-        else _OriginalMoE(original_router)
-    )
+def _make_deepseek_topk_layer(*, native=False, wrapper=None, router_type="deepseek_gate"):
+    original_router = _NativeDeepseekTopKRouter() if native else _DeepseekTopKRouter()
+    original_moe = _NativeDeepseekMoE(original_router) if native else _OriginalMoE(original_router)
     config = SimpleNamespace(
         router_attr="gate",
         experts_attr="experts",
         has_shared_experts=False,
-        router_type="deepseek_gate",
+        router_type=router_type,
         expert_num=8,
         num_experts_per_tok=2,
     )
     layer = KTMoELayerWrapper(
         original_moe=original_moe,
-        wrapper=None,
+        wrapper=wrapper,
         lora_params=None,
         moe_config=config,
         hidden_size=4,
@@ -379,21 +373,71 @@ def test_native_deepseek_router_conflicting_metadata_fails_closed():
         )
 
 
-def test_frozen_router_keeps_routing_outside_autograd():
+@pytest.mark.parametrize("router_type", ["linear", "deepseek_gate", "glm4_moe_gate"])
+@pytest.mark.parametrize("reuse_checkpoint_forward", [False, True])
+def test_frozen_router_input_gradient_matches_reference(router_type, reuse_checkpoint_forward):
+    torch.manual_seed(0)
+    backend = _FakeWrapper(reuse_checkpoint_forward=reuse_checkpoint_forward)
+    if router_type == "linear":
+        layer = _make_layer(torch.nn.Linear(4, 3, bias=False), wrapper=backend)
+    else:
+        layer, original_router, _ = _make_deepseek_topk_layer(wrapper=backend, router_type=router_type)
+    layer.requires_grad_(False)
+    hidden_states = torch.randn(1, 3, 4).round().requires_grad_()
+    reference_input = hidden_states.detach().clone().requires_grad_()
+
+    if router_type == "linear":
+        scores = layer.gate(reference_input.view(-1, 4)).softmax(dim=-1)
+        weights, ids = scores.topk(2, dim=-1)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+    else:
+        ids, weights = original_router(reference_input)
+    weights = weights.to(torch.bfloat16)
+    factor = (weights * (ids.to(weights.dtype) + 1)).sum(dim=-1, keepdim=True)
+    reference_output = (reference_input.view(-1, 4) * factor).view_as(reference_input)
+
+    if reuse_checkpoint_forward:
+        output = checkpoint(layer, hidden_states, use_reentrant=False)
+    else:
+        output = layer(hidden_states)
+    output.sum().backward()
+    reference_output.sum().backward()
+
+    torch.testing.assert_close(output, reference_output)
+    torch.testing.assert_close(hidden_states.grad, reference_input.grad)
+    direct_grad = factor.detach().expand(-1, 4).view_as(reference_input)
+    assert not torch.allclose(reference_input.grad, direct_grad.float())
+    assert all(parameter.grad is None for parameter in layer.parameters())
+    assert backend.submit_calls == backend.backward_calls == 1
+    assert backend.cached_output_calls == int(reuse_checkpoint_forward)
+    assert not backend._kt_has_cached_forward
+
+
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("input_requires_grad", [False, True])
+@pytest.mark.parametrize("router_requires_grad", [False, True])
+@pytest.mark.parametrize("grad_enabled", [False, True])
+def test_routing_respects_grad_requirements(training, input_requires_grad, router_requires_grad, grad_enabled):
     router = torch.nn.Linear(4, 3, bias=False)
-    router.requires_grad_(False)
+    router.requires_grad_(router_requires_grad)
     layer = _make_layer(router)
+    layer.train(training)
+    hidden_states = torch.randn(1, 3, 4, requires_grad=input_requires_grad)
 
-    _, topk_weights = layer._compute_routing(torch.randn(1, 3, 4, requires_grad=True))
+    with torch.set_grad_enabled(grad_enabled):
+        _, topk_weights = layer._compute_routing(hidden_states)
 
-    assert not topk_weights.requires_grad
+    assert topk_weights.requires_grad == (grad_enabled and (input_requires_grad or router_requires_grad))
 
 
-def test_trainable_router_detach_fails_fast():
+@pytest.mark.parametrize("train_router", [False, True])
+def test_routing_detach_fails_fast(train_router):
     layer = _make_layer(_LoRARouter(detach_output=True))
+    if not train_router:
+        layer.requires_grad_(False)
 
-    with pytest.raises(RuntimeError, match="trainable router produced detached routing weights"):
-        layer._compute_routing(torch.randn(1, 3, 4))
+    with pytest.raises(RuntimeError, match="routing weights are detached but gradients are required"):
+        layer._compute_routing(torch.randn(1, 3, 4, requires_grad=not train_router))
 
 
 def test_router_lora_gradient_survives_non_reentrant_checkpoint_reuse():
