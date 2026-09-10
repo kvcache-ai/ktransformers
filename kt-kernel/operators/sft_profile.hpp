@@ -207,12 +207,35 @@ class SFTProfiler {
     workloads_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  // Distribution matters: mean M alone hides routing imbalance and dispatch
+  // tails. Count each active expert once at routing, never once per GEMM task.
+  void record_expert_rows(const int* counts, size_t count) {
+    if (!enabled_) return;
+    for (size_t i = 0; i < count; ++i) {
+      if (counts[i] <= 0) continue;
+      const auto rows = static_cast<uint64_t>(counts[i]);
+      size_t bin = 0;
+      while (bin + 1 < kRowBinNames.size() && rows > kRowBinUpper[bin]) ++bin;
+      expert_observations_[bin].fetch_add(1, std::memory_order_relaxed);
+      expert_rows_[bin].fetch_add(rows, std::memory_order_relaxed);
+      auto previous = max_expert_rows_.load(std::memory_order_relaxed);
+      while (previous < rows && !max_expert_rows_.compare_exchange_weak(previous, rows, std::memory_order_relaxed)) {
+      }
+    }
+  }
+
   void append(std::map<std::string, double>& out, const std::string& prefix, bool reset_after = false) {
     out[prefix + "enabled"] = enabled_ ? 1.0 : 0.0;
     out[prefix + "workloads"] = static_cast<double>(load_or_exchange(workloads_, reset_after));
     out[prefix + "tokens"] = static_cast<double>(load_or_exchange(tokens_, reset_after));
     out[prefix + "routed_rows"] = static_cast<double>(load_or_exchange(routed_rows_, reset_after));
     out[prefix + "active_experts"] = static_cast<double>(load_or_exchange(active_experts_, reset_after));
+    out[prefix + "expert_rows.maximum"] = static_cast<double>(load_or_exchange(max_expert_rows_, reset_after));
+    for (size_t i = 0; i < kRowBinNames.size(); ++i) {
+      const auto key = prefix + "expert_rows." + kRowBinNames[i];
+      out[key + ".observations"] = static_cast<double>(load_or_exchange(expert_observations_[i], reset_after));
+      out[key + ".rows"] = static_cast<double>(load_or_exchange(expert_rows_[i], reset_after));
+    }
     for (size_t i = 0; i < static_cast<size_t>(SFTProfileStage::Count); ++i) {
       const std::string stage_prefix = prefix + kSFTProfileStageNames[i] + ".";
       out[stage_prefix + "total_ns"] = static_cast<double>(load_or_exchange(total_ns_[i], reset_after));
@@ -229,9 +252,15 @@ class SFTProfiler {
     tokens_.store(0, std::memory_order_relaxed);
     routed_rows_.store(0, std::memory_order_relaxed);
     active_experts_.store(0, std::memory_order_relaxed);
+    max_expert_rows_.store(0, std::memory_order_relaxed);
+    for (auto& value : expert_observations_) value.store(0, std::memory_order_relaxed);
+    for (auto& value : expert_rows_) value.store(0, std::memory_order_relaxed);
   }
 
  private:
+  inline static constexpr std::array<uint64_t, 7> kRowBinUpper{7, 32, 63, 127, 255, 511, 1023};
+  inline static constexpr std::array<const char*, 8> kRowBinNames{"1_7",     "8_32",    "33_63",    "64_127",
+                                                                  "128_255", "256_511", "512_1023", "1024_plus"};
   static uint64_t load_or_exchange(std::atomic<uint64_t>& value, bool reset_after) {
     return reset_after ? value.exchange(0, std::memory_order_relaxed) : value.load(std::memory_order_relaxed);
   }
@@ -244,6 +273,9 @@ class SFTProfiler {
   std::atomic<uint64_t> tokens_{0};
   std::atomic<uint64_t> routed_rows_{0};
   std::atomic<uint64_t> active_experts_{0};
+  std::atomic<uint64_t> max_expert_rows_{0};
+  std::array<std::atomic<uint64_t>, kRowBinNames.size()> expert_observations_{};
+  std::array<std::atomic<uint64_t>, kRowBinNames.size()> expert_rows_{};
 };
 
 class SFTProfileScope {
