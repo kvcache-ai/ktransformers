@@ -403,6 +403,7 @@ def test_rawint4_map_accepts_nonidentity_permutation_and_keeps_cpu_owner():
     backend = object.__new__(AMXSFTMoEWrapper)
     backend._weights_loaded = False
     backend._is_rawint4 = True
+    backend.method = "RAWINT4_SFT"
     backend.num_experts = 2
     backend.gate_proj = None
     backend._use_projs_path = False
@@ -425,6 +426,7 @@ def test_legacy_map_retains_at_least_expert_count_contract():
     backend = object.__new__(AMXSFTMoEWrapper)
     backend._weights_loaded = False
     backend._is_rawint4 = False
+    backend.method = "AMXBF16_SFT"
     backend.num_experts = 2
     backend.gate_proj = None
     backend._use_projs_path = False

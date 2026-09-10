@@ -80,6 +80,40 @@ def test_activation_policy_defaults_to_recompute_recompute():
     assert policy == config.KTActivationPolicy(cpu="recompute", gpu="recompute")
 
 
+def _make_mxfp4_config(**overrides):
+    values = {
+        "kt_backend": "auto",
+        "kt_expert_weight_format": "mxfp4",
+        "kt_weight_path": "/native-v4",
+        "kt_non_expert_weight_path": "/validated-cache",
+        "kt_lora_rank": 8,
+        "kt_force_fused_expert_lora": True,
+        "kt_threadpool_count": 2,
+        "kt_tp_enabled": True,
+    }
+    values.update(overrides)
+    with patch.dict(os.environ, {}, clear=True), patch.object(config, "configure_omp_threads", return_value=1):
+        return config.KTConfig(**values)
+
+
+def test_mxfp4_config_keeps_native_experts_and_cpu_activation_reuse():
+    cfg = _make_mxfp4_config(kt_activation_policy={"cpu": "retain", "gpu": "recompute"})
+    assert cfg.kt_backend == "MXFP4"
+    assert cfg.kt_skip_expert_loading
+    assert not cfg.kt_share_backward_bb
+    assert cfg.kt_activation_policy.cpu == "retain"
+
+
+@pytest.mark.parametrize("invalid", [
+    {"kt_train_mode": "full"}, {"kt_lora_rank": 0}, {"kt_lora_dropout": 0.1},
+    {"kt_num_gpu_experts": 1}, {"kt_use_lora_experts": True}, {"kt_share_backward_bb": True},
+    {"kt_skip_expert_loading": False}, {"kt_threadpool_count": 4}, {"kt_weight_path": ""},
+])
+def test_mxfp4_config_rejects_unsupported_training_modes(invalid):
+    with pytest.raises(ValueError, match="MXFP4"):
+        _make_mxfp4_config(**invalid)
+
+
 def test_config_from_hf_wrapper_preserves_outer_runtime_metadata():
     public_config = {
         "kt_backend": "AMXBF16",

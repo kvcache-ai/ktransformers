@@ -26,6 +26,7 @@ from typing import Any, Callable, Literal
 from .backend import (
     FP8_BACKEND,
     INT8_BACKEND,
+    MXFP4_BACKEND,
     RAWINT4_BACKEND,
     normalize_sft_backend,
 )
@@ -45,6 +46,7 @@ _KNOWN_SFT_BACKENDS = {
     "amxfp8",
     "amxint4",
     "rawint4",
+    "mxfp4",
     "amxint4_kgroup",
     "amxbf16_skiplora",
     "amxint8_skiplora",
@@ -52,7 +54,7 @@ _KNOWN_SFT_BACKENDS = {
 }
 
 ActivationRetention = Literal["retain", "recompute"]
-ExpertWeightFormat = Literal["bf16", "int8", "fp8", "rawint4"]
+ExpertWeightFormat = Literal["bf16", "int8", "fp8", "rawint4", "mxfp4"]
 WeightLifecycle = Literal["persistent", "ephemeral"]
 
 
@@ -269,7 +271,7 @@ class KTConfig:
     )
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
-    kt_share_backward_bb: bool | None = None  # defaults off for RAWINT4, on otherwise
+    kt_share_backward_bb: bool | None = None  # defaults off for RAWINT4/MXFP4
     kt_share_cache_pool: bool | None = (
         None  # auto-set by trainer_config_process, not user-facing
     )
@@ -411,10 +413,10 @@ class KTConfig:
             self.kt_expert_weight_format = (
                 str(self.kt_expert_weight_format).strip().lower()
             )
-            if self.kt_expert_weight_format not in {"bf16", "int8", "fp8", "rawint4"}:
+            if self.kt_expert_weight_format not in {"bf16", "int8", "fp8", "rawint4", "mxfp4"}:
                 raise ValueError(
                     "kt_expert_weight_format must be one of "
-                    "['bf16', 'fp8', 'int8', 'rawint4'], "
+                    "['bf16', 'fp8', 'int8', 'rawint4', 'mxfp4'], "
                     f"got {self.kt_expert_weight_format!r}"
                 )
         if self.kt_weight_lifecycle is None:
@@ -469,7 +471,7 @@ class KTConfig:
         if self.kt_backend is None:
             if env_backend:
                 self.kt_backend = env_backend
-            elif self.kt_expert_weight_format in {"int8", "fp8", "rawint4"}:
+            elif self.kt_expert_weight_format in {"int8", "fp8", "rawint4", "mxfp4"}:
                 self.kt_backend = "auto"
             else:
                 self.kt_backend = "AMXBF16"
@@ -492,6 +494,8 @@ class KTConfig:
                 self.kt_expert_weight_format = "fp8"
             elif backend_lower == RAWINT4_BACKEND.lower():
                 self.kt_expert_weight_format = "rawint4"
+            elif backend_lower == MXFP4_BACKEND.lower():
+                self.kt_expert_weight_format = "mxfp4"
             elif backend_lower == "amxbf16":
                 self.kt_expert_weight_format = "bf16"
         expected_backend = {
@@ -499,6 +503,7 @@ class KTConfig:
             "int8": INT8_BACKEND.lower(),
             "fp8": FP8_BACKEND.lower(),
             "rawint4": RAWINT4_BACKEND.lower(),
+            "mxfp4": MXFP4_BACKEND.lower(),
         }.get(self.kt_expert_weight_format)
         if expected_backend is not None and backend_lower != expected_backend:
             source = "kt_backend" if explicit_backend else "ACCELERATE_KT_BACKEND"
@@ -529,7 +534,7 @@ class KTConfig:
         if self.kt_share_backward_bb is None:
             self.kt_share_backward_bb = _env_bool(
                 "ACCELERATE_KT_SHARE_BACKWARD_BB",
-                self.kt_expert_weight_format != "rawint4",
+                self.kt_expert_weight_format not in {"rawint4", "mxfp4"},
             )
         if self.kt_share_cache_pool is None:
             self.kt_share_cache_pool = False
@@ -571,11 +576,30 @@ class KTConfig:
                     "ACCELERATE_KT_SKIP_EXPERT_LOADING", True
                 )
 
-        if self.kt_non_expert_weight_path and self.kt_expert_weight_format != "int8":
+        if self.kt_non_expert_weight_path and self.kt_expert_weight_format not in {"int8", "mxfp4"}:
             raise ValueError(
                 "kt_non_expert_weight_path is supported only with "
-                "kt_expert_weight_format='int8'"
+                "kt_expert_weight_format='int8' or 'mxfp4'"
             )
+        if self.kt_expert_weight_format == "mxfp4":
+            if self.kt_skip_expert_loading is None:
+                self.kt_skip_expert_loading = True
+            if self.kt_train_mode != "lora" or self.kt_full_weight_grad or int(self.kt_lora_rank or 0) <= 0:
+                raise ValueError("MXFP4 SFT supports frozen-base LoRA only with kt_lora_rank > 0")
+            if self.kt_num_gpu_experts or self.kt_use_lora_experts:
+                raise ValueError("MXFP4 SFT requires all routed experts and their LoRA on CPU")
+            if self.kt_share_backward_bb:
+                raise ValueError("MXFP4 SFT is transpose-free; kt_share_backward_bb must be false")
+            if self.kt_lora_dropout != 0.0:
+                raise ValueError("MXFP4 SFT requires kt_lora_dropout=0")
+            if self.kt_weight_lifecycle != "persistent" or self.kt_expert_checkpoint_path:
+                raise ValueError("MXFP4 SFT requires a persistent native checkpoint at kt_weight_path")
+            if not self.kt_weight_path:
+                raise ValueError("MXFP4 SFT requires kt_weight_path")
+            if not self.kt_skip_expert_loading:
+                raise ValueError("MXFP4 SFT requires kt_skip_expert_loading=true")
+            if (int(self.kt_threadpool_count or 1) if self.kt_tp_enabled else 1) not in (1, 2):
+                raise ValueError("MXFP4 SFT supports CPU TP1/TP2 only")
         if self.kt_expert_weight_format == "int8":
             if str(self.kt_backend).lower() != INT8_BACKEND.lower():
                 raise ValueError(

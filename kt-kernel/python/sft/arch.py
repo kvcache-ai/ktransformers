@@ -77,6 +77,19 @@ def get_moe_arch_config(config) -> MOEArchConfig:
     model_type = str(getattr(config, "model_type", ""))
     text_model_type = str(getattr(cfg, "model_type", ""))
 
+    if "DeepseekV4" in arch or model_type == "deepseek_v4":
+        return MOEArchConfig(
+            moe_layer_attr="mlp",
+            router_attr="gate",
+            experts_attr="experts",
+            weight_names=("gate_proj", "up_proj", "down_proj"),
+            expert_num=cfg.n_routed_experts,
+            intermediate_size=cfg.moe_intermediate_size,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            has_shared_experts=True,
+            router_type="precomputed",
+        )
+
     if (
         "KimiK2" in arch
         or model_type in {"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}
@@ -274,6 +287,8 @@ def move_non_experts_to_gpu(
         container.embed_tokens.to(device)
     if hasattr(container, "norm"):
         container.norm.to(device)
+    if hasattr(container, "hc_head"):
+        container.hc_head.to(device)
     output_embeddings = getattr(model, "get_output_embeddings", lambda: None)()
     if output_embeddings is None:
         output_embeddings = getattr(model, "lm_head", None)
@@ -281,6 +296,9 @@ def move_non_experts_to_gpu(
         output_embeddings.to(device)
 
     for layer in layers:
+        for name in ("attn_hc", "ffn_hc"):
+            if hasattr(layer, name):
+                getattr(layer, name).to(device)
         if hasattr(layer, "self_attn"):
             layer.self_attn.to(device)
 

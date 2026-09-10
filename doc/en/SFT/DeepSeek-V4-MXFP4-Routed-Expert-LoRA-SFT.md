@@ -1,5 +1,8 @@
 # DeepSeek V4 native MXFP4 routed-expert LoRA SFT
 
+This page records the standalone kernel milestone. The subsequent April-model
+integration is documented in [DeepSeek-V4-Flash LoRA E2E](./DeepSeek-V4-Flash-LoRA-E2E.md).
+
 ## Status and scope
 
 This development milestone adds a standalone CPU forward/backward path for the

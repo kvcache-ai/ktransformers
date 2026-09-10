@@ -24,6 +24,7 @@ RAWINT4_KERNEL = "amx-int4-kgroup-g32"
 RAWINT4_GROUP_SIZE = 32
 _RAWINT4_SFT_METHOD_ALIASES = frozenset({RAWINT4_SFT_METHOD, "AMXINT4_KGroup_SFT"})
 
+MXFP4_BACKEND = "MXFP4"
 
 def is_int8_sft_method(method: str) -> bool:
     return str(method) in _INT8_SFT_METHOD_ALIASES
@@ -58,6 +59,8 @@ def normalize_sft_backend(
             return FP8_BACKEND
         if expert_weight_format == "rawint4":
             return RAWINT4_BACKEND
+        if expert_weight_format == "mxfp4":
+            return MXFP4_BACKEND
         return "AMXBF16"
     if normalized == "int8":
         return INT8_BACKEND
@@ -80,6 +83,8 @@ def normalize_sft_backend(
         return FP8_BACKEND
     if normalized == "rawint4":
         return RAWINT4_BACKEND
+    if normalized == "mxfp4":
+        return MXFP4_BACKEND
     if normalized == "amxint4_kgroup":
         warnings.warn(
             "kt_backend='AMXINT4_KGroup' is deprecated; use " "kt_backend='auto' or kt_backend='RAWINT4'",

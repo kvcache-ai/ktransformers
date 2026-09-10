@@ -137,6 +137,7 @@ def _load_amx_module(monkeypatch):
     monkeypatch.setitem(sys.modules, backend_name, amx_backend)
     weights_stub = ModuleType(f"{package_name}.sft.weights")
     weights_stub.BlockFP8ExpertWeights = object
+    weights_stub.RAWINT4ExpertWeights = object
     monkeypatch.setitem(sys.modules, weights_stub.__name__, weights_stub)
 
     module = _load_source(f"{package_name}.sft.amx", SFT_ROOT / "amx.py")

@@ -15,7 +15,7 @@ import logging
 import math
 import os
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -423,12 +423,14 @@ class KTMoELayerWrapper(nn.Module):
         return result
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        with torch.profiler.record_function("kt.sft.routing"):
+            topk_ids, topk_weights = self._compute_routing(hidden_states)
+        return self._forward_routed(hidden_states, topk_ids, topk_weights)
 
+    def _forward_routed(self, hidden_states, topk_ids, topk_weights):
         import torch.distributed as dist
 
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
-        with torch.profiler.record_function("kt.sft.routing"):
-            topk_ids, topk_weights = self._compute_routing(hidden_states)
 
         train_lora = bool(
             self._kt_managed_lora_enabled
@@ -989,3 +991,23 @@ class KTMoELayerWrapper(nn.Module):
         # PEFT weights are views into wrapper's contiguous buffers —
         # optimizer.step() already updated them in-place, just re-sync to C++.
         self.wrapper.update_lora_weights()
+
+
+class KTRoutedExpertsWrapper(KTMoELayerWrapper):
+    """Execute only experts; routing and shared experts stay in the model."""
+
+    def __init__(self, original_moe, **kwargs):
+        config = kwargs["moe_config"]
+        expert_container = nn.Module()
+        expert_container.add_module(config.experts_attr, getattr(original_moe, config.experts_attr))
+        kwargs["moe_config"] = replace(config, has_shared_experts=False)
+        super().__init__(original_moe=expert_container, **kwargs)
+        self._is_kt_routed_experts_wrapper = True
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        if hidden_states.ndim != 2 or hidden_states.shape[-1] != self.hidden_size:
+            raise ValueError("KT routed experts require [tokens, hidden_size] activations")
+        expected = (hidden_states.shape[0], self.moe_config.num_experts_per_tok)
+        if tuple(top_k_index.shape) != expected or tuple(top_k_weights.shape) != expected:
+            raise ValueError(f"KT routed experts require routing tensors shaped {expected}")
+        return self._forward_routed(hidden_states.unsqueeze(0), top_k_index, top_k_weights).squeeze(0)
