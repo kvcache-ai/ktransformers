@@ -205,9 +205,9 @@ def configure_omp_threads() -> int:
     """Configure OpenMP for KT SFT CPU tensor work.
 
     ``accelerate launch`` defaults GPU jobs to ``OMP_NUM_THREADS=1`` when the
-    caller did not choose a value. That makes Full-FT CPU gradient accumulation,
-    AdamW, and zeroing effectively serial. Treat that value as the launcher
-    default and select the affinity-visible physical core count instead.
+    caller did not choose a value. The authoritative CPU rank needs a physical
+    core budget for CPU tensor work; other distributed ranks keep one thread
+    to avoid creating a machine-sized OpenMP pool in every process.
 
     ``ACCELERATE_KT_OMP_NUM_THREADS`` is the unambiguous KT-specific override,
     including when an intentional single-thread run is required. An existing
@@ -222,6 +222,9 @@ def configure_omp_threads() -> int:
     elif current_omp is not None and current_omp > 1:
         num_threads = current_omp
         source = "OMP_NUM_THREADS"
+    elif _env_int("WORLD_SIZE", 1) > 1 and _env_int("RANK", 0) != 0:
+        num_threads = 1
+        source = "non-owner distributed rank"
     else:
         num_threads = detect_physical_cpu_count()
         source = "available physical cores"
