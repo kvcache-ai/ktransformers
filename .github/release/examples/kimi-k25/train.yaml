@@ -1,0 +1,63 @@
+model_name_or_path: /path/to/Kimi-K2.5
+trust_remote_code: true
+use_fast_tokenizer: false
+flash_attn: disabled
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target: q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj
+dataset_dir: /path/to/neko-smoke
+dataset: neko_smoke
+template: kimi_k25_nothink
+enable_thinking: false
+cutoff_len: 512
+packing: false
+neat_packing: false
+train_on_prompt: false
+preprocessing_num_workers: 4
+dataloader_num_workers: 0
+output_dir: /path/to/new-kimi-smoke-output
+logging_steps: 1
+save_steps: 5
+save_total_limit: 1
+save_only_model: true
+report_to: none
+overwrite_output_dir: false
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 0.0001
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 0
+bf16: true
+max_grad_norm: 1.0
+disable_gradient_checkpointing: false
+use_reentrant_gc: false
+do_eval: false
+eval_strategy: 'no'
+eval_steps: 50
+per_device_eval_batch_size: 1
+prediction_loss_only: true
+seed: 42
+data_seed: 42
+ddp_timeout: 1800
+use_kt: true
+kt_weight_path: /path/to/Kimi-K2.5
+kt_cpu_activation: recompute
+kt_config:
+  kt_backend: RAWINT4
+  kt_expert_weight_format: rawint4
+  kt_weight_lifecycle: persistent
+  kt_num_threads: 96
+  kt_tp_enabled: true
+  kt_threadpool_count: 2
+  kt_num_gpu_experts: 0
+  kt_max_cache_depth: 2
+  kt_share_backward_bb: false
+  kt_force_fused_expert_lora: true
+  kt_model_max_length: 512
+max_steps: 2
+save_strategy: 'no'

@@ -94,6 +94,10 @@ No exact final package versions are chosen in this draft.
 
 ## Local verification
 
+The [Kimi K2.5 reference](examples/kimi-k25/README.md) includes the training and
+FSDP2 YAML from a successful candidate-stack smoke. It is independent evidence,
+not an E2E validation of this workflow's source-built wheels.
+
 ```bash
 python -m pytest -q .github/release/test_four_main.py
 python .github/release/four_main.py --help
