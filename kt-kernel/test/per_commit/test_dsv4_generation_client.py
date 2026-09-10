@@ -16,8 +16,8 @@ client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(client)
 
 
-@pytest.mark.parametrize("invalid", [None, "abort", "nonfinite", "empty"])
-def test_generation_response_validation(monkeypatch, invalid):
+@pytest.mark.parametrize("invalid", [None, "abort", "nonfinite", "missing", "empty"])
+def test_generation_response_validation(monkeypatch, tmp_path, invalid):
     record = {"encoded_prompt": "exact chat prefix", "source_index": 7}
     response = {
         "text": "answer" if invalid != "empty" else "",
@@ -25,7 +25,15 @@ def test_generation_response_validation(monkeypatch, invalid):
             "completion_tokens": 1,
             "finish_reason": {"type": "abort" if invalid == "abort" else "stop"},
             "output_token_logprobs": [
-                [float("nan") if invalid == "nonfinite" else -0.5, 42, None]
+                [
+                    None
+                    if invalid == "missing"
+                    else float("nan")
+                    if invalid == "nonfinite"
+                    else -0.5,
+                    42,
+                    None,
+                ]
             ],
         },
     }
@@ -40,7 +48,8 @@ def test_generation_response_validation(monkeypatch, invalid):
     monkeypatch.setattr(client.urllib.request, "urlopen", open_request)
     if invalid:
         with pytest.raises(AssertionError):
-            client.generate("http://localhost", record, 16)
+            client.generate("http://localhost", record, 16, raw_dir=tmp_path)
+        assert (tmp_path / "7.json").exists()
     else:
         result = client.generate("http://localhost", record, 16)
         assert result["source_index"] == 7 and result["response"] == response
