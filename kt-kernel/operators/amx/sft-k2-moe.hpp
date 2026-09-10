@@ -26,6 +26,7 @@
 
 #include "k2-moe.hpp"
 #include "la/avx_kernels.hpp"
+#include "la/rawint4_backward.hpp"
 #include "../sft_profile.hpp"
 
 /**
@@ -479,39 +480,52 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   }
 
   void save_gate_up_to_cache(K2ForwardCache& cache, int activated_expert) {
-    for (int i = 0; i < activated_expert; i++) {
-      int expert_idx = this->m_expert_id_map_[i];
-      int num_tokens = this->m_local_num_[expert_idx];
-      if (num_tokens == 0) continue;
-      size_t offset = cache_offsets_[i];
-      std::memcpy(cache.gate_output_cache + offset * config_.intermediate_size,
-                  this->m_local_gate_output_ptr_[expert_idx],
-                  static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
-      std::memcpy(cache.up_output_cache + offset * config_.intermediate_size, this->m_local_up_output_ptr_[expert_idx],
-                  static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
-    }
+    config_.pool->get_subpool(tp_part_idx)
+        ->do_work_stealing_job(
+            activated_expert, nullptr,
+            [&](int i) {
+              int expert_idx = this->m_expert_id_map_[i];
+              int num_tokens = this->m_local_num_[expert_idx];
+              if (num_tokens == 0) return;
+              size_t offset = cache_offsets_[i];
+              std::memcpy(cache.gate_output_cache + offset * config_.intermediate_size,
+                          this->m_local_gate_output_ptr_[expert_idx],
+                          static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
+              std::memcpy(cache.up_output_cache + offset * config_.intermediate_size,
+                          this->m_local_up_output_ptr_[expert_idx],
+                          static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
+            },
+            nullptr);
   }
 
   void save_intermediate_to_cache(K2ForwardCache& cache, int activated_expert) {
-    for (int i = 0; i < activated_expert; i++) {
-      int expert_idx = this->m_expert_id_map_[i];
-      int num_tokens = this->m_local_num_[expert_idx];
-      if (num_tokens == 0) continue;
-      std::memcpy(cache.intermediate_cache + cache_offsets_[i] * config_.intermediate_size,
-                  this->m_local_gate_output_ptr_[expert_idx],
-                  static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
-    }
+    config_.pool->get_subpool(tp_part_idx)
+        ->do_work_stealing_job(
+            activated_expert, nullptr,
+            [&](int i) {
+              int expert_idx = this->m_expert_id_map_[i];
+              int num_tokens = this->m_local_num_[expert_idx];
+              if (num_tokens == 0) return;
+              std::memcpy(cache.intermediate_cache + cache_offsets_[i] * config_.intermediate_size,
+                          this->m_local_gate_output_ptr_[expert_idx],
+                          static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
+            },
+            nullptr);
   }
 
   void save_down_output_to_cache(K2ForwardCache& cache, int activated_expert) {
-    for (int i = 0; i < activated_expert; i++) {
-      int expert_idx = this->m_expert_id_map_[i];
-      int num_tokens = this->m_local_num_[expert_idx];
-      if (num_tokens == 0) continue;
-      std::memcpy(cache.down_output_cache + cache_offsets_[i] * config_.hidden_size,
-                  this->m_local_down_output_ptr_[expert_idx],
-                  static_cast<size_t>(num_tokens) * config_.hidden_size * sizeof(ggml_bf16_t));
-    }
+    config_.pool->get_subpool(tp_part_idx)
+        ->do_work_stealing_job(
+            activated_expert, nullptr,
+            [&](int i) {
+              int expert_idx = this->m_expert_id_map_[i];
+              int num_tokens = this->m_local_num_[expert_idx];
+              if (num_tokens == 0) return;
+              std::memcpy(cache.down_output_cache + cache_offsets_[i] * config_.hidden_size,
+                          this->m_local_down_output_ptr_[expert_idx],
+                          static_cast<size_t>(num_tokens) * config_.hidden_size * sizeof(ggml_bf16_t));
+            },
+            nullptr);
   }
 
   const K2ForwardCache& latest_cache() const {
@@ -741,6 +755,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     long long q_input_us = 0;
     long long gate_up_base_us = 0;
     long long gate_up_lora_us = 0;
+    long long cache_prepare_us = 0;
     long long save_gate_up_us = 0;
     long long act_us = 0;
     long long save_intermediate_us = 0;
@@ -2763,6 +2778,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     long long gate_up_lora_matmat_da_db_us = 0;
     long long gate_up_write_us = 0;
     long long gate_up_direct_us = 0;
+    long long gate_up_coeff_pack_us = 0;
     size_t workspace_bytes = 0;
     const char* down_base_kernel = "fp32_m8";
     const char* gate_up_base_kernel = "fp32_m8";
@@ -2806,6 +2822,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     float* grad_input = nullptr;
     float* gate_du = nullptr;
     float* up_du = nullptr;
+    uint16_t* gate_up_coeff = nullptr;
     size_t required_bytes = 0;
   };
 
@@ -2816,7 +2833,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const size_t down_bytes = align64(route_capacity * static_cast<size_t>(config_.hidden_size) * sizeof(ggml_bf16_t));
     const size_t input_bytes = align64(static_cast<size_t>(qlen) * config_.hidden_size * sizeof(float));
     const size_t du_bytes = align64(route_capacity * 8 * sizeof(float));
-    return std::max(inter_bytes + down_bytes + 2 * du_bytes, 2 * inter_bytes + input_bytes + 2 * du_bytes);
+    return std::max(inter_bytes + down_bytes + 2 * du_bytes, 3 * inter_bytes + input_bytes + 2 * du_bytes);
   }
 
   BackwardWorkspaceV2 make_backward_workspace_v2(void* workspace, size_t workspace_bytes, int qlen, int k) const {
@@ -2843,6 +2860,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     view.grad_input = reinterpret_cast<float*>(base + 2 * inter_bytes);
     view.gate_du = reinterpret_cast<float*>(base + 2 * inter_bytes + input_bytes);
     view.up_du = reinterpret_cast<float*>(base + 2 * inter_bytes + input_bytes + du_bytes);
+    view.gate_up_coeff = reinterpret_cast<uint16_t*>(base + 2 * inter_bytes + input_bytes + 2 * du_bytes);
     return view;
   }
 
@@ -2940,6 +2958,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       out[i] = GGML_FP32_TO_BF16(src[i]);
     }
 #endif
+  }
+
+  static std::vector<int> schedule_experts(const std::vector<int>& ids, const std::vector<int>& rows, int count) {
+    std::vector<int> order(ids.begin(), ids.begin() + count);
+    std::stable_sort(order.begin(), order.end(), [&](int left, int right) { return rows[left] > rows[right]; });
+    return order;
   }
 
   static void write_bf16_vector(void* dst, const std::vector<float>& src) {
@@ -3121,23 +3145,27 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
     std::fill(out_grad_weights, out_grad_weights + static_cast<size_t>(qlen) * k, 0.0f);
 
-    for (int token_idx = 0; token_idx < qlen; token_idx++) {
-      const ggml_bf16_t* token_grad = grad_out + static_cast<size_t>(token_idx) * hidden;
-      for (int route_idx = 0; route_idx < k; route_idx++) {
-        const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
-        if (config_.should_skip_expert(expert_id)) continue;
+    config_.pool->get_subpool(tp_part_idx)
+        ->do_work_stealing_job(
+            qlen, nullptr,
+            [&](int token_idx) {
+              const ggml_bf16_t* token_grad = grad_out + static_cast<size_t>(token_idx) * hidden;
+              for (int route_idx = 0; route_idx < k; route_idx++) {
+                const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
+                if (config_.should_skip_expert(expert_id)) continue;
 
-        const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
-        const size_t row = layout.expert_base[static_cast<size_t>(expert_id)] + static_cast<size_t>(local_pos);
-        const ggml_bf16_t* down_row = cache.down_output_cache + row * hidden;
+                const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
+                const size_t row = layout.expert_base[static_cast<size_t>(expert_id)] + static_cast<size_t>(local_pos);
+                const ggml_bf16_t* down_row = cache.down_output_cache + row * hidden;
 
-        float acc = 0.0f;
-        for (int h = 0; h < hidden; h++) {
-          acc += GGML_BF16_TO_FP32(token_grad[h]) * GGML_BF16_TO_FP32(down_row[h]);
-        }
-        out_grad_weights[static_cast<size_t>(token_idx) * k + route_idx] = acc;
-      }
-    }
+                float acc = 0.0f;
+                for (int h = 0; h < hidden; h++) {
+                  acc += GGML_BF16_TO_FP32(token_grad[h]) * GGML_BF16_TO_FP32(down_row[h]);
+                }
+                out_grad_weights[static_cast<size_t>(token_idx) * k + route_idx] = acc;
+              }
+            },
+            nullptr);
   }
 
   // Shared Backward Steps 2 -> 3 for expert-packed rows:
@@ -3867,6 +3895,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const int inter_size = config_.intermediate_size;
     const auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
     auto pool = config_.pool->get_subpool(tp_part_idx);
+    const auto compute_order =
+        schedule_experts(cache.m_expert_id_map_cache, cache.m_local_num_cache, cache.activated_expert_cache);
 
     auto section_start = profile.section_start();
     constexpr size_t kRowsPerTask = 8;
@@ -3886,21 +3916,24 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     profile.add_since(section_start, profile.down_route_us);
 
     section_start = profile.section_start();
-    profile.down_base_kernel = "bf16_workspace_v2";
+    profile.down_base_kernel = "bf16_panel_dispatch";
     const int nth = T::recommended_nth(inter_size);
     pool->do_work_stealing_job(
         nth * cache.activated_expert_cache, nullptr,
         [&](int task_id) {
           const int expert_task = task_id / nth;
           const int ith = task_id % nth;
-          const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+          const int expert_idx = compute_order[expert_task];
           const int num_tokens = cache.m_local_num_cache[expert_idx];
           const size_t row_base = layout.expert_base[expert_idx];
           const auto [col_begin, col_end] = T::split_range_n(inter_size, ith, nth);
-          rawint4_backward_matmat_bf16_input(
-              reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b), this->down_bb_[expert_idx]->d,
-              grad_down + row_base * hidden, num_tokens, hidden, inter_size, col_begin, col_end,
-              grad_inter + row_base * inter_size);
+          rawint4::backward(reinterpret_cast<const uint16_t*>(grad_down + row_base * hidden), num_tokens, hidden,
+                            inter_size, col_begin, col_end, nullptr, grad_inter + row_base * inter_size,
+                            [&](int pair, int col, __m512bh& lo, __m512bh& hi) {
+                              rawint4_weight_pair_bf16(reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b),
+                                                       this->down_bb_[expert_idx]->d, 2 * pair, 2 * pair + 1,
+                                                       inter_size, col / 32, lo, hi);
+                            });
         },
         nullptr);
     profile.add_since(section_start, profile.down_base_us);
@@ -4007,11 +4040,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         nullptr);
   }
 
-  void compute_tp_gate_up_backward_workspace_v2(
-      const K2ForwardCache& cache, const TP1BackwardLayout& layout, float* grad_gate, float* grad_up,
-      float* grad_input_fp32, float* gate_du, float* up_du, void* grad_input, void* grad_gate_lora_b,
-      void* grad_up_lora_b, float* fp32_grad_gate_lora_a, float* fp32_grad_up_lora_a, int full_inter,
-      bool accumulate_optimizer_grads, float optimizer_grad_scale, TP1BackwardProfile& profile) const {
+  void compute_tp_gate_up_backward_workspace_v2(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
+                                                float* grad_gate, float* grad_up, float* grad_input_fp32,
+                                                float* gate_du, float* up_du, uint16_t* gate_up_coeff, void* grad_input,
+                                                void* grad_gate_lora_b, void* grad_up_lora_b,
+                                                float* fp32_grad_gate_lora_a, float* fp32_grad_up_lora_a,
+                                                int full_inter, bool accumulate_optimizer_grads,
+                                                float optimizer_grad_scale, TP1BackwardProfile& profile) const {
     const int qlen = cache.qlen_cache;
     const int hidden = config_.hidden_size;
     const int inter_size = config_.intermediate_size;
@@ -4088,12 +4123,32 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     profile.add_since(section_start, profile.gate_up_lora_matmat_da_db_us);
 
     section_start = profile.section_start();
-    profile.gate_up_base_kernel = "bf16_direct_fused";
-    const int nth = T::recommended_nth(hidden);
+    pool->do_work_stealing_job(
+        cache.activated_expert_cache, nullptr,
+        [&](int task) {
+          const int expert_idx = cache.m_expert_id_map_cache[task];
+          const size_t offset = layout.expert_base[expert_idx] * inter_size;
+          rawint4::pack_gate_up_coeff(grad_gate + offset, grad_up + offset, gate_up_coeff + 2 * offset,
+                                      static_cast<size_t>(cache.m_local_num_cache[expert_idx]) * inter_size);
+        },
+        nullptr);
+    profile.add_since(section_start, profile.gate_up_coeff_pack_us);
+
+    section_start = profile.section_start();
+    profile.gate_up_base_kernel = "bf16_panel_dispatch_fused";
+    // Equal column ownership keeps scatter race-free without a short final worker wave.
+    const int column_blocks = hidden / 32;
+    const int configured_workers = config_.pool->config.subpool_thread_count.at(tp_part_idx);
+    static const int requested_tasks = [] {
+      const char* value = std::getenv("KT_K2_SFT_BWD_COLUMN_TASKS");
+      return value == nullptr ? 0 : std::atoi(value);
+    }();
+    const int nth = std::min(column_blocks, requested_tasks > 0 ? requested_tasks : configured_workers);
     pool->do_work_stealing_job(
         nth, nullptr,
         [&](int ith) {
-          const auto [col_begin, col_end] = T::split_range_n(hidden, ith, nth);
+          const int col_begin = (ith * column_blocks / nth) * 32;
+          const int col_end = ((ith + 1) * column_blocks / nth) * 32;
           for (int token_idx = 0; token_idx < qlen; token_idx++) {
             float* dst = grad_input_fp32 + static_cast<size_t>(token_idx) * hidden + col_begin;
             std::fill(dst, dst + (col_end - col_begin), 0.0f);
@@ -4102,11 +4157,15 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             const int expert_idx = cache.m_expert_id_map_cache[task];
             const int num_tokens = cache.m_local_num_cache[expert_idx];
             const size_t row_base = layout.expert_base[expert_idx];
-            rawint4_gate_up_backward_matmat_bf16_direct(
-                reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b), this->gate_bb_[expert_idx]->d,
-                reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
-                grad_gate + row_base * inter_size, grad_up + row_base * inter_size, num_tokens, inter_size, hidden,
-                col_begin, col_end, layout.row_to_token.data() + row_base, grad_input_fp32);
+            rawint4::backward(gate_up_coeff + 2 * row_base * inter_size, num_tokens, 2 * inter_size, hidden, col_begin,
+                              col_end, layout.row_to_token.data() + row_base, grad_input_fp32,
+                              [&](int pair, int col, __m512bh& lo, __m512bh& hi) {
+                                const int row = (pair / 2) * 2;
+                                const auto& weight =
+                                    pair % 2 == 0 ? this->gate_bb_[expert_idx] : this->up_bb_[expert_idx];
+                                rawint4_weight_pair_bf16(reinterpret_cast<const uint8_t*>(weight->b), weight->d, row,
+                                                         row + 1, hidden, col / 32, lo, hi);
+                              });
             if (use_lora) {
               avx::lora_backward_dx_rank8_columns_indexed(
                   gate_du + row_base * 8, gate_lora_a_ + static_cast<size_t>(expert_idx) * 8 * hidden,
@@ -4215,10 +4274,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         profile.mark(profile.activation_us);
 
         canonical_stage_start = profiler_.start();
-        compute_tp_gate_up_backward_workspace_v2(
-            cache, layout, workspace.grad_gate, workspace.grad_up, workspace.grad_input, workspace.gate_du,
-            workspace.up_du, grad_input, grad_gate_lora_b, grad_up_lora_b, fp32_grad_gate_lora_a,
-            fp32_grad_up_lora_a, full_inter, accumulate_optimizer_grads, optimizer_grad_scale, profile);
+        compute_tp_gate_up_backward_workspace_v2(cache, layout, workspace.grad_gate, workspace.grad_up,
+                                                 workspace.grad_input, workspace.gate_du, workspace.up_du,
+                                                 workspace.gate_up_coeff, grad_input, grad_gate_lora_b, grad_up_lora_b,
+                                                 fp32_grad_gate_lora_a, fp32_grad_up_lora_a, full_inter,
+                                                 accumulate_optimizer_grads, optimizer_grad_scale, profile);
         profiler_.record(SFTProfileStage::BwdGateUpTotal, canonical_stage_start);
         profile.mark(profile.gate_up_us);
 
@@ -4232,17 +4292,18 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               "down_lora_matmat_du_dx_us=%lld down_lora_matmat_da_db_us=%lld activation_us=%lld gate_up_us=%lld "
               "gate_up_base_us=%lld gate_up_lora_u_us=%lld gate_up_lora_b_us=%lld gate_up_lora_b_write_us=%lld "
               "gate_up_lora_a_input_us=%lld gate_up_lora_matmat_du_dx_us=%lld "
-              "gate_up_lora_matmat_da_db_us=%lld gate_up_direct_us=%lld gate_up_write_us=%lld total_us=%lld\n",
-              sft_config_.layer_idx, tp_part_idx, cache.qlen_cache, cache.activated_expert_cache,
-              layout.total_tokens, profile.workspace_bytes, profile.down_base_kernel, profile.gate_up_base_kernel,
+              "gate_up_lora_matmat_da_db_us=%lld gate_up_direct_us=%lld gate_up_coeff_pack_us=%lld "
+              "gate_up_write_us=%lld total_us=%lld\n",
+              sft_config_.layer_idx, tp_part_idx, cache.qlen_cache, cache.activated_expert_cache, layout.total_tokens,
+              profile.workspace_bytes, profile.down_base_kernel, profile.gate_up_base_kernel,
               profile.workspace_setup_us, profile.grad_weights_us, profile.down_us, profile.down_lora_grads_us,
               profile.down_route_us, profile.down_write_us, profile.down_base_us, profile.down_lora_bprop_us,
               profile.down_lora_a_us, profile.down_lora_b_us, profile.down_lora_matmat_du_dx_us,
-              profile.down_lora_matmat_da_db_us, profile.activation_us, profile.gate_up_us,
-              profile.gate_up_base_us, profile.gate_up_lora_u_us, profile.gate_up_lora_b_us,
-              profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us,
-              profile.gate_up_lora_matmat_du_dx_us, profile.gate_up_lora_matmat_da_db_us,
-              profile.gate_up_direct_us, profile.gate_up_write_us, profile.total_us());
+              profile.down_lora_matmat_da_db_us, profile.activation_us, profile.gate_up_us, profile.gate_up_base_us,
+              profile.gate_up_lora_u_us, profile.gate_up_lora_b_us, profile.gate_up_lora_b_write_us,
+              profile.gate_up_lora_a_input_us, profile.gate_up_lora_matmat_du_dx_us,
+              profile.gate_up_lora_matmat_da_db_us, profile.gate_up_direct_us, profile.gate_up_coeff_pack_us,
+              profile.gate_up_write_us, profile.total_us());
         }
 
         pop_latest_cache();
@@ -5024,11 +5085,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
+    const auto compute_order = schedule_experts(this->m_expert_id_map_, this->m_local_num_, activated_expert);
 
     // Step 4: Quantize input
     trace_forward_step("step4_quantize_input", qlen, k, activated_expert, save_for_backward);
-    direct_or_pool(activated_expert, [this](int task_id) {
-      int expert_idx = this->m_expert_id_map_[task_id];
+    direct_or_pool(activated_expert, [this, &compute_order](int task_id) {
+      int expert_idx = compute_order[task_id];
       this->gate_up_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx], this->m_local_input_ptr_[expert_idx], 0,
                                               1);
     });
@@ -5041,10 +5103,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     if (activated_expert > 0) {
       pool->do_work_stealing_job(
           nth * activated_expert * 2, [](int _) { T::config(); },
-          [this, nth, qlen](int task_id2) {
+          [this, nth, qlen, &compute_order](int task_id2) {
             int task_id = task_id2 / 2;
             bool do_up = task_id2 % 2;
-            int expert_idx = this->m_expert_id_map_[task_id / nth];
+            int expert_idx = compute_order[task_id / nth];
             int ith = task_id % nth;
             this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
             if (do_up) {
@@ -5067,7 +5129,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       cache_ptr = &cache;
       cache_guard.reserve(cache);
       prepare_cache_for_backward(cache, qlen, k, expert_ids, weights, activated_expert, input);
-      profile.mark(profile.save_gate_up_us);
+      profile.mark(profile.cache_prepare_us);
     }
 
     // Step 5.5: Gate + Up LoRA (AVX512 BF16 - no BufferB conversion needed)
@@ -5096,8 +5158,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     // Step 7: Quantize intermediate for down projection
     trace_forward_step("step7_quantize_intermediate", qlen, k, activated_expert, save_for_backward);
-    direct_or_pool(activated_expert, [this](int task_id) {
-      int expert_idx = this->m_expert_id_map_[task_id];
+    direct_or_pool(activated_expert, [this, &compute_order](int task_id) {
+      int expert_idx = compute_order[task_id];
       this->down_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx], this->m_local_gate_output_ptr_[expert_idx],
                                            0, 1);
     });
@@ -5110,8 +5172,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     if (activated_expert > 0) {
       pool->do_work_stealing_job(
           nth * activated_expert, [](int _) { T::config(); },
-          [this, nth, qlen](int task_id) {
-            int expert_idx = this->m_expert_id_map_[task_id / nth];
+          [this, nth, qlen, &compute_order](int task_id) {
+            int expert_idx = compute_order[task_id / nth];
             int ith = task_id % nth;
             this->do_down_gemm(expert_idx, ith, nth, qlen);
             this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
@@ -5161,14 +5223,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       fprintf(stderr,
               "[KT_K2_SFT_FWD_PROFILE] layer=%d tp_part=%d qlen=%d k=%d active=%d save=%d lora=%d cache_top=%d "
               "fast_path=0 route_us=%lld setup_us=%lld copy_input_us=%lld q_input_us=%lld "
-              "gate_up_base_us=%lld gate_up_lora_us=%lld save_gate_up_us=%lld act_us=%lld "
+              "gate_up_base_us=%lld gate_up_lora_us=%lld cache_prepare_us=%lld save_gate_up_us=%lld act_us=%lld "
               "save_intermediate_us=%lld q_intermediate_us=%lld down_base_us=%lld down_lora_us=%lld "
               "save_down_us=%lld merge_us=%lld total_us=%lld\n",
               config_.layer_idx, tp_part_idx, qlen, k, activated_expert, save_for_backward ? 1 : 0,
               has_any_lora() ? 1 : 0, cache_stack_top_, profile.route_us, profile.setup_us, profile.copy_input_us,
-              profile.q_input_us, profile.gate_up_base_us, profile.gate_up_lora_us, profile.save_gate_up_us,
-              profile.act_us, profile.save_intermediate_us, profile.q_intermediate_us, profile.down_base_us,
-              profile.down_lora_us, profile.save_down_us, profile.merge_us, profile.total_us());
+              profile.q_input_us, profile.gate_up_base_us, profile.gate_up_lora_us, profile.cache_prepare_us,
+              profile.save_gate_up_us, profile.act_us, profile.save_intermediate_us, profile.q_intermediate_us,
+              profile.down_base_us, profile.down_lora_us, profile.save_down_us, profile.merge_us, profile.total_us());
       fflush(stderr);
     }
     trace_forward_step("done", qlen, k, activated_expert, save_for_backward);
