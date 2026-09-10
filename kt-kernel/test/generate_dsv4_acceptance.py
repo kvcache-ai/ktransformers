@@ -55,21 +55,26 @@ def main():
         results = pool.map(
             partial(generate, args.endpoint, max_tokens=args.max_tokens), rows
         )
-        for index, result in enumerate(results):
-            result["concurrency"] = args.concurrency
-            handle.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
-            handle.flush()
-            print(
-                json.dumps(
-                    {
-                        "index": index,
-                        "seconds": result["seconds"],
-                        "text": result["response"]["text"],
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
+        try:
+            for index, result in enumerate(results):
+                result["concurrency"] = args.concurrency
+                handle.write(
+                    json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n"
+                )
+                handle.flush()
+                print(
+                    json.dumps(
+                        {
+                            "index": index,
+                            "seconds": result["seconds"],
+                            "text": result["response"]["text"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
 
 if __name__ == "__main__":
