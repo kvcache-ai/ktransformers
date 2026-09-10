@@ -52,6 +52,29 @@ def _make_config(policy=None):
         return config.KTConfig(**kwargs)
 
 
+def _make_rawint4_config(**overrides):
+    values = {
+        "kt_backend": "RAWINT4",
+        "kt_expert_weight_format": "rawint4",
+        "kt_train_mode": "lora",
+        "kt_full_weight_grad": False,
+        "kt_lora_rank": 8,
+        "kt_lora_dropout": 0.0,
+        "kt_force_fused_expert_lora": True,
+        "kt_num_gpu_experts": 0,
+        "kt_use_lora_experts": False,
+        "kt_tp_enabled": False,
+        "kt_threadpool_count": 1,
+        "kt_activation_policy": {"cpu": "recompute", "gpu": "recompute"},
+    }
+    values.update(overrides)
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        return config.KTConfig(**values)
+
+
 def test_activation_policy_defaults_to_recompute_recompute():
     policy = _make_config().kt_activation_policy
     assert policy == config.KTActivationPolicy(cpu="recompute", gpu="recompute")
@@ -286,6 +309,74 @@ def test_activation_policy_is_immutable():
     policy = _make_config({"cpu": "retain", "gpu": "recompute"}).kt_activation_policy
     with pytest.raises(dataclasses.FrozenInstanceError):
         policy.cpu = "recompute"
+
+
+def test_rawint4_accepts_canonical_and_legacy_backend_alias():
+    canonical = _make_rawint4_config()
+    assert canonical.kt_backend == "RAWINT4"
+    assert canonical.kt_expert_weight_format == "rawint4"
+    assert canonical.kt_share_backward_bb is False
+
+    with pytest.warns(FutureWarning, match="deprecated"):
+        legacy = _make_rawint4_config(kt_backend="AMXINT4_KGroup")
+    assert legacy.kt_backend == "RAWINT4"
+
+
+def test_rawint4_legacy_backend_rejects_conflicting_weight_format():
+    with (
+        pytest.warns(FutureWarning, match="deprecated"),
+        pytest.raises(ValueError, match="conflicts"),
+    ):
+        _make_rawint4_config(
+            kt_backend="AMXINT4_KGroup",
+            kt_expert_weight_format="bf16",
+        )
+
+
+@pytest.mark.parametrize("threadpool_count", [1, 2])
+def test_rawint4_accepts_tp1_tp2(threadpool_count):
+    cfg = _make_rawint4_config(
+        kt_tp_enabled=True,
+        kt_threadpool_count=threadpool_count,
+    )
+    assert cfg.kt_threadpool_count == threadpool_count
+
+
+def test_rawint4_tp_disabled_has_effective_tp1():
+    cfg = _make_rawint4_config(
+        kt_tp_enabled=False,
+        kt_threadpool_count=8,
+    )
+    assert cfg.kt_tp_enabled is False
+    assert cfg.kt_threadpool_count == 8
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"kt_lora_rank": 16}, "rank=8"),
+        ({"kt_lora_dropout": 0.1}, "dropout=0"),
+        ({"kt_tp_enabled": True, "kt_threadpool_count": 4}, "TP1/TP2"),
+        ({"kt_force_fused_expert_lora": False}, "force_fused"),
+        ({"kt_use_lora_experts": True}, "GPU LoRA experts"),
+        ({"kt_share_backward_bb": True}, "directly from packed weights"),
+    ],
+)
+def test_rawint4_v1_capability_matrix_fails_closed(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _make_rawint4_config(**overrides)
+
+
+def test_rawint4_allows_ordinary_retain_but_rejects_checkpoint_forward_reuse():
+    ordinary = _make_rawint4_config(
+        kt_activation_policy={"cpu": "retain", "gpu": "retain"}
+    )
+    assert ordinary.kt_activation_policy == config.KTActivationPolicy(
+        cpu="retain", gpu="retain"
+    )
+
+    with pytest.raises(ValueError, match="checkpoint-forward reuse"):
+        _make_rawint4_config(kt_activation_policy={"cpu": "retain", "gpu": "recompute"})
 
 
 @pytest.mark.parametrize(

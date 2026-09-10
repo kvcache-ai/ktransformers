@@ -73,6 +73,26 @@ def get_moe_arch_config(config) -> MOEArchConfig:
         KTAMXModelNotSupportedError: If model architecture is not supported
     """
     arch = config.architectures[0] if getattr(config, "architectures", None) else ""
+    cfg = getattr(config, "text_config", config)
+    model_type = str(getattr(config, "model_type", ""))
+    text_model_type = str(getattr(cfg, "model_type", ""))
+
+    if (
+        "KimiK2" in arch
+        or model_type in {"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}
+        or text_model_type == "kimi_k2"
+    ):
+        return MOEArchConfig(
+            moe_layer_attr="mlp",
+            router_attr="gate",
+            experts_attr="experts",
+            weight_names=("gate_proj", "up_proj", "down_proj"),
+            expert_num=cfg.n_routed_experts,
+            intermediate_size=cfg.moe_intermediate_size,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            has_shared_experts=getattr(cfg, "n_shared_experts", 0) > 0,
+            router_type="deepseek_gate",
+        )
 
     if "DeepseekV2" in arch:
         return MOEArchConfig(
@@ -99,7 +119,6 @@ def get_moe_arch_config(config) -> MOEArchConfig:
             router_type="deepseek_gate",
         )
     if "Qwen2Moe" in arch or "Qwen3Moe" in arch or "Qwen3VLMoe" in arch or "Qwen3_5Moe" in arch:
-        cfg = getattr(config, "text_config", config)
         return MOEArchConfig(
             moe_layer_attr="mlp",
             router_attr="gate",
@@ -136,8 +155,8 @@ def get_moe_arch_config(config) -> MOEArchConfig:
 
     raise KTAMXModelNotSupportedError(
         f"Model architecture {arch} not supported for KT AMX. "
-        "Supported architectures: DeepseekV2, DeepseekV3, Qwen2Moe, Qwen3Moe, Qwen3VLMoe, "
-        "Qwen3_5Moe, Glm4Moe, Mixtral"
+        "Supported architectures: DeepseekV2, DeepseekV3, KimiK2/KimiK25, "
+        "Qwen2Moe, Qwen3Moe, Qwen3VLMoe, Qwen3_5Moe, Glm4Moe, Mixtral"
     )
 
 
@@ -168,6 +187,23 @@ def detect_fused_experts(experts: nn.Module) -> bool:
 
 def _get_layers_prefix(config) -> str:
     arch = config.architectures[0] if getattr(config, "architectures", None) else ""
+    model_type = str(getattr(config, "model_type", ""))
+    text_config = getattr(config, "text_config", None)
+    text_model_type = str(getattr(text_config, "model_type", ""))
+    kimi_composite_aliases = {"kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}
+    kimi_composite_architectures = {
+        "KimiK25ForConditionalGeneration",
+        "KimiK26ForConditionalGeneration",
+    }
+    if text_config is not None and (
+        model_type in kimi_composite_aliases or arch in kimi_composite_architectures
+    ):
+        return "language_model.model.layers"
+    if text_model_type == "kimi_k2":
+        raise KTAMXModelNotSupportedError(
+            "Unknown composite Kimi architecture cannot be assigned a checkpoint layer prefix: "
+            f"architecture={arch!r}, model_type={model_type!r}."
+        )
     if "Qwen3_5Moe" in arch or "Qwen3VLMoe" in arch:
         return "model.language_model.layers"
     return "model.layers"
@@ -238,8 +274,11 @@ def move_non_experts_to_gpu(
         container.embed_tokens.to(device)
     if hasattr(container, "norm"):
         container.norm.to(device)
-    if hasattr(model, "lm_head"):
-        model.lm_head.to(device)
+    output_embeddings = getattr(model, "get_output_embeddings", lambda: None)()
+    if output_embeddings is None:
+        output_embeddings = getattr(model, "lm_head", None)
+    if output_embeddings is not None:
+        output_embeddings.to(device)
 
     for layer in layers:
         if hasattr(layer, "self_attn"):

@@ -46,9 +46,14 @@ try:
 except (ImportError, AttributeError):
     AMXFP8_SFT_MOE = None
 
+try:
+    from kt_kernel_ext.moe import AMXInt4_KGroup_SFT_MOE
+except (ImportError, AttributeError):
+    AMXInt4_KGroup_SFT_MOE = None
+
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer, _supports_authoritative_optimizer_grads
-from .backend import is_fp8_sft_method, is_int8_sft_method
-from .weights import BlockFP8ExpertWeights
+from .backend import is_fp8_sft_method, is_int8_sft_method, is_rawint4_sft_method
+from .weights import BlockFP8ExpertWeights, RAWINT4ExpertWeights
 
 _AMX_M_STEP = 32
 
@@ -60,6 +65,8 @@ _SFT_METHOD_TO_CLASS = {
     "INT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
+    "RAWINT4_SFT": AMXInt4_KGroup_SFT_MOE,
+    "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
     "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
     "AMXINT8_SFT_SkipLoRA": AMXInt8_SFT_MOE_SkipLoRA,
     "AMXINT4_SFT_SkipLoRA": AMXInt4_SFT_MOE_SkipLoRA,
@@ -121,6 +128,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
 
         self.method = method
+        self._is_rawint4 = is_rawint4_sft_method(method)
         self._is_skip_lora = "SkipLoRA" in method
         self._uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
             method,
@@ -153,6 +161,29 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.group_size = 128
             self.zero_point = False
 
+        if is_rawint4_sft_method(self.method):
+            if self._full_weight_grad:
+                raise ValueError("RAWINT4 SFT supports frozen-base LoRA only")
+            if self.lora_rank != 8:
+                raise ValueError("RAWINT4 SFT v1 requires LoRA rank 8")
+            if self.lora_dropout != 0.0:
+                raise ValueError("RAWINT4 SFT v1 requires LoRA dropout 0")
+            if self._is_skip_lora:
+                raise ValueError("RAWINT4 SFT v1 does not support SkipLoRA")
+            if self.num_gpu_experts != 0:
+                raise ValueError("RAWINT4 SFT requires all routed experts on CPU")
+            if self.threadpool_count not in {1, 2}:
+                raise ValueError("RAWINT4 SFT v1 supports TP1/TP2 only")
+            if self.hidden_size % 32 or self.moe_intermediate_size % 32:
+                raise ValueError("RAWINT4 SFT requires hidden_size and moe_intermediate_size " "divisible by 32")
+            if (
+                self.moe_intermediate_size % self.threadpool_count
+                or (self.moe_intermediate_size // self.threadpool_count) % 32
+            ):
+                raise ValueError("RAWINT4 SFT requires every TP intermediate slice divisible by 32")
+            self.group_size = 32
+            self.zero_point = False
+
         if method not in _SFT_METHOD_TO_CLASS:
             raise ValueError(f"Unknown SFT method: {method}. Supported: {list(_SFT_METHOD_TO_CLASS.keys())}")
 
@@ -163,6 +194,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.gate_proj: Optional[torch.Tensor] = None
         self.up_proj: Optional[torch.Tensor] = None
         self.down_proj: Optional[torch.Tensor] = None
+        self.gate_scale: Optional[torch.Tensor] = None
+        self.up_scale: Optional[torch.Tensor] = None
+        self.down_scale: Optional[torch.Tensor] = None
 
         self._moe_class = moe_class
 
@@ -246,13 +280,35 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         if physical_to_logical_map_cpu is None:
             physical_to_logical_map_cpu = torch.arange(self.num_experts, dtype=torch.int64)
+        strict_rawint4_map = bool(getattr(self, "_is_rawint4", False))
+        if strict_rawint4_map:
+            if not isinstance(physical_to_logical_map_cpu, torch.Tensor):
+                raise TypeError("physical_to_logical_map_cpu must be a torch.Tensor")
+            if physical_to_logical_map_cpu.dtype not in {torch.int32, torch.int64}:
+                raise ValueError(
+                    "physical_to_logical_map_cpu must use an integer dtype, "
+                    f"got {physical_to_logical_map_cpu.dtype}."
+                )
         self._physical_to_logical_map_cpu = physical_to_logical_map_cpu.to(
             dtype=torch.int64, device="cpu"
-        ).contiguous()
-        if self._physical_to_logical_map_cpu.numel() < self.num_experts:
+        ).reshape(-1).contiguous()
+        if strict_rawint4_map and self._physical_to_logical_map_cpu.numel() != self.num_experts:
+            raise ValueError(
+                "physical_to_logical_map_cpu must contain exactly "
+                f"{self.num_experts} entries, got {self._physical_to_logical_map_cpu.numel()}."
+            )
+        if not strict_rawint4_map and self._physical_to_logical_map_cpu.numel() < self.num_experts:
             raise ValueError(
                 "physical_to_logical_map_cpu must contain at least "
                 f"{self.num_experts} entries, got {self._physical_to_logical_map_cpu.numel()}."
+            )
+        expected_experts = torch.arange(self.num_experts, dtype=torch.int64)
+        if strict_rawint4_map and not torch.equal(
+            self._physical_to_logical_map_cpu.sort().values, expected_experts
+        ):
+            raise ValueError(
+                "physical_to_logical_map_cpu must be a permutation of "
+                f"[0, {self.num_experts}); got {self._physical_to_logical_map_cpu.tolist()}."
             )
 
         if self.gate_proj is None and not getattr(self, "_use_projs_path", False):
@@ -300,6 +356,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             config.gate_proj = self.gate_proj.data_ptr()
             config.up_proj = self.up_proj.data_ptr()
             config.down_proj = self.down_proj.data_ptr()
+            if getattr(self, "_use_rawint4_tensor_path", False):
+                config.gate_scale = self.gate_scale.data_ptr()
+                config.up_scale = self.up_scale.data_ptr()
+                config.down_scale = self.down_scale.data_ptr()
 
         if self._lora_initialized:
             config.gate_lora_a = self.gate_lora_a.data_ptr()
@@ -311,7 +371,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         config.pool = self.cpu_infer.backend_
 
-        if self.method in ("AMXINT4_KGroup_SFT", "AMXINT4_1KGroup_SFT"):
+        if is_rawint4_sft_method(self.method):
+            config.quant_config.bits = 4
             config.quant_config.group_size = self.group_size
             config.quant_config.zero_point = self.zero_point
         elif is_fp8_sft_method(self.method):
@@ -341,6 +402,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.gate_proj = None
             self.up_proj = None
             self.down_proj = None
+            self.gate_scale = None
+            self.up_scale = None
+            self.down_scale = None
 
         if getattr(self, "_bf16_gate_proj", None) is not None:
             self._bf16_gate_proj = None
@@ -389,6 +453,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         down_proj: torch.Tensor,
         physical_to_logical_map_cpu: torch.Tensor,
     ) -> None:
+        if is_rawint4_sft_method(self.method):
+            raise ValueError(
+                "RAWINT4 SFT accepts packed weights plus BF16 group scales only; " "use load_rawint4_weights()"
+            )
         if is_fp8_sft_method(self.method):
             raise ValueError(
                 "AMXFP8_SFT accepts raw per-expert E4M3 weights only; "
@@ -404,6 +472,63 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.down_proj = down_proj.contiguous()
         self.load_weights(physical_to_logical_map_cpu)
         del gate_proj, up_proj, down_proj
+
+    def load_rawint4_weights(
+        self,
+        weights: RAWINT4ExpertWeights,
+        physical_to_logical_map_cpu: torch.Tensor,
+    ) -> None:
+        """Synchronously load strict signed group-32 packed expert weights."""
+
+        if not is_rawint4_sft_method(self.method):
+            raise ValueError(f"load_rawint4_weights() requires RAWINT4_SFT, got {self.method!r}")
+        if int(weights.group_size) != 32:
+            raise ValueError(f"RAWINT4 SFT requires group_size=32, got {weights.group_size}")
+
+        projections = {
+            "gate": (
+                weights.gate_proj,
+                weights.gate_scale,
+                (self.num_experts, self.moe_intermediate_size, self.hidden_size // 2),
+                (self.num_experts, self.moe_intermediate_size, self.hidden_size // 32),
+            ),
+            "up": (
+                weights.up_proj,
+                weights.up_scale,
+                (self.num_experts, self.moe_intermediate_size, self.hidden_size // 2),
+                (self.num_experts, self.moe_intermediate_size, self.hidden_size // 32),
+            ),
+            "down": (
+                weights.down_proj,
+                weights.down_scale,
+                (self.num_experts, self.hidden_size, self.moe_intermediate_size // 2),
+                (self.num_experts, self.hidden_size, self.moe_intermediate_size // 32),
+            ),
+        }
+        for name, (packed, scale, packed_shape, scale_shape) in projections.items():
+            if (
+                packed.device.type != "cpu"
+                or packed.dtype != torch.uint8
+                or not packed.is_contiguous()
+                or tuple(packed.shape) != packed_shape
+            ):
+                raise ValueError(f"{name} RAWINT4 weight must be contiguous CPU uint8 with " f"shape {packed_shape}")
+            if (
+                scale.device.type != "cpu"
+                or scale.dtype != torch.bfloat16
+                or not scale.is_contiguous()
+                or tuple(scale.shape) != scale_shape
+            ):
+                raise ValueError(f"{name} RAWINT4 scale must be contiguous CPU BF16 with " f"shape {scale_shape}")
+
+        self.gate_proj = weights.gate_proj
+        self.gate_scale = weights.gate_scale
+        self.up_proj = weights.up_proj
+        self.up_scale = weights.up_scale
+        self.down_proj = weights.down_proj
+        self.down_scale = weights.down_scale
+        self._use_rawint4_tensor_path = True
+        self.load_weights(physical_to_logical_map_cpu)
 
     def load_block_fp8_weights(
         self,
@@ -491,6 +616,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if is_fp8_sft_method(self.method):
             raise RuntimeError(
                 "AMXFP8_SFT requires raw per-expert HF checkpoint tensors; "
+                "legacy merged weight files are not supported"
+            )
+        if is_rawint4_sft_method(self.method):
+            raise RuntimeError(
+                "RAWINT4 SFT requires packed compressed-tensors checkpoint tensors; "
                 "legacy merged weight files are not supported"
             )
         if is_int8_sft_method(self.method):

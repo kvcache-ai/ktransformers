@@ -593,10 +593,10 @@ class KTMoELayerWrapper(nn.Module):
 
     def _compute_routing(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router = getattr(self, self._router_attr)
-        router_grad_enabled = self.training and torch.is_grad_enabled() and any(
-            parameter.requires_grad for parameter in router.parameters()
+        routing_grad_enabled = torch.is_grad_enabled() and (
+            hidden_states.requires_grad or any(parameter.requires_grad for parameter in router.parameters())
         )
-        routing_context = nullcontext() if router_grad_enabled else torch.no_grad()
+        routing_context = nullcontext() if routing_grad_enabled else torch.no_grad()
 
         def finish(
             topk_ids: torch.Tensor,
@@ -604,10 +604,8 @@ class KTMoELayerWrapper(nn.Module):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             if topk_weights.is_floating_point():
                 topk_weights = topk_weights.to(torch.bfloat16)
-            if router_grad_enabled and not topk_weights.requires_grad:
-                raise RuntimeError(
-                    f"Layer {self.layer_idx}: trainable router produced detached routing weights"
-                )
+            if routing_grad_enabled and not topk_weights.requires_grad:
+                raise RuntimeError(f"Layer {self.layer_idx}: routing weights are detached but gradients are required")
             return topk_ids, topk_weights
 
         with routing_context:

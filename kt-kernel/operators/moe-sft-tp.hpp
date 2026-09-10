@@ -260,6 +260,163 @@ class TP_MOE_SFT : public TP_MOE<T> {
     for (auto& tp : tps) tp->clear_staged_weight_pointers();
   }
 
+  static constexpr bool uses_rawint4_kgroup_weights() {
+    if constexpr (requires { T::kUsesKGroupPackedBaseWeights; }) {
+      return T::kUsesKGroupPackedBaseWeights;
+    }
+    return false;
+  }
+
+  struct RawInt4TPStaging {
+    std::vector<uint8_t> gate;
+    std::vector<uint8_t> up;
+    std::vector<uint8_t> down;
+    std::vector<ggml_bf16_t> gate_scale;
+    std::vector<ggml_bf16_t> up_scale;
+    std::vector<ggml_bf16_t> down_scale;
+  };
+
+  void clear_rawint4_staged_weight_pointers() noexcept {
+    for (auto& tp : tps) {
+      tp->set_k2_packed_weight_scale_pointers(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    }
+  }
+
+  class RawInt4StagedPointerGuard {
+   public:
+    explicit RawInt4StagedPointerGuard(TP_MOE_SFT& owner) : owner_(owner) {}
+    RawInt4StagedPointerGuard(const RawInt4StagedPointerGuard&) = delete;
+    RawInt4StagedPointerGuard& operator=(const RawInt4StagedPointerGuard&) = delete;
+    ~RawInt4StagedPointerGuard() noexcept { owner_.clear_rawint4_staged_weight_pointers(); }
+
+   private:
+    TP_MOE_SFT& owner_;
+  };
+
+  void load_rawint4_weights_with_tp_staging() {
+    const int group_size = config.quant_config.group_size;
+    if (config.quant_config.bits != 4 || group_size != 32 || config.quant_config.zero_point) {
+      throw std::runtime_error("RAWINT4 SFT requires signed group-32 weights without zero points");
+    }
+    if (config.num_gpu_experts != 0) {
+      throw std::runtime_error("RAWINT4 SFT requires all routed experts to reside on CPU");
+    }
+
+    const bool per_expert = !config.gate_projs.empty();
+    if (per_expert) {
+      if (config.gate_projs.empty() || config.up_projs.empty() || config.down_projs.empty() ||
+          config.gate_scales.empty() || config.up_scales.empty() || config.down_scales.empty() ||
+          config.gate_projs[0].size() < static_cast<size_t>(config.expert_num) ||
+          config.up_projs[0].size() < static_cast<size_t>(config.expert_num) ||
+          config.down_projs[0].size() < static_cast<size_t>(config.expert_num) ||
+          config.gate_scales[0].size() < static_cast<size_t>(config.expert_num) ||
+          config.up_scales[0].size() < static_cast<size_t>(config.expert_num) ||
+          config.down_scales[0].size() < static_cast<size_t>(config.expert_num)) {
+        throw std::runtime_error("RAWINT4 SFT per-expert packed weights/scales are incomplete");
+      }
+    } else if (config.gate_proj == nullptr || config.up_proj == nullptr || config.down_proj == nullptr ||
+               config.gate_scale == nullptr || config.up_scale == nullptr || config.down_scale == nullptr) {
+      throw std::runtime_error("RAWINT4 SFT packed weights and BF16 scales must all be provided");
+    }
+
+    std::vector<int> intermediate_offsets(tp_count);
+    int intermediate_offset = 0;
+    for (int i = 0; i < tp_count; ++i) {
+      const auto& local = tp_configs[i];
+      if (local.hidden_size != config.hidden_size || local.expert_num != config.expert_num ||
+          local.intermediate_size <= 0 || local.intermediate_size % group_size != 0 ||
+          intermediate_offset % group_size != 0) {
+        throw std::runtime_error("RAWINT4 SFT TP slice is not group aligned");
+      }
+      intermediate_offsets[i] = intermediate_offset;
+      intermediate_offset += local.intermediate_size;
+      tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+    }
+    if (intermediate_offset != config.intermediate_size) {
+      throw std::runtime_error("RAWINT4 SFT TP slices do not cover the intermediate dimension");
+    }
+
+    const auto* physical_to_logical_map = static_cast<const uint64_t*>(config.physical_to_logical_map);
+    std::vector<RawInt4TPStaging> staging(tp_count);
+    // Clear published pointers before staging storage is destroyed.
+    RawInt4StagedPointerGuard pointer_guard(*this);
+    run_numa_job_checked("RAWINT4 TP staging", [&](int numa_id) {
+      const auto& local = tp_configs[numa_id];
+      const size_t local_weight_elems = static_cast<size_t>(local.intermediate_size) * local.hidden_size;
+      const size_t local_scale_elems = local_weight_elems / group_size;
+      auto& stage = staging[numa_id];
+      stage.gate.resize(static_cast<size_t>(local.expert_num) * local_weight_elems / 2);
+      stage.up.resize(static_cast<size_t>(local.expert_num) * local_weight_elems / 2);
+      stage.down.resize(static_cast<size_t>(local.expert_num) * local_weight_elems / 2);
+      stage.gate_scale.resize(static_cast<size_t>(local.expert_num) * local_scale_elems);
+      stage.up_scale.resize(static_cast<size_t>(local.expert_num) * local_scale_elems);
+      stage.down_scale.resize(static_cast<size_t>(local.expert_num) * local_scale_elems);
+
+      const int row_offset = intermediate_offsets[numa_id];
+      config.pool->get_subpool(numa_id)->do_work_stealing_job(
+          local.expert_num, nullptr,
+          [&](int physical_expert) {
+            const size_t logical_expert = expert_map(physical_to_logical_map, physical_expert);
+            const auto source = [&](const std::vector<std::vector<void*>>& parts, const void* contiguous,
+                                    size_t contiguous_stride) -> const uint8_t* {
+              if (per_expert) return static_cast<const uint8_t*>(parts[0][logical_expert]);
+              return static_cast<const uint8_t*>(contiguous) + logical_expert * contiguous_stride;
+            };
+            const size_t full_weight_elems = static_cast<size_t>(config.intermediate_size) * config.hidden_size;
+            const size_t full_scale_elems = full_weight_elems / group_size;
+            const uint8_t* gate_src = source(config.gate_projs, config.gate_proj, full_weight_elems / 2);
+            const uint8_t* up_src = source(config.up_projs, config.up_proj, full_weight_elems / 2);
+            const uint8_t* down_src = source(config.down_projs, config.down_proj, full_weight_elems / 2);
+            const auto* gate_scale_src = reinterpret_cast<const ggml_bf16_t*>(
+                source(config.gate_scales, config.gate_scale, full_scale_elems * sizeof(ggml_bf16_t)));
+            const auto* up_scale_src = reinterpret_cast<const ggml_bf16_t*>(
+                source(config.up_scales, config.up_scale, full_scale_elems * sizeof(ggml_bf16_t)));
+            const auto* down_scale_src = reinterpret_cast<const ggml_bf16_t*>(
+                source(config.down_scales, config.down_scale, full_scale_elems * sizeof(ggml_bf16_t)));
+            if (gate_src == nullptr || up_src == nullptr || down_src == nullptr || gate_scale_src == nullptr ||
+                up_scale_src == nullptr || down_scale_src == nullptr) {
+              throw std::runtime_error("RAWINT4 SFT encountered a null expert weight/scale pointer");
+            }
+
+            const size_t dst_weight = logical_expert * local_weight_elems / 2;
+            const size_t dst_scale = logical_expert * local_scale_elems;
+            const size_t gate_row_bytes = static_cast<size_t>(local.intermediate_size) * config.hidden_size / 2;
+            const size_t gate_row_scales = static_cast<size_t>(local.intermediate_size) *
+                                           (config.hidden_size / group_size);
+            std::memcpy(stage.gate.data() + dst_weight,
+                        gate_src + static_cast<size_t>(row_offset) * config.hidden_size / 2, gate_row_bytes);
+            std::memcpy(stage.up.data() + dst_weight,
+                        up_src + static_cast<size_t>(row_offset) * config.hidden_size / 2, gate_row_bytes);
+            std::memcpy(stage.gate_scale.data() + dst_scale,
+                        gate_scale_src + static_cast<size_t>(row_offset) * (config.hidden_size / group_size),
+                        gate_row_scales * sizeof(ggml_bf16_t));
+            std::memcpy(stage.up_scale.data() + dst_scale,
+                        up_scale_src + static_cast<size_t>(row_offset) * (config.hidden_size / group_size),
+                        gate_row_scales * sizeof(ggml_bf16_t));
+
+            for (int hidden_row = 0; hidden_row < config.hidden_size; ++hidden_row) {
+              const size_t dst_row = dst_weight + static_cast<size_t>(hidden_row) * local.intermediate_size / 2;
+              const size_t src_row = (static_cast<size_t>(hidden_row) * config.intermediate_size + row_offset) / 2;
+              std::memcpy(stage.down.data() + dst_row, down_src + src_row,
+                          static_cast<size_t>(local.intermediate_size) / 2);
+              const size_t dst_scale_row = dst_scale + static_cast<size_t>(hidden_row) *
+                                                         (local.intermediate_size / group_size);
+              const size_t src_scale_row = static_cast<size_t>(hidden_row) *
+                                               (config.intermediate_size / group_size) +
+                                           row_offset / group_size;
+              std::memcpy(stage.down_scale.data() + dst_scale_row, down_scale_src + src_scale_row,
+                          static_cast<size_t>(local.intermediate_size / group_size) * sizeof(ggml_bf16_t));
+            }
+          },
+          nullptr);
+
+      tps[numa_id]->set_k2_packed_weight_scale_pointers(
+          stage.gate.data(), stage.up.data(), stage.down.data(), stage.gate_scale.data(), stage.up_scale.data(),
+          stage.down_scale.data());
+    });
+    run_numa_job_checked("RAWINT4 forward weight load", [this](int numa_id) { tps[numa_id]->load_weights(); });
+  }
+
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
     required_bytes = round_up(required_bytes, kAmxAlignment);
     if (required_bytes == 0) {
@@ -305,6 +462,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> part_grad_up_lora_a_;
   std::vector<ggml_bf16_t*> part_grad_input_;
   std::vector<float*> part_grad_weights_;
+  std::vector<void*> part_kernel_workspace_;
+  std::vector<size_t> part_kernel_workspace_bytes_;
 
   // The nine optimizer-gradient outputs are owned by C++ across an optimizer
   // window.  Python only attaches/detaches aliases to these buffers; it never
@@ -335,6 +494,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
     part_grad_up_lora_a_.assign(tp_count, nullptr);
     part_grad_input_.assign(tp_count, nullptr);
     part_grad_weights_.assign(tp_count, nullptr);
+    part_kernel_workspace_.assign(tp_count, nullptr);
+    part_kernel_workspace_bytes_.assign(tp_count, 0);
 
     if constexpr (!kSkipLoRA) {
       // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
@@ -375,6 +536,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BaseWeightReload);
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      load_rawint4_weights_with_tp_staging();
+      weights_loaded = true;
+      return;
+    }
 
     if constexpr (T::kIsFP8Backend) {
       load_fp8_weights_with_tp_staging();
@@ -746,6 +913,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
     if constexpr (kSkipLoRA) lora_rank = 0;
 
+    bool use_external_workspace = false;
+    bool partials_overwrite = false;
+    if constexpr (requires(const T& t) {
+                    t.backward_workspace_v2_enabled();
+                    t.backward_partials_overwrite_enabled();
+                    t.backward_workspace_bytes(0);
+                  }) {
+      use_external_workspace = tps[0]->backward_workspace_v2_enabled();
+      partials_overwrite = use_external_workspace && tps[0]->backward_partials_overwrite_enabled();
+    }
+
     // Snapshot active expert metadata before dispatch (cache is popped inside backward())
     int active_count = tps[0]->get_cache_activated_expert_count();
     std::vector<int> active_expert_map(active_count);
@@ -769,6 +947,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     const size_t down_b_sparse_elems = (size_t)active_count * (size_t)hidden_size * (size_t)lora_rank;
 
     std::vector<size_t> clear_bytes(tp_count, 0);
+    std::vector<size_t> kernel_workspace_bytes(tp_count, 0);
     for (int i = 0; i < tp_count; i++) {
       const size_t grad_input_elems = (size_t)qlen * (size_t)hidden_size;
       const size_t grad_weights_elems = need_grad_weights ? ((size_t)qlen * (size_t)k) : 0;
@@ -784,6 +963,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       required += round_up(grad_input_bytes, kAmxAlignment);
       if (need_grad_weights) {
         required += round_up(grad_weights_bytes, kAmxAlignment);
+      }
+      if constexpr (requires(const T& t) { t.backward_workspace_bytes(0); }) {
+        if (use_external_workspace) {
+          kernel_workspace_bytes[i] = tps[i]->backward_workspace_bytes(qlen);
+          required += round_up(kernel_workspace_bytes[i], kAmxAlignment);
+        }
       }
 
       alloc_or_resize_backward_pool(i, required);
@@ -807,7 +992,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
       // grad_input and grad_weights: per-TP as before
       part_grad_input_[i] = (ggml_bf16_t*)slice(grad_input_bytes);
       part_grad_weights_[i] = need_grad_weights ? (float*)slice(grad_weights_bytes) : nullptr;
-      clear_bytes[i] = offset;
+      clear_bytes[i] = partials_overwrite ? 0 : offset;
+      part_kernel_workspace_[i] = slice(kernel_workspace_bytes[i]);
+      part_kernel_workspace_bytes_[i] = kernel_workspace_bytes[i];
     }
 
     // Parallel memset for per-TP partials and persistent optimizer gradients.
@@ -990,6 +1177,21 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Run backward on each NUMA node
     stage_start = profiler_.start();
     run_numa_job_checked("SFT backward", [&](int numa_id) {
+      if constexpr (requires(T& t) {
+                      t.backward_with_workspace(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, size_t{0},
+                                                false, 1.0f);
+                    }) {
+        if (use_external_workspace) {
+          tps[numa_id]->backward_with_workspace(
+              grad_output, part_grad_input_[numa_id], nullptr, tp_gate_b_ptr[numa_id], nullptr,
+              tp_up_b_ptr[numa_id], tp_down_a_ptr[numa_id], nullptr, part_grad_weights_[numa_id],
+              full_intermediate_size, tp_fp32_down_b[numa_id], tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id],
+              part_kernel_workspace_[numa_id], part_kernel_workspace_bytes_[numa_id],
+              effective_accumulate_optimizer_grads, optimizer_grad_scale);
+          return;
+        }
+      }
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
                              nullptr,                /* grad_gate_lora_a — unused, FP32 path below */

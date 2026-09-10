@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from .arch import MOEArchConfig
+from .backend import RAWINT4_GROUP_SIZE
 from .conv3d_compat import _canonicalize_qwen3_vl_fused_expert_weights
 from .dist_utils import _maybe_zero3_gathered_parameters
 
@@ -337,6 +338,19 @@ class BlockFP8ExpertWeights:
     block_size: tuple[int, int] = (128, 128)
 
 
+@dataclass
+class RAWINT4ExpertWeights:
+    """Signed group-wise INT4 tensors in the KGroup kernel layout."""
+
+    gate_proj: torch.Tensor
+    gate_scale: torch.Tensor
+    up_proj: torch.Tensor
+    up_scale: torch.Tensor
+    down_proj: torch.Tensor
+    down_scale: torch.Tensor
+    group_size: int = RAWINT4_GROUP_SIZE
+
+
 def _checkpoint_tensor_files(
     checkpoint_files: list[str],
     sharded_metadata: dict | None,
@@ -505,6 +519,171 @@ def load_block_fp8_experts_from_checkpoint_files(
         block_size,
     )
     return BlockFP8ExpertWeights(**output, block_size=(128, 128))
+
+
+def _normalize_rawint4_packed_weight(
+    tensor: torch.Tensor,
+    *,
+    rows: int,
+    cols: int,
+    key: str,
+) -> torch.Tensor:
+    """Return the exact byte-packed layout consumed by the KGroup kernel."""
+
+    if tensor.device.type != "cpu":
+        raise ValueError(f"{key} must be a CPU tensor, got {tensor.device}")
+    if cols % 8:
+        raise ValueError(f"{key} input dimension must be divisible by 8, got {cols}")
+    if tensor.dtype == torch.int32:
+        expected = (rows, cols // 8)
+        if tuple(tensor.shape) != expected:
+            raise ValueError(f"{key} shape mismatch: expected int32 {expected}, got {tuple(tensor.shape)}")
+        return tensor.contiguous().view(torch.uint8).view(rows, cols // 2).contiguous()
+    if tensor.dtype == torch.uint8:
+        expected = (rows, cols // 2)
+        if tuple(tensor.shape) != expected:
+            raise ValueError(f"{key} shape mismatch: expected uint8 {expected}, got {tuple(tensor.shape)}")
+        return tensor.contiguous()
+    raise ValueError(f"{key} must be torch.int32 or torch.uint8 packed INT4, got {tensor.dtype}")
+
+
+def load_rawint4_experts_from_checkpoint_files(
+    checkpoint_files: list[str],
+    sharded_metadata: dict | None,
+    layers_prefix: str,
+    moe_config: MOEArchConfig,
+    layer_idx: int,
+    hidden_size: int,
+    group_size: int = RAWINT4_GROUP_SIZE,
+) -> RAWINT4ExpertWeights:
+    """Load one layer of strict compressed-tensors RAWINT4 experts."""
+
+    if not SAFETENSORS_AVAILABLE:
+        raise ImportError("safetensors is required for RAWINT4 expert loading")
+    if not checkpoint_files:
+        raise FileNotFoundError("checkpoint_files is empty")
+    if int(group_size) != RAWINT4_GROUP_SIZE:
+        raise ValueError(f"RAWINT4 SFT requires group_size={RAWINT4_GROUP_SIZE}, got {group_size}")
+
+    hidden_size = int(hidden_size)
+    intermediate_size = int(moe_config.intermediate_size)
+    if hidden_size % group_size or intermediate_size % group_size:
+        raise ValueError(
+            f"RAWINT4 group_size={group_size} must divide hidden_size={hidden_size} "
+            f"and intermediate_size={intermediate_size}"
+        )
+
+    tensor_files = _checkpoint_tensor_files(checkpoint_files, sharded_metadata)
+    experts_prefix = f"{layers_prefix}.{layer_idx}.{moe_config.moe_layer_attr}." f"{moe_config.experts_attr}"
+    gate_name, up_name, down_name = moe_config.weight_names
+    projection_specs = {
+        "gate": (gate_name, intermediate_size, hidden_size),
+        "up": (up_name, intermediate_size, hidden_size),
+        "down": (down_name, hidden_size, intermediate_size),
+    }
+
+    def load_projection(label: str) -> tuple[torch.Tensor, torch.Tensor]:
+        projection_name, rows, cols = projection_specs[label]
+        requested: list[tuple[str, str, str, str]] = []
+        for expert_idx in range(int(moe_config.expert_num)):
+            base = f"{experts_prefix}.{expert_idx}.{projection_name}"
+            requested.append(
+                (
+                    f"{base}.weight_packed",
+                    f"{base}.weight_scale",
+                    f"{base}.weight_shape",
+                    base,
+                )
+            )
+
+        required_keys = [key for record in requested for key in record[:3]]
+        missing = [key for key in required_keys if key not in tensor_files]
+        if missing:
+            preview = ", ".join(missing[:3])
+            suffix = " ..." if len(missing) > 3 else ""
+            raise FileNotFoundError(
+                f"layer {layer_idx} is missing {len(missing)} RAWINT4 tensors: " f"{preview}{suffix}"
+            )
+        for _, _, _, base in requested:
+            zero_point_keys = (
+                f"{base}.weight_zero_point",
+                f"{base}.zero_point",
+            )
+            present = [key for key in zero_point_keys if key in tensor_files]
+            if present:
+                raise ValueError(
+                    "RAWINT4 SFT accepts symmetric weights without zero-point " f"tensors, found {present[0]}"
+                )
+
+        keys_by_file: dict[str, list[str]] = {}
+        for key in required_keys:
+            keys_by_file.setdefault(tensor_files[key], []).append(key)
+        tensors: dict[str, torch.Tensor] = {}
+        for file_path, file_keys in keys_by_file.items():
+            with safe_open(file_path, framework="pt") as handle:
+                for key in file_keys:
+                    tensors[key] = handle.get_tensor(key)
+
+        packed_weights: list[torch.Tensor] = []
+        scales: list[torch.Tensor] = []
+        expected_shape = (rows, cols)
+        expected_scale_shape = (rows, cols // group_size)
+        for packed_key, scale_key, shape_key, _ in requested:
+            shape_tensor = tensors[shape_key]
+            if shape_tensor.device.type != "cpu" or shape_tensor.dtype not in {
+                torch.int32,
+                torch.int64,
+            }:
+                raise ValueError(
+                    f"{shape_key} must be an INT32 or INT64 CPU tensor, got "
+                    f"{shape_tensor.dtype} on {shape_tensor.device}"
+                )
+            shape = tuple(int(value) for value in shape_tensor.reshape(-1).tolist())
+            if shape != expected_shape:
+                raise ValueError(f"{shape_key} mismatch: expected {expected_shape}, got {shape}")
+
+            packed_weights.append(
+                _normalize_rawint4_packed_weight(tensors[packed_key], rows=rows, cols=cols, key=packed_key)
+            )
+            scale = tensors[scale_key]
+            if scale.device.type != "cpu" or scale.dtype not in {
+                torch.bfloat16,
+                torch.float32,
+            }:
+                raise ValueError(
+                    f"{scale_key} must be a BF16 or FP32 CPU tensor, got " f"{scale.dtype} on {scale.device}"
+                )
+            if tuple(scale.shape) != expected_scale_shape:
+                raise ValueError(
+                    f"{scale_key} shape mismatch: expected {expected_scale_shape}, " f"got {tuple(scale.shape)}"
+                )
+            scales.append(scale.to(dtype=torch.bfloat16, device="cpu").contiguous())
+
+        return (
+            torch.stack(packed_weights, dim=0).contiguous(),
+            torch.stack(scales, dim=0).contiguous(),
+        )
+
+    started = time.time()
+    gate_proj, gate_scale = load_projection("gate")
+    up_proj, up_scale = load_projection("up")
+    down_proj, down_scale = load_projection("down")
+    logger.info(
+        "Loaded layer %d RAWINT4 routed experts: experts=%d, group_size=%d, elapsed=%.1fs",
+        layer_idx,
+        moe_config.expert_num,
+        group_size,
+        time.time() - started,
+    )
+    return RAWINT4ExpertWeights(
+        gate_proj=gate_proj,
+        gate_scale=gate_scale,
+        up_proj=up_proj,
+        up_scale=up_scale,
+        down_proj=down_proj,
+        down_scale=down_scale,
+        group_size=group_size,
+    )
 
 
 def _find_safetensor_files(kt_weight_path: str) -> list[str]:

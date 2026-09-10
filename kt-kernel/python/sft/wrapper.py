@@ -25,7 +25,18 @@ from .arch import (
 from .layer import KTMoELayerWrapper
 from .lora import LoRAExperts
 from .base import _supports_authoritative_optimizer_grads
-from .backend import FP8_BACKEND, INT8_BACKEND, get_fp8_runtime, get_int8_runtime
+from .backend import (
+    FP8_BACKEND,
+    INT8_BACKEND,
+    RAWINT4_BACKEND,
+    RAWINT4_GROUP_SIZE,
+    RAWINT4_SFT_METHOD,
+    RAWINT4_WEIGHT_LAYOUT,
+    get_fp8_runtime,
+    get_int8_runtime,
+    get_rawint4_checkpoint_contract,
+    get_rawint4_runtime,
+)
 from .checkpoint import load_full_weight_layer, resolve_full_weight_checkpoint
 from .conv3d_compat import patch_vlm_conv3d
 from .dist_utils import _distributed_rank_world_size
@@ -34,6 +45,7 @@ from .weights import (
     extract_moe_weights,
     load_block_fp8_experts_from_checkpoint_files,
     load_experts_from_checkpoint_files,
+    load_rawint4_experts_from_checkpoint_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +64,17 @@ else:
 
 def _supports_checkpoint_forward_reuse(full_weight_grad: bool, lora_rank: int) -> bool:
     return (full_weight_grad and lora_rank == 0) or (not full_weight_grad and lora_rank > 0)
+
+
+def _validate_rawint4_activation_policy(expert_weight_format: str | None, activation_policy: Any) -> None:
+    """Keep ordinary caching distinct from checkpoint-forward reuse."""
+
+    if expert_weight_format == "rawint4" and activation_policy.cpu == "retain" and activation_policy.gpu == "recompute":
+        raise KTAMXConfigError(
+            "RAWINT4 SFT v1 supports activation_policy cpu=retain,gpu=retain "
+            "for ordinary forward/backward caching, but checkpoint-forward reuse "
+            "(cpu=retain,gpu=recompute) is not supported"
+        )
 
 
 def _native_fp8_block_size(model_config: Any) -> tuple[int, int]:
@@ -88,7 +111,7 @@ def _native_fp8_block_size(model_config: Any) -> tuple[int, int]:
     return (128, 128)
 
 
-def _resolve_native_fp8_checkpoint_files(
+def _resolve_raw_safetensors_checkpoint_files(
     model_name_or_path: str,
 ) -> tuple[list[str] | None, dict | None]:
     """Resolve raw safetensors, including a dependency-light local fallback."""
@@ -175,22 +198,49 @@ def _get_kt_config(kt_plugin: Any):
     return KTConfig.from_object(kt_plugin)
 
 
+def _device_map_model_contract(config: Any) -> tuple[int, str, str, str]:
+    """Resolve text-layer count and non-layer module paths for device maps."""
+
+    text_config = getattr(config, "text_config", None)
+    effective_config = text_config if text_config is not None else config
+    num_layers = getattr(effective_config, "num_hidden_layers", None)
+    if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers <= 0:
+        raise KTAMXConfigError("model text config has invalid num_hidden_layers")
+
+    layers_prefix = _get_layers_prefix(config)
+    if layers_prefix == "language_model.model.layers":
+        return (
+            num_layers,
+            "language_model.model.embed_tokens",
+            "language_model.model.norm",
+            "language_model.lm_head",
+        )
+    if layers_prefix == "model.language_model.layers":
+        return (
+            num_layers,
+            "model.language_model.embed_tokens",
+            "model.language_model.norm",
+            "lm_head",
+        )
+    return num_layers, "model.embed_tokens", "model.norm", "lm_head"
+
+
 def build_kt_device_map(config, kt_plugin, device: str = "cuda:0") -> dict[str, str | int]:
     """
     Build device_map for KT model loading with hybrid GPU/CPU expert placement.
     """
     moe_config = get_moe_arch_config(config)
     layers_prefix = _get_layers_prefix(config)
-    num_layers = config.num_hidden_layers
+    num_layers, embed_path, norm_path, lm_head_path = _device_map_model_contract(config)
     num_experts = moe_config.expert_num
     cfg = _get_kt_config(kt_plugin)
     num_gpu_experts = getattr(cfg, "kt_num_gpu_experts", 0) or 0
 
     device_map: dict[str, str | int] = {}
 
-    device_map["model.embed_tokens"] = device
-    device_map["model.norm"] = device
-    device_map["lm_head"] = device
+    device_map[embed_path] = device
+    device_map[norm_path] = device
+    device_map[lm_head_path] = device
 
     for layer_idx in range(num_layers):
         layer_prefix = f"{layers_prefix}.{layer_idx}"
@@ -215,15 +265,15 @@ def build_kt_device_map_simplified(config, kt_plugin, device: str = "cuda:0") ->
     """
     moe_config = get_moe_arch_config(config)
     layers_prefix = _get_layers_prefix(config)
-    num_layers = config.num_hidden_layers
+    num_layers, embed_path, norm_path, lm_head_path = _device_map_model_contract(config)
     cfg = _get_kt_config(kt_plugin)
     num_gpu_experts = getattr(cfg, "kt_num_gpu_experts", 0) or 0
 
     device_map: dict[str, str | int] = {}
 
-    device_map["model.embed_tokens"] = device
-    device_map["model.norm"] = device
-    device_map["lm_head"] = device
+    device_map[embed_path] = device
+    device_map[norm_path] = device
+    device_map[lm_head_path] = device
 
     for layer_idx in range(num_layers):
         layer_prefix = f"{layers_prefix}.{layer_idx}"
@@ -319,6 +369,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         "AMXFP8": "AMXFP8_SFT",
         INT8_BACKEND: "INT8_SFT",
         "AMXINT8": "INT8_SFT",
+        RAWINT4_BACKEND: RAWINT4_SFT_METHOD,
+        "AMXINT4_KGroup": RAWINT4_SFT_METHOD,
         "AMXINT4": "AMXINT4_SFT",
         "AMXBF16_SkipLoRA": "AMXBF16_SFT_SkipLoRA",
         "AMXINT8_SkipLoRA": "AMXINT8_SFT_SkipLoRA",
@@ -382,19 +434,44 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             raise KTAMXConfigError("FP8 SFT requires kt_share_backward_bb=true")
         if getattr(cfg, "kt_weight_lifecycle", "persistent") != "persistent":
             raise KTAMXConfigError("FP8 SFT requires persistent checkpoint weights")
+    if expert_weight_format == "rawint4":
+        if kt_method != RAWINT4_SFT_METHOD:
+            raise KTAMXConfigError("kt_expert_weight_format='rawint4' requires " "kt_backend='auto' or 'RAWINT4'")
+        if full_weight_grad or train_mode != "lora" or lora_rank != 8:
+            raise KTAMXConfigError("RAWINT4 SFT v1 supports frozen-base rank-8 LoRA only")
+        if float(lora_dropout) != 0.0:
+            raise KTAMXConfigError("RAWINT4 SFT v1 requires lora_dropout=0")
+        if requested_num_gpu_experts != 0 or use_lora_experts:
+            raise KTAMXConfigError("RAWINT4 SFT requires all base experts and LoRA execution on CPU")
+        if bool(getattr(cfg, "kt_share_backward_bb", False)):
+            raise KTAMXConfigError(
+                "RAWINT4 SFT computes backward directly from packed weights; "
+                "kt_share_backward_bb must be false"
+            )
+        if not force_fused_expert_lora:
+            raise KTAMXConfigError("RAWINT4 SFT requires kt_force_fused_expert_lora=true")
+        if getattr(cfg, "kt_weight_lifecycle", "persistent") != "persistent":
+            raise KTAMXConfigError("RAWINT4 SFT requires persistent checkpoint weights")
     cpu_activation_retain = activation_policy.cpu == "retain"
     reuse_checkpoint_forward = cpu_activation_retain and activation_policy.gpu == "recompute"
     if cpu_activation_retain and (
         not _supports_checkpoint_forward_reuse(full_weight_grad, lora_rank)
-        or kt_method not in {"AMXBF16_SFT", "AMXFP8_SFT", "INT8_SFT"}
+        or kt_method
+        not in {
+            "AMXBF16_SFT",
+            "AMXFP8_SFT",
+            "INT8_SFT",
+            RAWINT4_SFT_METHOD,
+        }
         or requested_num_gpu_experts != 0
         or use_lora_experts
     ):
         raise KTAMXConfigError(
             "activation_policy.cpu=retain requires CPU-only AMXBF16 Full/LoRA "
-            "or frozen-base INT8/FP8 LoRA; Hybrid, GPU-expert, LoRA-expert, "
-            "INT4, and SkipLoRA paths are not supported"
+            "or frozen-base INT8/FP8/RAWINT4 LoRA; Hybrid, GPU-expert, "
+            "LoRA-expert, generic INT4, and SkipLoRA paths are not supported"
         )
+    _validate_rawint4_activation_policy(expert_weight_format, activation_policy)
     if is_rank_0:
         logger.warning(
             "KT activation policy: cpu=%s, gpu=%s, "
@@ -460,6 +537,37 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             fp8_runtime.weight_layout,
         )
 
+    rawint4_runtime = None
+    rawint4_runtime_error = None
+    rawint4_contract = None
+    if expert_weight_format == "rawint4":
+        try:
+            rawint4_contract = get_rawint4_checkpoint_contract(model.config)
+        except ValueError as exc:
+            raise KTAMXConfigError(str(exc)) from exc
+    if expert_weight_format == "rawint4" and is_rank_0:
+        try:
+            rawint4_runtime = get_rawint4_runtime()
+        except RuntimeError as exc:
+            rawint4_runtime_error = KTAMXNotAvailableError(str(exc))
+    if expert_weight_format == "rawint4":
+        _sync_rank0_wrap_error(
+            rawint4_runtime_error,
+            context="selecting the RAWINT4 SFT kernel",
+            rank=distributed_rank,
+            world_size=distributed_world_size,
+        )
+    if rawint4_runtime is not None:
+        logger.info(
+            "KT RAWINT4 SFT dispatch: configured_backend=%s, logical_backend=%s, "
+            "cpu_variant=%s, effective_kernel=%s, weight_layout=%s",
+            kt_backend,
+            RAWINT4_BACKEND,
+            rawint4_runtime.cpu_variant,
+            rawint4_runtime.kernel,
+            rawint4_runtime.weight_layout,
+        )
+
     threadpool_count = getattr(cfg, "kt_threadpool_count", 1) if getattr(cfg, "kt_tp_enabled", False) else 1
     fp8_block_size = None
     if expert_weight_format == "fp8":
@@ -478,11 +586,27 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 f"intermediate_size={moe_config.intermediate_size}, "
                 f"threadpool_count={threadpool_count}"
             )
+    if expert_weight_format == "rawint4":
+        if threadpool_count not in {1, 2}:
+            raise KTAMXConfigError(f"RAWINT4 SFT v1 supports TP1/TP2 only, got {threadpool_count}")
+        if hidden_size % RAWINT4_GROUP_SIZE or moe_config.intermediate_size % RAWINT4_GROUP_SIZE:
+            raise KTAMXConfigError(
+                "RAWINT4 SFT requires hidden and routed intermediate dimensions " f"divisible by {RAWINT4_GROUP_SIZE}"
+            )
+        if (
+            moe_config.intermediate_size % threadpool_count
+            or (moe_config.intermediate_size // threadpool_count) % RAWINT4_GROUP_SIZE
+        ):
+            raise KTAMXConfigError(
+                "RAWINT4 SFT requires every TP intermediate slice divisible by "
+                f"{RAWINT4_GROUP_SIZE}; intermediate_size={moe_config.intermediate_size}, "
+                f"threadpool_count={threadpool_count}"
+            )
 
     kt_weight_path = getattr(cfg, "kt_weight_path", None)
-    # For FP8 the frontend forwards model_name_or_path through kt_weight_path.
-    # It is checkpoint provenance, not a pre-packed .kt directory.
-    use_kt_weight_path = kt_weight_path is not None and expert_weight_format != "fp8"
+    # Native FP8 and RAWINT4 use kt_weight_path as raw-checkpoint provenance,
+    # not as a pre-packed .kt directory.
+    use_kt_weight_path = kt_weight_path is not None and expert_weight_format not in {"fp8", "rawint4"}
     if use_kt_weight_path:
         logger.info(
             "Loading %s weights from kt_weight_path: %s",
@@ -519,14 +643,13 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 f"Failed to resolve checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}"
             )
 
-    if expert_weight_format == "fp8" and not checkpoint_files and kt_weight_path:
+    if expert_weight_format in {"fp8", "rawint4"} and not checkpoint_files and kt_weight_path:
         logger.info(
-            "Resolving native FP8 checkpoint files from kt_weight_path=%r",
+            "Resolving native %s checkpoint files from kt_weight_path=%r",
+            expert_weight_format.upper(),
             kt_weight_path,
         )
-        resolved_files, resolved_meta = _resolve_native_fp8_checkpoint_files(
-            kt_weight_path
-        )
+        resolved_files, resolved_meta = _resolve_raw_safetensors_checkpoint_files(kt_weight_path)
         if resolved_files:
             checkpoint_files = resolved_files
             sharded_metadata = resolved_meta
@@ -546,6 +669,12 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     if expert_weight_format == "fp8":
         if use_full_weight_checkpoint:
             raise KTAMXConfigError("FP8 SFT does not support KT Full checkpoints")
+    if expert_weight_format == "rawint4":
+        if use_full_weight_checkpoint or kt_expert_checkpoint_path:
+            raise KTAMXConfigError(
+                "RAWINT4 SFT reads packed experts from the source checkpoint and "
+                "does not support KT Full or alternate expert checkpoints"
+            )
 
     logger.debug(
         f"Weight source: kt_weight_path={kt_weight_path!r}, "
@@ -589,6 +718,11 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         raise KTAMXConfigError(
             "FP8 SFT requires raw safetensors checkpoint files. Point "
             "kt_weight_path at model_name_or_path or set kt_expert_checkpoint_path."
+        )
+    if expert_weight_format == "rawint4" and not use_checkpoint_files:
+        raise KTAMXConfigError(
+            "RAWINT4 SFT requires raw compressed-tensors safetensors checkpoint "
+            "files. Point kt_weight_path at model_name_or_path."
         )
 
     model_container, layers = _get_model_container_and_layers(model, purpose="wrapping")
@@ -673,11 +807,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         _layer_experts = getattr(moe_module, moe_config.experts_attr, None)
         _layer_is_fused = _detect_fused(_layer_experts)
-        if (
-            expert_weight_format in {"int8", "fp8"}
-            and not _layer_is_fused
-            and not force_fused_expert_lora
-        ):
+        if expert_weight_format in {"int8", "fp8", "rawint4"} and not _layer_is_fused and not force_fused_expert_lora:
             raise KTAMXConfigError(
                 f"{expert_weight_format.upper()} LoRA with non-fused runtime experts requires "
                 "kt_force_fused_expert_lora=true"
@@ -695,6 +825,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
         block_fp8_weights = None
+        rawint4_weights = None
         wrapper = None
         weight_source_error = None
 
@@ -745,6 +876,17 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                         layer_idx=layer_idx,
                         hidden_size=hidden_size,
                         block_size=fp8_block_size,
+                    )
+                elif expert_weight_format == "rawint4":
+                    layers_prefix = _get_layers_prefix(model.config)
+                    rawint4_weights = load_rawint4_experts_from_checkpoint_files(
+                        checkpoint_files=checkpoint_files,
+                        sharded_metadata=sharded_metadata,
+                        layers_prefix=layers_prefix,
+                        moe_config=moe_config,
+                        layer_idx=layer_idx,
+                        hidden_size=hidden_size,
+                        group_size=RAWINT4_GROUP_SIZE,
                     )
                 elif use_checkpoint_files:
                     layers_prefix = _get_layers_prefix(model.config)
@@ -801,6 +943,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                     max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
+                    group_size=RAWINT4_GROUP_SIZE if expert_weight_format == "rawint4" else 128,
+                    zero_point=False if expert_weight_format == "rawint4" else True,
                     full_weight_grad=full_weight_grad,
                 )
             except BaseException as exc:
@@ -852,6 +996,16 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                         physical_to_logical_map,
                     )
                     block_fp8_weights = None
+                elif expert_weight_format == "rawint4":
+                    logger.debug(
+                        "Layer %s: loading packed RAWINT4 checkpoint tensors",
+                        layer_idx,
+                    )
+                    wrapper.load_rawint4_weights(
+                        rawint4_weights,
+                        physical_to_logical_map,
+                    )
+                    rawint4_weights = None
                 elif use_kt_weight_path:
                     logger.debug(
                         f"Layer {layer_idx}: calling wrapper.load_weights() "
@@ -933,12 +1087,22 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
         layer_wrapper._kt_expert_weight_format = expert_weight_format or "bf16"
+        if rawint4_contract is not None:
+            layer_wrapper._kt_rawint4_quantization = {
+                "bits": rawint4_contract.bits,
+                "group_size": rawint4_contract.group_size,
+                "signed": rawint4_contract.signed,
+                "symmetric": rawint4_contract.symmetric,
+                "zero_point": rawint4_contract.zero_point,
+                "format": rawint4_contract.format,
+                "weight_layout": RAWINT4_WEIGHT_LAYOUT,
+            }
 
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
         # In full_weight_grad mode, the authoritative copies are gate_proj_buf etc.
         # Always release local references to save ~1 GB/layer.
-        del gate_proj, up_proj, down_proj, block_fp8_weights
+        del gate_proj, up_proj, down_proj, block_fp8_weights, rawint4_weights
 
         wrappers.append(layer_wrapper)
         moe_layer_count += 1
@@ -951,7 +1115,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             moe_module,
             moe_config,
             full_weight_grad=full_weight_grad,
-            empty_placeholders=expert_weight_format in {"int8", "fp8"},
+            empty_placeholders=expert_weight_format in {"int8", "fp8", "rawint4"},
         )
 
     ephemeral_finish_error = None
@@ -974,6 +1138,16 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
     logger.info(f"Wrapped {moe_layer_count} MoE layers with KTMoEWrapper")
     model._kt_expert_weight_format = expert_weight_format or "bf16"
+    if rawint4_contract is not None:
+        model._kt_rawint4_quantization = {
+            "bits": rawint4_contract.bits,
+            "group_size": rawint4_contract.group_size,
+            "signed": rawint4_contract.signed,
+            "symmetric": rawint4_contract.symmetric,
+            "zero_point": rawint4_contract.zero_point,
+            "format": rawint4_contract.format,
+            "weight_layout": RAWINT4_WEIGHT_LAYOUT,
+        }
 
     # Link wrappers for async backward repack (higher layer triggers repack for lower)
     for i in range(1, len(wrappers)):
@@ -1188,14 +1362,18 @@ def load_kt_model(
             setattr(kt_plugin, "kt_expert_checkpoint_path", auto_full_weight_checkpoint)
         logger.info("Detected KT Full checkpoint in model directory: %s", auto_full_weight_checkpoint)
 
-    native_fp8_experts = getattr(cfg, "kt_expert_weight_format", None) == "fp8"
-    if native_fp8_experts:
-        # FP8 kt_weight_path is raw-checkpoint provenance; KT loads routed experts.
+    expert_weight_format = getattr(cfg, "kt_expert_weight_format", None)
+    native_fp8_experts = expert_weight_format == "fp8"
+    native_rawint4_experts = expert_weight_format == "rawint4"
+    native_checkpoint_experts = native_fp8_experts or native_rawint4_experts
+    if native_checkpoint_experts:
+        # Native quantized kt_weight_path is raw-checkpoint provenance; KT owns
+        # and loads the routed experts without materializing them in Transformers.
         cfg.kt_skip_expert_loading = True
 
     skip_expert_loading = getattr(cfg, "kt_skip_expert_loading", None)
     needs_checkpoint_resolution = (
-        (native_fp8_experts and not getattr(cfg, "kt_checkpoint_files", None))
+        (native_checkpoint_experts and not getattr(cfg, "kt_checkpoint_files", None))
         or skip_expert_loading is None
         or (
             bool(skip_expert_loading)
@@ -1212,23 +1390,24 @@ def load_kt_model(
             trust_remote_code=trust_remote_code,
         )
         if checkpoint_files and all(f.endswith(".safetensors") for f in checkpoint_files):
-            if native_fp8_experts or getattr(cfg, "kt_weight_path", None) is None:
+            if native_checkpoint_experts or getattr(cfg, "kt_weight_path", None) is None:
                 cfg.kt_skip_expert_loading = True
             else:
                 cfg.kt_skip_expert_loading = False
             cfg.kt_checkpoint_files = checkpoint_files
             cfg.kt_sharded_metadata = sharded_metadata
         else:
-            if not native_fp8_experts:
+            if not native_checkpoint_experts:
                 cfg.kt_skip_expert_loading = False
 
-    if native_fp8_experts:
+    if native_checkpoint_experts:
         checkpoint_files = getattr(cfg, "kt_checkpoint_files", None)
         if not checkpoint_files or not all(
             str(path).endswith(".safetensors") for path in checkpoint_files
         ):
             raise KTAMXConfigError(
-                "native FP8 SFT requires raw safetensors checkpoint files; "
+                f"native {expert_weight_format.upper()} SFT requires raw "
+                "safetensors checkpoint files; "
                 "no Transformers expert-materialization fallback is supported"
             )
         cfg.kt_skip_expert_loading = True

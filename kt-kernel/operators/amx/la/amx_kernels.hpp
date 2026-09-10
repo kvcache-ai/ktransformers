@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "amx_buffers.hpp"
 #include "amx_config.hpp"
@@ -3403,8 +3404,11 @@ struct GemmKernel224Int4SmallKGroup {
   }
 
   static inline __m512 dot_scaled_decoded_kblock(__m512i a512, __m512i w512, __m512 abscale) {
-    __m512i mul = _mm512_setzero_si512();
-    mul = _mm512_dpbssd_epi32(mul, a512, w512);
+    // sign(-128, negative A) overflows; use an unsigned offset and exact correction.
+    const __m512i offset = _mm512_set1_epi8(-128);
+    const __m512i correction = _mm512_dpbusd_epi32_compat(_mm512_setzero_si512(), offset, w512);
+    const __m512i mul = _mm512_dpbusd_epi32_compat(_mm512_sub_epi32(_mm512_setzero_si512(), correction),
+                                                   _mm512_xor_si512(a512, offset), w512);
     return _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul));
   }
 
@@ -3450,147 +3454,149 @@ struct GemmKernel224Int4SmallKGroup {
     }
   }
 
+  struct alignas(64) DecodedColumnPair {
+    __m512i w0, w1, correction0, correction1;
+  };
+
+  template <int Rows, bool BlockedA, bool Cached = false>
+  static inline void matmat_rows(int m, int n, int k, int m_pos, int n_start, int n_end, BufferA* ba, BufferB* bb,
+                                 BufferC* bc, const DecodedColumnPair* panel = nullptr) {
+    const int groups = k / 32;
+    const __m512i offset = _mm512_set1_epi8(-128);
+    for (int n_pos = n_start; n_pos < n_end; n_pos += 2) {
+      __m512 acc[Rows][2];
+      for (int row = 0; row < Rows; ++row) acc[row][0] = acc[row][1] = _mm512_setzero_ps();
+      for (int kk = 0; kk + 64 <= k; kk += 64) {
+        __m512i w0, w1, correction0, correction1;
+        if constexpr (Cached) {
+          const auto& block = panel[kk / 64];
+          w0 = block.w0;
+          w1 = block.w1;
+          correction0 = block.correction0;
+          correction1 = block.correction1;
+        } else {
+          w0 = compressed_int4_to_int8_avx512(
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bb->b + size_t(n_pos) * k / 2 + kk / 2)));
+          w1 = compressed_int4_to_int8_avx512(
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bb->b + size_t(n_pos + 1) * k / 2 + kk / 2)));
+          correction0 =
+              _mm512_sub_epi32(_mm512_setzero_si512(), _mm512_dpbusd_epi32_compat(_mm512_setzero_si512(), offset, w0));
+          correction1 =
+              _mm512_sub_epi32(_mm512_setzero_si512(), _mm512_dpbusd_epi32_compat(_mm512_setzero_si512(), offset, w1));
+        }
+        const __m512 bs0 =
+            make_scale_pair(bb->d[size_t(n_pos) * groups + kk / 32], bb->d[size_t(n_pos) * groups + kk / 32 + 1]);
+        const __m512 bs1 = make_scale_pair(bb->d[size_t(n_pos + 1) * groups + kk / 32],
+                                           bb->d[size_t(n_pos + 1) * groups + kk / 32 + 1]);
+#pragma GCC unroll 8
+        for (int row = 0; row < Rows; ++row) {
+          const int8_t* input;
+          if constexpr (BlockedA)
+            input = ba->get_submat(m, k, m_pos + row, kk);
+          else
+            input = ba->a + size_t(m_pos + row) * k + kk;
+          const __m512i av = _mm512_xor_si512(_mm512_loadu_si512(input), offset);
+          const __m512 as = make_scale_pair(ba->d[size_t(m_pos + row) * groups + kk / 32],
+                                            ba->d[size_t(m_pos + row) * groups + kk / 32 + 1]);
+          const __m512 dot0 = _mm512_cvtepi32_ps(_mm512_dpbusd_epi32_compat(correction0, av, w0));
+          const __m512 dot1 = _mm512_cvtepi32_ps(_mm512_dpbusd_epi32_compat(correction1, av, w1));
+          acc[row][0] = _mm512_add_ps(acc[row][0], _mm512_mul_ps(_mm512_mul_ps(as, bs0), dot0));
+          acc[row][1] = _mm512_add_ps(acc[row][1], _mm512_mul_ps(_mm512_mul_ps(as, bs1), dot1));
+        }
+      }
+      if (k % 64) {
+        const int kk = k - 32;
+        const __m512i w0 =
+            compressed_int4_to_int8_avx512(_mm256_maskz_loadu_epi8(0xffff, bb->b + size_t(n_pos) * k / 2 + kk / 2));
+        const __m512i w1 =
+            compressed_int4_to_int8_avx512(_mm256_maskz_loadu_epi8(0xffff, bb->b + size_t(n_pos + 1) * k / 2 + kk / 2));
+        for (int row = 0; row < Rows; ++row) {
+          const __m512i av = _mm512_maskz_loadu_epi8(0xffffffff, ba->get_submat(m, k, m_pos + row, kk));
+          const float as = ba->d[size_t(m_pos + row) * groups + kk / 32];
+          acc[row][0] = _mm512_add_ps(
+              acc[row][0],
+              dot_scaled_decoded_kblock(av, w0, make_scale_pair(as * bb->d[size_t(n_pos) * groups + kk / 32], 0.0f)));
+          acc[row][1] = _mm512_add_ps(
+              acc[row][1], dot_scaled_decoded_kblock(
+                               av, w1, make_scale_pair(as * bb->d[size_t(n_pos + 1) * groups + kk / 32], 0.0f)));
+        }
+      }
+      for (int row = 0; row < Rows; ++row) {
+        float* dst = bc->get_submat(m, n, m_pos + row, n_pos);
+        dst[0] = _mm512_reduce_add_ps(acc[row][0]) / 16;
+        dst[1] = _mm512_reduce_add_ps(acc[row][1]) / 16;
+      }
+    }
+  }
+
+  template <bool BlockedA>
+  static inline void matmat_cached(int m, int n, int k, int n_start, int n_end, BufferA* ba, BufferB* bb, BufferC* bc,
+                                   int row_begin, int row_end) {
+    // Reuse two decoded columns across rows without retaining expanded expert weights.
+    thread_local std::vector<DecodedColumnPair> panel;
+    panel.resize(k / 64);
+    const __m512i offset = _mm512_set1_epi8(-128);
+    int row_block = 512;
+    while (row_block > 8 && size_t(row_block) * k > 1024 * 1024) row_block /= 2;
+    for (int begin = row_begin; begin < row_end; begin += row_block) {
+      const int end = std::min(row_end, begin + row_block);
+      for (int col = n_start; col < n_end; col += 2) {
+        for (int kk = 0; kk + 64 <= k; kk += 64) {
+          auto& block = panel[kk / 64];
+          block.w0 = compressed_int4_to_int8_avx512(
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bb->b + size_t(col) * k / 2 + kk / 2)));
+          block.w1 = compressed_int4_to_int8_avx512(
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bb->b + size_t(col + 1) * k / 2 + kk / 2)));
+          block.correction0 = _mm512_sub_epi32(_mm512_setzero_si512(),
+                                               _mm512_dpbusd_epi32_compat(_mm512_setzero_si512(), offset, block.w0));
+          block.correction1 = _mm512_sub_epi32(_mm512_setzero_si512(),
+                                               _mm512_dpbusd_epi32_compat(_mm512_setzero_si512(), offset, block.w1));
+        }
+        int row = begin;
+        for (; row + 8 <= end; row += 8)
+          matmat_rows<8, BlockedA, true>(m, n, k, row, col, col + 2, ba, bb, bc, panel.data());
+        if (row + 4 <= end) {
+          matmat_rows<4, BlockedA, true>(m, n, k, row, col, col + 2, ba, bb, bc, panel.data());
+          row += 4;
+        }
+        if (row + 2 <= end) {
+          matmat_rows<2, BlockedA, true>(m, n, k, row, col, col + 2, ba, bb, bc, panel.data());
+          row += 2;
+        }
+        if (row < end) matmat_rows<1, BlockedA, true>(m, n, k, row, col, col + 2, ba, bb, bc, panel.data());
+      }
+    }
+  }
+
+  template <bool BlockedA>
+  static inline void matmat_avx512(int m, int n, int k, int n_start, int n_end, BufferA* ba, BufferB* bb, BufferC* bc,
+                                   int row_begin = 0, int row_end = -1) {
+    if (row_end < 0) row_end = m;
+    if (row_end - row_begin >= 16 && k >= 1024) {
+      matmat_cached<BlockedA>(m, n, k, n_start, n_end, ba, bb, bc, row_begin, row_end);
+      return;
+    }
+    int row = row_begin;
+    for (; row + 8 <= row_end; row += 8) matmat_rows<8, BlockedA>(m, n, k, row, n_start, n_end, ba, bb, bc);
+    if (row + 4 <= row_end) {
+      matmat_rows<4, BlockedA>(m, n, k, row, n_start, n_end, ba, bb, bc);
+      row += 4;
+    }
+    if (row + 2 <= row_end) {
+      matmat_rows<2, BlockedA>(m, n, k, row, n_start, n_end, ba, bb, bc);
+      row += 2;
+    }
+    if (row < row_end) matmat_rows<1, BlockedA>(m, n, k, row, n_start, n_end, ba, bb, bc);
+  }
+
   static inline void integer_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
                                             BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
     if (n_start >= n_end) return;
-
-    constexpr int MB = 4;
-    constexpr int NB = 4;
-    const int k_blocks = k / 64;
-
-    int m_pos = 0;
-    for (; m_pos + MB <= m; m_pos += MB) {
-      __m512i* a_rows[MB] = {
-          (__m512i*)ba->get_submat(m, k, m_pos + 0, 0),
-          (__m512i*)ba->get_submat(m, k, m_pos + 1, 0),
-          (__m512i*)ba->get_submat(m, k, m_pos + 2, 0),
-          (__m512i*)ba->get_submat(m, k, m_pos + 3, 0),
-      };
-      float* as[MB] = {
-          (float*)ba->get_scale(m, m_pos + 0, k, 0),
-          (float*)ba->get_scale(m, m_pos + 1, k, 0),
-          (float*)ba->get_scale(m, m_pos + 2, k, 0),
-          (float*)ba->get_scale(m, m_pos + 3, k, 0),
-      };
-
-      int n_pos = n_start;
-      for (; n_pos + NB <= n_end; n_pos += NB) {
-        __m256i* b_rows[NB] = {
-            (__m256i*)bb->get_submat(n, k, n_pos + 0, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 1, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 2, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 3, 0),
-        };
-        float* bs[NB] = {
-            (float*)bb->get_scale(n, n_pos + 0, k, 0),
-            (float*)bb->get_scale(n, n_pos + 1, k, 0),
-            (float*)bb->get_scale(n, n_pos + 2, k, 0),
-            (float*)bb->get_scale(n, n_pos + 3, k, 0),
-        };
-
-        __m512 acc[MB][NB];
-        for (int i = 0; i < MB; i++) {
-          for (int j = 0; j < NB; j++) acc[i][j] = _mm512_setzero_ps();
-        }
-
-        for (int k_block = 0; k_block < k_blocks; k_block++) {
-          __m512i w[NB] = {
-              compressed_int4_to_int8_avx512(b_rows[0][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[1][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[2][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[3][k_block]),
-          };
-
-#define K2_INT4_ACCUM_ROW4(M_I)                                                                          \
-  do {                                                                                                    \
-    const __m512 ab0 = make_scale_pair(as[M_I][k_block * 2] * bs[0][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[0][k_block * 2 + 1]);                 \
-    const __m512 ab1 = make_scale_pair(as[M_I][k_block * 2] * bs[1][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[1][k_block * 2 + 1]);                 \
-    const __m512 ab2 = make_scale_pair(as[M_I][k_block * 2] * bs[2][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[2][k_block * 2 + 1]);                 \
-    const __m512 ab3 = make_scale_pair(as[M_I][k_block * 2] * bs[3][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[3][k_block * 2 + 1]);                 \
-    accumulate_row4(acc[M_I], a_rows[M_I][k_block], w[0], w[1], w[2], w[3], ab0, ab1, ab2, ab3);           \
-  } while (0)
-          K2_INT4_ACCUM_ROW4(0);
-          K2_INT4_ACCUM_ROW4(1);
-          K2_INT4_ACCUM_ROW4(2);
-          K2_INT4_ACCUM_ROW4(3);
-#undef K2_INT4_ACCUM_ROW4
-        }
-
-        for (int i = 0; i < MB; i++) {
-          float* c = bc->get_submat(m, n, m_pos + i, n_start);
-          store4_reduce_div16(acc[i][0], acc[i][1], acc[i][2], acc[i][3], c + (n_pos - n_start));
-        }
-      }
-
-      for (; n_pos < n_end; n_pos++) {
-        __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_pos, 0);
-        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
-        for (int i = 0; i < MB; i++) {
-          float* c = bc->get_submat(m, n, m_pos + i, n_start);
-          __m512 sum = _mm512_setzero_ps();
-          for (int k_block = 0; k_block < k_blocks; k_block++) {
-            sum = _mm512_add_ps(
-                sum, dot_scaled_kblock(a_rows[i][k_block], b256[k_block], as[i][k_block * 2] * bs[k_block * 2],
-                                       as[i][k_block * 2 + 1] * bs[k_block * 2 + 1]));
-          }
-          c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
-        }
-      }
-    }
-
-    for (int mi = m_pos; mi < m; mi++) {
-      float* c = bc->get_submat(m, n, mi, n_start);
-      __m512i* a512 = (__m512i*)ba->get_submat(m, k, mi, 0);
-      float* as = (float*)ba->get_scale(m, mi, k, 0);
-      int n_pos = n_start;
-      for (; n_pos + NB <= n_end; n_pos += NB) {
-        __m256i* b_rows[NB] = {
-            (__m256i*)bb->get_submat(n, k, n_pos + 0, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 1, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 2, 0),
-            (__m256i*)bb->get_submat(n, k, n_pos + 3, 0),
-        };
-        float* bs[NB] = {
-            (float*)bb->get_scale(n, n_pos + 0, k, 0),
-            (float*)bb->get_scale(n, n_pos + 1, k, 0),
-            (float*)bb->get_scale(n, n_pos + 2, k, 0),
-            (float*)bb->get_scale(n, n_pos + 3, k, 0),
-        };
-        __m512 acc[NB] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
-        for (int k_block = 0; k_block < k_blocks; k_block++) {
-          __m512i w[NB] = {
-              compressed_int4_to_int8_avx512(b_rows[0][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[1][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[2][k_block]),
-              compressed_int4_to_int8_avx512(b_rows[3][k_block]),
-          };
-          for (int j = 0; j < NB; j++) {
-            __m256 abscale0 = _mm256_set1_ps(as[k_block * 2] * bs[j][k_block * 2]);
-            __m256 abscale1 = _mm256_set1_ps(as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
-            __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
-            __m512i mul = _mm512_setzero_si512();
-            mul = _mm512_dpbssd_epi32(mul, a512[k_block], w[j]);
-            acc[j] = _mm512_add_ps(acc[j], _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));
-          }
-        }
-        store4_reduce_div16(acc[0], acc[1], acc[2], acc[3], c + (n_pos - n_start));
-      }
-      for (; n_pos < n_end; n_pos++) {
-        __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_pos, 0);
-        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
-        __m512 sum = _mm512_setzero_ps();
-        for (int k_block = 0; k_block < k_blocks; k_block++) {
-          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block], as[k_block * 2] * bs[k_block * 2],
-                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
-        }
-        c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
-      }
-    }
+    if (k <= K_BLOCK)
+      matmat_avx512<false>(m, n, k, n_start, n_end, ba, bb, bc);
+    else
+      matmat_avx512<true>(m, n, k, n_start, n_end, ba, bb, bc);
   }
 };
 
