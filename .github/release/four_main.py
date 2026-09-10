@@ -2,7 +2,7 @@
 """Freeze four public main heads and audit source-built release artifacts.
 
 This module never uploads packages or changes package versions/dependencies.
-The first workflow iteration deliberately produces raw, non-publishable wheels.
+Raw wheels remain non-publishable; release_stack.py gates final promotion.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from pathlib import Path, PurePosixPath
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name, parse_wheel_filename
-
 
 REPOSITORIES = {
     "ktransformers": "kvcache-ai/ktransformers",
@@ -306,7 +305,7 @@ def audit(
         "pending_gates": [
             "Assemble fresh SGL CUDA payload into version-parameterized carrier wheels",
             "Resolve complete dependencies into an isolated, hashed wheelhouse",
-            "Install the final wheels in clean SM89 and SM120 environments and run E2E",
+            "Install the final wheels in the isolated qj5090 runner and run the three-model E2E suite",
             "Promote the exact validated wheel hashes and verify installation from PyPI",
         ],
     }

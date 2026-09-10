@@ -1,0 +1,27 @@
+name: Release pipeline contracts (CPU only)
+on:
+  pull_request:
+    paths: ['.github/release/**', '.github/model-e2e/**', '.github/workflows/release*.yml', '.github/workflows/model-e2e-release.yml']
+  push:
+    branches: [main]
+    paths: ['.github/release/**', '.github/model-e2e/**', '.github/workflows/release*.yml', '.github/workflows/model-e2e-release.yml']
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging==25.0 pytest==8.4.2
+      - name: Require the independently reviewed model gate (PR 2195)
+        run: test -f .github/model-e2e/release_contracts.py
+      - name: Test packaging, release identity, failure gates and upload retries
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github/model-e2e
+        run: python -m pytest -q .github/release
+      - run: python -m unittest discover -s .github/model-e2e -p 'test_*.py'
