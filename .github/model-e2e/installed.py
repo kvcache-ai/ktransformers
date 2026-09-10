@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from contracts import digest, require, write_json
+from resource_queue import ResourceUnavailable, reservation
 
 
 def main():
@@ -53,4 +54,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Native imports can initialize CUDA too. Respect newly arrived manual
+    # workloads before inspecting imports, not just before loading the models.
+    try:
+        with reservation(
+            Path(sys.prefix).parent / "import-start.lock",
+            Path(sys.argv[1]).parent / "import-start-queue.jsonl",
+        ):
+            main()
+    except ResourceUnavailable as exc:
+        write_json(
+            Path(sys.argv[1]).parent / "resource-unavailable.json", {"error": str(exc)}
+        )
+        raise

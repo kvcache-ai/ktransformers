@@ -149,7 +149,7 @@ def install(request, env):
         [PYTHON, "/harness/installed.py", EVIDENCE / "installed.json"],
         EVIDENCE / "imports.log",
         env=env,
-        timeout=300,
+        timeout=21900,
     )
     installed = json.loads((EVIDENCE / "installed.json").read_text())
     if request["mode"] == "pr":
@@ -245,7 +245,7 @@ def install_training_tools(env):
         [PYTHON, "/harness/installed.py", EVIDENCE / "installed-after-tooling.json"],
         EVIDENCE / "tooling-imports.log",
         env=env,
-        timeout=300,
+        timeout=21900,
     )
     require(
         json.loads((EVIDENCE / "installed-after-tooling.json").read_text())
@@ -404,6 +404,8 @@ def main():
         results["status"] = "passed"
     except Exception as exc:
         results["error"] = str(exc)
+        if (EVIDENCE / "resource-unavailable.json").exists():
+            results["status"] = "resource_unavailable"
         raise
     finally:
         write_json(EVIDENCE / "suite.json", results)
