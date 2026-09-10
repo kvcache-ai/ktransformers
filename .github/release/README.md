@@ -1,8 +1,14 @@
 # 四仓 main 一键发布（Draft，尚未启用）
 
 入口：**KTransformers → Actions → Release four-main stack → Run workflow**。
-选择 `main`，`target=candidate` 只构建和验收；`target=pypi` 才允许上传。
+选择 `main`，`target=build` 只产出候选 artifact；`target=candidate` 构建和验收；
+`target=pypi` 才允许上传。
 合并 PR、修改版本号均不会自动上传；此 PR 不改变已经安装的 PyPI 包。
+
+`build` 用于验收 runner 尚未就绪时先通过 CI 构建；它不会启用 GPU runner、
+跳过发布验收或上传 PyPI，不能把构建成功当成发布成功。管理员可设置
+`KT_RELEASE_WORK_ROOT` 为可执行的空闲内存盘目录，避免填满 runner 磁盘；
+构建和临时文件都进入该目录下本次创建、带 run ID 标记的独立子目录。
 
 ```text
 Run workflow

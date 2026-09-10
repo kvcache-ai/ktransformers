@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Build and test only, or publish the same validated wheels to PyPI'
+        description: 'Build artifacts only, build and test, or publish the validated wheels'
         type: choice
         required: true
         default: candidate
-        options: [candidate, pypi]
+        options: [build, candidate, pypi]
 
 permissions:
   contents: read
@@ -40,9 +40,10 @@ jobs:
         env:
           RELEASE_ENABLED: ${{ vars.KT_FOUR_MAIN_RELEASE_ENABLED }}
           E2E_ENABLED: ${{ vars.KT_MODEL_E2E_ENABLED }}
+          TARGET: ${{ inputs.target }}
         run: |
           test "$RELEASE_ENABLED" = true
-          test "$E2E_ENABLED" = true
+          if [ "$TARGET" != build ]; then test "$E2E_ENABLED" = true; fi
           test -f .github/workflows/model-e2e-release.yml
           test -f .github/model-e2e/release_contracts.py
       - name: Resolve latest main heads once
@@ -93,6 +94,7 @@ jobs:
       PYTHONHOME: ''
       CONDA_PREFIX: ''
       CMAKE_PREFIX_PATH: ''
+      RELEASE_WORK_ROOT: ${{ vars.KT_RELEASE_WORK_ROOT }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,7 +110,10 @@ jobs:
       - name: Create an isolated build directory and environment
         run: |
           set -euo pipefail
-          release_work="$(mktemp -d "$RUNNER_TEMP/kt-four-main.XXXXXXXX")"
+          RELEASE_WORK_ROOT="${RELEASE_WORK_ROOT:-$RUNNER_TEMP}"
+          echo "RELEASE_WORK_ROOT=$RELEASE_WORK_ROOT" >> "$GITHUB_ENV"
+          test -d "$RELEASE_WORK_ROOT" && test -w "$RELEASE_WORK_ROOT"
+          release_work="$(mktemp -d "$RELEASE_WORK_ROOT/kt-four-main.XXXXXXXX")"
           echo "RELEASE_WORK=$release_work" >> "$GITHUB_ENV"
           echo "$GITHUB_RUN_ID" > "$release_work/.kt-release-owned"
           python -m venv "$release_work/venv"
@@ -118,6 +123,8 @@ jobs:
           echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$release_work/venv" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64" >> "$GITHUB_ENV"
+          mkdir "$release_work/tmp"
+          echo "TMPDIR=$release_work/tmp" >> "$GITHUB_ENV"
       - name: Check build prerequisites
         run: |
           set -euo pipefail
@@ -263,10 +270,11 @@ jobs:
         if: always() && env.RELEASE_WORK != ''
         run: |
           python ci-tools/.github/release/cleanup.py \
-            --directory "$RELEASE_WORK" --parent "$RUNNER_TEMP"
+            --directory "$RELEASE_WORK" --parent "$RELEASE_WORK_ROOT"
 
   candidate-e2e:
     needs: raw-build
+    if: inputs.target != 'build'
     uses: ./.github/workflows/model-e2e-release.yml
     with:
       stage: candidate
