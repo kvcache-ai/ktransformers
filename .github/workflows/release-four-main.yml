@@ -1,0 +1,360 @@
+name: Release four-main stack
+
+# Manual only. Main/version merges never publish. Requires the #2195 harness.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build and test only, or publish the same validated wheels to PyPI'
+        type: choice
+        required: true
+        default: candidate
+        options: [candidate, pypi]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Share the existing release lock: native builds must not overlap a release
+  # on the same self-hosted machine.
+  group: ktransformers-pypi-release
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: Freeze the four public main heads
+    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.names.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging==25.0
+      - name: Check activation prerequisites before starting a costly build
+        env:
+          RELEASE_ENABLED: ${{ vars.KT_FOUR_MAIN_RELEASE_ENABLED }}
+          E2E_ENABLED: ${{ vars.KT_MODEL_E2E_ENABLED }}
+        run: |
+          test "$RELEASE_ENABLED" = true
+          test "$E2E_ENABLED" = true
+          test -f .github/workflows/model-e2e-release.yml
+          test -f .github/model-e2e/release_contracts.py
+      - name: Resolve latest main heads once
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          python .github/release/four_main.py snapshot \
+            --workflow-sha "$WORKFLOW_SHA" --output source-lock.json
+          python - <<'PY'
+          import json, os
+          lock = json.load(open('source-lock.json'))
+          assert lock['sources']['ktransformers']['sha'] == os.environ['WORKFLOW_SHA'], 'KT main moved after dispatch; start a fresh run'
+          PY
+      - name: Name this snapshot
+        id: names
+        env:
+          ARTIFACT: four-main-source-lock-${{ github.run_id }}-${{ github.run_attempt }}
+        run: echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.names.outputs.artifact }}
+          path: source-lock.json
+          if-no-files-found: error
+          retention-days: 90
+
+  raw-build:
+    name: Build once, assemble carriers, and lock the dependency wheelhouse
+    needs: snapshot
+    runs-on: [self-hosted, linux, x64, gpu, kt-cpu]
+    timeout-minutes: 720
+    outputs:
+      artifact: ${{ steps.candidate.outputs.artifact }}
+      manifest_sha256: ${{ steps.prepare.outputs.manifest_sha256 }}
+      build_attempt: ${{ steps.prepare.outputs.build_attempt }}
+    env:
+      # Initial scope matches the proven CPython 3.12 release. Expand the
+      # Python matrix only after each ABI gets its own installation/E2E gate.
+      CUDA_HOME: ${{ vars.KT_RELEASE_CUDA_HOME || '/usr/local/cuda-12.8' }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      MAX_JOBS: '4'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PYTHONNOUSERSITE: '1'
+      PYTHONPATH: ''
+      PYTHONHOME: ''
+      CONDA_PREFIX: ''
+      CMAKE_PREFIX_PATH: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-tools
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.snapshot.outputs.artifact }}
+          path: lock
+      - name: Create an isolated build directory and environment
+        run: |
+          set -euo pipefail
+          release_work="$(mktemp -d "$RUNNER_TEMP/kt-four-main.XXXXXXXX")"
+          echo "RELEASE_WORK=$release_work" >> "$GITHUB_ENV"
+          echo "$GITHUB_RUN_ID" > "$release_work/.kt-release-owned"
+          python -m venv "$release_work/venv"
+          mkdir "$release_work/raw-wheels" "$release_work/evidence"
+          cp lock/source-lock.json "$release_work/evidence/source-lock.json"
+          echo "$release_work/venv/bin" >> "$GITHUB_PATH"
+          echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$release_work/venv" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64" >> "$GITHUB_ENV"
+      - name: Check build prerequisites
+        run: |
+          set -euo pipefail
+          nvidia-smi
+          nvcc --version
+          for command in git gcc g++ ninja pkg-config readelf cuobjdump; do
+            command -v "$command"
+          done
+          test "$(uname -m)" = x86_64
+      - name: Install and record the build toolchain
+        run: |
+          set -euo pipefail
+          python -m pip install \
+            pip==25.2 build==1.3.0 packaging==25.0 \
+            setuptools==80.9.0 wheel==0.45.1 \
+            scikit-build-core==0.11.6 cmake==3.31.6 pybind11==2.13.6 \
+            ninja==1.11.1.4 twine==6.1.0 auditwheel==6.4.2 patchelf==0.17.2.4
+          python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+          python -m pip freeze --all > "$RELEASE_WORK/evidence/build-environment.txt"
+          nvcc --version > "$RELEASE_WORK/evidence/nvcc.txt"
+          gcc --version > "$RELEASE_WORK/evidence/gcc.txt"
+          python -c 'import torch; print(torch.__version__, torch.version.cuda)' \
+            > "$RELEASE_WORK/evidence/torch.txt"
+          python -c 'import torch; assert torch.version.cuda == "12.8", torch.version.cuda'
+          nvcc --version | grep -q 'release 12.8,'
+      - name: Checkout the locked main commits
+        run: |
+          python ci-tools/.github/release/four_main.py checkout \
+            --lock lock/source-lock.json --destination "$RELEASE_WORK/sources"
+      - name: Build Python package wheels from main source
+        run: |
+          set -euo pipefail
+          for source in accelerate transformers ktransformers; do
+            python -m build --wheel --no-isolation \
+              --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/$source"
+          done
+          # This is the existing SGLang build interface, not a runtime overlay.
+          kt_version="$(python -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["__version__"])' \
+            "$RELEASE_WORK/sources/ktransformers/version.py")"
+          SGLANG_KT_VERSION="$kt_version" python -m build --wheel --no-isolation \
+            --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/sglang/python"
+      - name: Fail on incompatible source pins before expensive native builds
+        run: |
+          python ci-tools/.github/release/four_main.py audit --python-only \
+            --lock lock/source-lock.json --sources "$RELEASE_WORK/sources" \
+            --wheels "$RELEASE_WORK/raw-wheels" \
+            --output "$RELEASE_WORK/evidence/python-metadata-report.json"
+          python ci-tools/.github/release/release_stack.py unused \
+            --wheels "$RELEASE_WORK/raw-wheels"
+      - name: Compile all KT CPU variants and CUDA architectures
+        env:
+          CPUINFER_BUILD_ALL_VARIANTS: '1'
+          CPUINFER_ENABLE_CPPTRACE: '0'
+          CPUINFER_USE_CUDA: '1'
+          CPUINFER_CUDA_ARCHS: '80;86;89;90;120'
+          CPUINFER_CUDA_STATIC_RUNTIME: '1'
+          CPUINFER_BUILD_TYPE: Release
+          CPUINFER_PARALLEL: '4'
+          CPUINFER_FORCE_REBUILD: '1'
+        run: |
+          python -m build --wheel --no-isolation \
+            --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/ktransformers/kt-kernel"
+      - name: Compile SGL CUDA payload from the independently locked SGLang main
+        env:
+          CMAKE_ARGS: >-
+            -DENABLE_BELOW_SM90=ON
+            -DSGL_KERNEL_ENABLE_FA3=ON
+            -DSGL_KERNEL_COMPILE_THREADS=2
+        run: |
+          python -m build --wheel --no-isolation \
+            --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/sglang/sgl-kernel"
+      - name: Inspect wheel metadata and source provenance
+        run: |
+          set -euo pipefail
+          python -m twine check "$RELEASE_WORK/raw-wheels/"*.whl
+          python ci-tools/.github/release/four_main.py audit \
+            --lock lock/source-lock.json --sources "$RELEASE_WORK/sources" \
+            --wheels "$RELEASE_WORK/raw-wheels" \
+            --output "$RELEASE_WORK/evidence/raw-wheel-report.json"
+      - name: Repair native inputs without changing runtime source
+        run: |
+          set -euo pipefail
+          mkdir "$RELEASE_WORK/repaired"
+          python - <<'PY'
+          import os, pathlib, shutil, subprocess, sys
+          sys.path.insert(0, 'ci-tools/.github/release')
+          from four_main import inspect_wheel
+          work = pathlib.Path(os.environ['RELEASE_WORK'])
+          for path in sorted((work / 'raw-wheels').glob('*.whl')):
+              entry = inspect_wheel(path)
+              if entry['name'] in {'kt-kernel', 'sgl-kernel-kt'}:
+                  subprocess.run([
+                      sys.executable, '-m', 'auditwheel', 'repair', str(path),
+                      '--plat', 'manylinux_2_35_x86_64', '--exclude', 'libcuda.so.1',
+                      '--exclude', 'libtorch.so', '--exclude', 'libtorch_cpu.so',
+                      '--exclude', 'libtorch_cuda.so', '--exclude', 'libtorch_python.so',
+                      '--exclude', 'libc10.so', '--exclude', 'libc10_cuda.so',
+                      '--exclude', 'libcudart.so.12',
+                      '-w', str(work / 'repaired'),
+                  ], check=True)
+              else:
+                  shutil.copyfile(path, work / 'repaired' / path.name)
+          PY
+      - name: Assemble final carriers and inspect CUDA SASS coverage
+        run: |
+          python ci-tools/.github/release/carriers.py \
+            --raw "$RELEASE_WORK/repaired" --output "$RELEASE_WORK/final" \
+            --evidence "$RELEASE_WORK/evidence"
+          python -m twine check "$RELEASE_WORK/final/"*.whl
+      - name: Resolve both user extras and seal the final wheelhouse
+        id: prepare
+        run: |
+          python ci-tools/.github/release/release_stack.py prepare \
+            --final "$RELEASE_WORK/final" --root "$RELEASE_WORK/candidate" \
+            --lock lock/source-lock.json --evidence "$RELEASE_WORK/evidence"
+      - name: Name this immutable candidate
+        id: candidate
+        run: echo "artifact=four-main-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.candidate.outputs.artifact }}
+          path: ${{ env.RELEASE_WORK }}/candidate/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Retain source and build evidence even when a gate fails
+        if: always() && env.RELEASE_WORK != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: four-main-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_WORK }}/evidence/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain raw build outputs for diagnosis (never publish these)
+        if: always() && env.RELEASE_WORK != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-wheels-not-for-pypi-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_WORK }}/raw-wheels/*.whl
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Clean only this run's build directory after artifact retention
+        if: always() && env.RELEASE_WORK != ''
+        run: |
+          python ci-tools/.github/release/cleanup.py \
+            --directory "$RELEASE_WORK" --parent "$RUNNER_TEMP"
+
+  candidate-e2e:
+    needs: raw-build
+    uses: ./.github/workflows/model-e2e-release.yml
+    with:
+      stage: candidate
+      artifact: ${{ needs.raw-build.outputs.artifact }}
+      manifest_sha256: ${{ needs.raw-build.outputs.manifest_sha256 }}
+      build_attempt: ${{ needs.raw-build.outputs.build_attempt }}
+
+  publish:
+    needs: [raw-build, candidate-e2e]
+    if: inputs.target == 'pypi' && needs.candidate-e2e.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging==25.0 twine==6.1.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.raw-build.outputs.artifact }}
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.candidate-e2e.outputs.evidence }}
+          path: candidate-evidence
+      - name: Verify all evidence and upload identical wheels, KT last
+        env:
+          MANIFEST_SHA256: ${{ needs.raw-build.outputs.manifest_sha256 }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          test -n "$TWINE_PASSWORD"
+          python .github/release/release_stack.py publish \
+            --root candidate --digest "$MANIFEST_SHA256" \
+            --evidence candidate-evidence --output promotion.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: four-main-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: promotion.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  public-e2e:
+    needs: [raw-build, publish]
+    uses: ./.github/workflows/model-e2e-release.yml
+    with:
+      stage: pypi
+      artifact: ${{ needs.raw-build.outputs.artifact }}
+      manifest_sha256: ${{ needs.raw-build.outputs.manifest_sha256 }}
+      build_attempt: ${{ needs.raw-build.outputs.build_attempt }}
+
+  released:
+    needs: [raw-build, publish, public-e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging==25.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.raw-build.outputs.artifact }}
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.public-e2e.outputs.evidence }}
+          path: public-evidence
+      - name: Declare release success only after fresh public-PyPI E2E
+        env:
+          MANIFEST_SHA256: ${{ needs.raw-build.outputs.manifest_sha256 }}
+        run: |
+          python .github/release/release_stack.py verify \
+            --root candidate --digest "$MANIFEST_SHA256" \
+            --evidence public-evidence --output release-result.json
+          echo '### Released and verified from public PyPI' >> "$GITHUB_STEP_SUMMARY"
+          echo "Manifest SHA256: $MANIFEST_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: four-main-release-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-result.json
+          if-no-files-found: error
+          retention-days: 90

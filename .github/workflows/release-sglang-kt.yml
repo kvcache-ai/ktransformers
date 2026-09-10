@@ -1,11 +1,6 @@
-name: Release sglang-kt to PyPI
+name: Legacy sglang release (retired - use Release four-main stack)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "third_party/sglang"
   workflow_dispatch:
     inputs:
       test_pypi:
@@ -25,7 +20,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  retired:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo 'Independent SGLang publishing is retired. Use Actions -> Release four-main stack -> Run workflow.'
+          exit 1
   build-sglang-kt:
+    needs: retired
     name: Build sglang-kt wheel
     runs-on: [self-hosted, linux, x64, gpu]
     outputs:

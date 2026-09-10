@@ -1,11 +1,6 @@
-name: Release to PyPI
+name: Legacy release (retired - use Release four-main stack)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "version.py"
   workflow_dispatch:
     inputs:
       target:
@@ -29,7 +24,14 @@ env:
   SFT_RELEASE_MANIFEST: .github/release/sft-packages.json
 
 jobs:
+  retired:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo 'This legacy publishing path is retired. Use Actions -> Release four-main stack -> Run workflow.'
+          exit 1
   runner-preflight:
+    needs: retired
     name: Validate release and runner
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, gpu]
