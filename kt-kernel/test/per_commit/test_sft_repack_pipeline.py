@@ -4,9 +4,17 @@
 Requires an AVX512-BF16/VBMI extension. No GPU or model checkpoint is needed.
 """
 
+from pathlib import Path
+import sys
+
 import pytest
 import torch
 import torch.nn.functional as F
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=90, suite="default")
 
 
 @pytest.fixture
@@ -186,6 +194,40 @@ def assert_numerically_close(actual, expected):
     assert relative_l2 < 0.04, f"relative L2 error: {relative_l2.item():.6f}"
 
 
+def assert_repeated_gradient(name, actual, expected):
+    # Existing LoRA token-block reductions merge FP32 partials under mutexes,
+    # in worker-completion order. Even synchronous baseline repeats can straddle
+    # a BF16 rounding boundary. This is not a packed-weight/GEMM tolerance.
+    reduced = {"gate_lora_b", "up_lora_b", "down_lora_a", "down_lora_b"}
+    if name not in reduced:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        return
+    assert actual.dtype == expected.dtype == torch.bfloat16
+    assert actual.shape == expected.shape
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
+
+    def ordered_bits(value):
+        bits = value.contiguous().view(torch.int16).int()
+        # Monotone integer encoding, treating negative and positive zero alike.
+        return torch.where(bits < 0, -32768 - bits, bits)
+
+    distance = (ordered_bits(actual) - ordered_bits(expected)).abs().max().item()
+    assert distance <= 1, f"{name}: {distance} BF16 ULPs (limit 1)"
+
+
+def test_repeated_gradient_bound_does_not_relax_other_outputs():
+    expected = torch.tensor([1.0, -1.0], dtype=torch.bfloat16)
+    one_ulp = expected * (1 + torch.finfo(torch.bfloat16).eps)
+    two_ulps = expected * (1 + 2 * torch.finfo(torch.bfloat16).eps)
+    assert_repeated_gradient("down_lora_a", one_ulp, expected)
+    with pytest.raises(AssertionError, match="ULPs"):
+        assert_repeated_gradient("down_lora_a", two_ulps, expected)
+    with pytest.raises(AssertionError):
+        assert_repeated_gradient("grad_input", one_ulp, expected)
+    with pytest.raises(AssertionError):
+        assert_repeated_gradient("down_lora_a", torch.full_like(expected, float("nan")), expected)
+
+
 @pytest.mark.parametrize("tp_count", [1, 2])
 @pytest.mark.parametrize("dtype", ["bf16", "fp8"])
 @pytest.mark.parametrize("experts,threads", [(3, 4), (1, 8)])
@@ -211,8 +253,9 @@ def test_prefetch_matches_synchronous_backward(extension, tp_count, dtype, exper
     assert ready == before + tp_count, "prefetch must actually repack FP8 as well as BF16"
     actual = layers[0].backward()
     assert layers[0].repack_calls() == ready, "consumer repacked already-ready weights"
-    for got, expected in zip(actual, serial[0]):
-        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+    names = ["grad_input", "grad_routes", *layers[0].lora]
+    for name, got, expected in zip(names, actual, serial[0]):
+        assert_repeated_gradient(name, got, expected)
 
 
 @pytest.mark.parametrize("tp_count", [1, 2])
@@ -245,8 +288,8 @@ def test_shared_slot_replacement_across_dtypes(extension, tp_count):
     before = fp8.repack_calls()
     actual = fp8.backward()
     assert fp8.repack_calls() == before + tp_count
-    for got, reference in zip(actual, expected):
-        torch.testing.assert_close(got, reference, rtol=0, atol=0)
+    for name, got, reference in zip(["grad_input", "grad_routes", *fp8.lora], actual, expected):
+        assert_repeated_gradient(name, got, reference)
 
 
 def test_bf16_reload_invalidates_prepared_weights(extension):
@@ -265,3 +308,7 @@ def test_bf16_reload_invalidates_prepared_weights(extension):
     assert_numerically_close(output, ref_output)
     for got, expected in zip(actual, reference):
         assert_numerically_close(got, expected)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
