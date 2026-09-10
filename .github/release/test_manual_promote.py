@@ -52,3 +52,12 @@ def test_incomplete_or_changed_acceptance_cannot_publish(monkeypatch, mutation):
     mutation(changed)
     with pytest.raises(ValueError):
         module.check_attestation(changed, manifest, "b" * 64)
+
+
+def test_recovery_assembler_identity_must_match(monkeypatch):
+    data, manifest, _ = fixture(monkeypatch)
+    manifest["assembly_workflow_sha"] = "d" * 40
+    with pytest.raises(ValueError, match="assembler"):
+        module.check_attestation(data, manifest, "b" * 64)
+    data["assembly_workflow_sha"] = "d" * 40
+    module.check_attestation(data, manifest, "b" * 64)

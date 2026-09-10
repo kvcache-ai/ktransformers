@@ -21,6 +21,14 @@ def verify_release(root, expected_digest):
         "Invalid attempt",
     )
     sha(manifest["workflow_sha"])
+    if "assembly_workflow_sha" in manifest:
+        sha(manifest["assembly_workflow_sha"])
+        recovery = manifest["source_lock"].get("recovery")
+        if recovery:
+            require(recovery["assembly_workflow_sha"] == manifest["assembly_workflow_sha"], "Recovery assembler mismatch")
+            require(recovery["workflow_sha"] == manifest["workflow_sha"], "Recovery source mismatch")
+        else:
+            require(manifest["assembly_workflow_sha"] == manifest["workflow_sha"], "Different assembler without recovery provenance")
     lock = manifest["source_lock"]
     require(lock["workflow_sha"] == manifest["workflow_sha"], "Workflow lock mismatch")
     require(set(lock["sources"]) == set(REPOSITORIES), "Need four main sources")

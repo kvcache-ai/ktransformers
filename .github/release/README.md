@@ -1,4 +1,4 @@
-# 四仓 main 一键发布（Draft，尚未启用）
+# 四仓 main 一键发布
 
 入口：**KTransformers → Actions → Release four-main stack → Run workflow**。
 选择 `main`，`target=build` 只产出候选 artifact；`target=candidate` 构建和验收；
@@ -9,6 +9,23 @@
 跳过发布验收或上传 PyPI，不能把构建成功当成发布成功。管理员可设置
 `KT_RELEASE_WORK_ROOT` 为可执行的空闲内存盘目录，避免填满 runner 磁盘；
 构建和临时文件都进入该目录下本次创建、带 run ID 标记的独立子目录。
+
+### 仅打包失败时，复用已经完成的原生编译
+
+如果原生编译和源码/哈希审计已成功，但后续修复或打包失败，使用
+`target=build`、`reuse_raw_run_id=<原构建 run ID>`、`reuse_raw_attempt=<原 attempt>`。
+CI 会从该 run 的不可变 artifacts 恢复六个 raw wheels，逐个核对原审计的
+SHA256、版本和依赖，再重新修复、打包与封存，不重新编译 CUDA。
+
+恢复保留原来的四仓 main 源码快照，单独记录新的 `assembly_workflow_sha`。
+仅允许原构建是官方 main 的已完成 run，且 KT 后续差异全部在 `.github/` 下；
+若模型、内核或包元数据发生变化，则必须重新构建。取消、编译失败、混合文件、
+已修改的 raw wheels 和恢复链均会拒绝。重新封存后的最终 wheels 必须重新进行
+完整验收，原 raw wheels 永远不能直接发布。
+
+CUDA 大库由固定版本的 Torch/NVIDIA 依赖提供，不重复嵌入。auditwheel 携带的
+小型系统库同时放入延迟加载缓存，ELF RPATH 指向缓存内的 `.libs`；代码、SASS
+架构和 Python loader 不变，重定位前后哈希及最终二进制架构均记录在构建证据中。
 
 ### 模型验收 runner 未就绪时的人工接管
 
