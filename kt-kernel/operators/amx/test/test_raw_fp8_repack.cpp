@@ -4,6 +4,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "../la/amx_kernels.hpp"
@@ -26,13 +27,27 @@ void* alloc_buffer(size_t bytes) {
 }
 
 void fill_raw(std::vector<uint8_t>& weights) {
-  for (size_t i = 0; i < weights.size(); ++i) weights[i] = static_cast<uint8_t>(i);
+  uint32_t state = 0x12345678;
+  for (auto& weight : weights) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    weight = static_cast<uint8_t>(state);
+  }
+}
+
+void parallel_transpose(BufferB& destination, const BufferB& source, int threads) {
+  std::vector<std::thread> workers;
+  for (int ith = 0; ith < threads; ++ith) {
+    workers.emplace_back([&, ith] { destination.from_bb_transposed(source, ith, threads); });
+  }
+  for (auto& worker : workers) worker.join();
 }
 
 void fill_scale_bits(std::vector<float>& scales) {
   for (size_t i = 0; i < scales.size(); ++i) {
     const uint32_t bits = (i % 5 == 0) ? (0x7fc00000u + static_cast<uint32_t>(i & 0x003fffffu))
-                                        : (0x3f000000u + static_cast<uint32_t>(i * 0x00010101u));
+                                       : (0x3f000000u + static_cast<uint32_t>(i * 0x00010101u));
     std::memcpy(scales.data() + i, &bits, sizeof(bits));
   }
 }
@@ -94,30 +109,25 @@ bool run_repack_case(int n, int k, int transpose_threads) {
   from_mat(packed_source, source.data(), source_scales.data());
   to_mat(packed_source, roundtrip.data(), roundtrip_scales.data());
   from_mat(packed_expected, expected_weights.data(), expected_scales.data());
-  for (int ith = 0; ith < transpose_threads; ++ith) {
-    packed_direct.from_bb_transposed(packed_source, ith, transpose_threads);
-  }
+  parallel_transpose(packed_direct, packed_source, transpose_threads);
   to_mat(packed_direct, actual_weights.data(), actual_scales.data());
-  for (int ith = 0; ith < transpose_threads; ++ith) {
-    packed_twice.from_bb_transposed(packed_direct, ith, transpose_threads);
-  }
+  parallel_transpose(packed_twice, packed_direct, transpose_threads);
 
-  const bool roundtrip_ok = std::memcmp(source.data(), roundtrip.data(), weight_count) == 0 &&
-                            std::memcmp(source_scales.data(), roundtrip_scales.data(), scale_count * sizeof(float)) == 0;
+  const bool roundtrip_ok =
+      std::memcmp(source.data(), roundtrip.data(), weight_count) == 0 &&
+      std::memcmp(source_scales.data(), roundtrip_scales.data(), scale_count * sizeof(float)) == 0;
   const bool logical_ok = std::memcmp(expected_weights.data(), actual_weights.data(), weight_count) == 0 &&
                           std::memcmp(expected_scales.data(), actual_scales.data(), scale_count * sizeof(float)) == 0;
-  const bool packed_ok =
-      std::memcmp(expected_memory, direct_memory, BufferB::required_size(k, n, kGroupSize)) == 0;
-  const bool twice_ok =
-      std::memcmp(source_memory, twice_memory, BufferB::required_size(n, k, kGroupSize)) == 0;
+  const bool packed_ok = std::memcmp(expected_memory, direct_memory, BufferB::required_size(k, n, kGroupSize)) == 0;
+  const bool twice_ok = std::memcmp(source_memory, twice_memory, BufferB::required_size(n, k, kGroupSize)) == 0;
 
   std::free(source_memory);
   std::free(expected_memory);
   std::free(direct_memory);
   std::free(twice_memory);
-  std::printf("raw FP8 repack %dx%d threads=%d: roundtrip=%s logical=%s packed=%s twice=%s\n", n, k,
-              transpose_threads, roundtrip_ok ? "PASS" : "FAIL", logical_ok ? "PASS" : "FAIL",
-              packed_ok ? "PASS" : "FAIL", twice_ok ? "PASS" : "FAIL");
+  std::printf("raw FP8 repack %dx%d threads=%d: roundtrip=%s logical=%s packed=%s twice=%s\n", n, k, transpose_threads,
+              roundtrip_ok ? "PASS" : "FAIL", logical_ok ? "PASS" : "FAIL", packed_ok ? "PASS" : "FAIL",
+              twice_ok ? "PASS" : "FAIL");
   return roundtrip_ok && logical_ok && packed_ok && twice_ok;
 }
 
@@ -217,8 +227,8 @@ bool run_backward_gemm_case() {
     direct_c->to_mat(m, direct_output.data(), ith, gemm_nth);
   }
 
-  const bool equal = std::memcmp(expected_output.data(), direct_output.data(),
-                                 expected_output.size() * sizeof(ggml_bf16_t)) == 0;
+  const bool equal =
+      std::memcmp(expected_output.data(), direct_output.data(), expected_output.size() * sizeof(ggml_bf16_t)) == 0;
   bool nonzero = false;
   for (const auto value : direct_output) nonzero = nonzero || value.bits != 0;
   std::printf("raw FP8 backward mat_mul_kgroup: equal=%s nonzero=%s\n", equal ? "PASS" : "FAIL",
@@ -241,6 +251,10 @@ int main() {
   passed = run_repack_case(128, 256, 1) && passed;
   passed = run_repack_case(256, 128, 2) && passed;
   passed = run_repack_case(256, 384, 3) && passed;
+  passed = run_repack_case(384, 768, 8) && passed;
+  passed = run_repack_case(2048, 512, 16) && passed;
+  passed = run_repack_case(1024, 7168, 32) && passed;
+  passed = run_repack_case(7168, 1024, 32) && passed;
   passed = run_alignment_rejection() && passed;
   passed = run_group_rejection() && passed;
   passed = run_pool_alignment_case() && passed;

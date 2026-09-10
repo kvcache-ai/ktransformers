@@ -2,10 +2,13 @@
 #define AMX_RAW_KERNELS_HPP
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include "amx_config.hpp"
 #include "amx_raw_buffers.hpp"
@@ -330,11 +333,9 @@ struct GemmKernel224FP8 {
     __m512i bbf16_1 = _mm512_unpackhi_epi8(b_lo, b_hi);
     return {bbf16_0, bbf16_1};
   }
-  // Optimized AVX kernel: process entire k_group_size
-  // Load all data first, then convert all, then compute all
-  // This gives compiler more freedom to schedule instructions
-  static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_group_begin, float* c, BufferA* ba,
-                         BufferB* bb, int k_group_size) {
+  // Small-M path: retain the row-wise kernel for decode and tiny tails.
+  static void avx_kernel_rows(int m, int n, int k, int m_begin, int n_begin, int k_group_begin, float* c, BufferA* ba,
+                              BufferB* bb, int k_group_size) {
     const __m512i bf16_hi_0_val = bf16_hi_0_mask();
     const __m512i bf16_hi_1_val = bf16_hi_1_mask();
     const __m512i bf16_lo_0_val = bf16_lo_0_mask();
@@ -390,8 +391,7 @@ struct GemmKernel224FP8 {
     }
   }
 
-  // Optimized AVX kernel: process 4 k_i at once, convert B once and reuse for all m rows
-  // This version achieved ~493 GB/s - restoring as baseline for further optimization
+  // Convert four packed B vectors once and reuse them across all M rows.
   static void avx_kernel_4(int m, int n, int k, int m_begin, int n_begin, int k_group_begin, float* c, BufferA* ba,
                            BufferB* bb, int k_group_size) {
     const __m512i bf16_hi_0 = bf16_hi_0_mask();
@@ -501,6 +501,17 @@ struct GemmKernel224FP8 {
     }
   }
 
+  static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_group_begin, float* c, BufferA* ba,
+                         BufferB* bb, int k_group_size) {
+    // This precision-specific choice is shared by inference and SFT callers.
+    // Large-M FP8 amortizes byte decoding; small tails keep the decode path.
+    if (std::min(m - m_begin, M_STEP) >= 8) {
+      avx_kernel_4(m, n, k, m_begin, n_begin, k_group_begin, c, ba, bb, k_group_size);
+    } else {
+      avx_kernel_rows(m, n, k, m_begin, n_begin, k_group_begin, c, ba, bb, k_group_size);
+    }
+  }
+
   static void apply_scale_kgroup(int m, int n, int m_begin, int n_begin, int k_block_begin, float* c, float* reduce_c,
                                  BufferA* ba, BufferB* bb, int k, int k_group_size) {
     using K = GemmKernel224FP8;
@@ -520,6 +531,107 @@ struct GemmKernel224FP8 {
       existing = _mm512_load_ps(c + i * K::N_STEP + K::TILE_N);
       result = _mm512_add_ps(result, existing);
       _mm512_store_ps(c + i * K::N_STEP + K::TILE_N, result);
+    }
+  }
+
+  // One FP8 matrix policy for inference and SFT, independent of caller/task type.
+  static void mat_vec_kgroup(int m, int n, int k, int group, BufferA* a, BufferB* b, BufferC* c, int ith, int nth);
+
+ private:
+  template <class Function, std::size_t... I>
+  static inline void unroll(Function&& function, std::index_sequence<I...>) {
+    // Compile-time indices keep the fixed dot accumulator set in registers.
+    (function(std::integral_constant<std::size_t, I>{}), ...);
+  }
+
+  template <int Rows>
+  // Keep conversion's lookup-table registers out of the dot leaf's allocation
+  // region. GCC 11 otherwise keeps them live and re-loads B for each M row.
+  [[gnu::noinline]] static void decoded_rows_128(const ggml_bf16_t* a, const __m512i* decoded,
+                                                 const std::array<float*, 4>& output, int row, float scale,
+                                                 bool first_group) {
+    static_assert(Rows == 1 || Rows == 2);
+    __m512 sums[Rows][8];
+    constexpr auto rows = std::make_index_sequence<Rows>{};
+    constexpr auto columns = std::make_index_sequence<8>{};
+    unroll([&](auto r) { unroll([&](auto c) { sums[r][c] = _mm512_setzero_ps(); }, columns); }, rows);
+    for (int quarter = 0; quarter < 4; ++quarter) {
+      const auto* ap = a + quarter * M_STEP * K_STEP + row * K_STEP;
+      const auto* bp = decoded + quarter * 16 * 8;
+      for (int pair = 0; pair < 16; ++pair) {
+        unroll(
+            [&](auto r) {
+              std::int32_t bits;
+              std::memcpy(&bits, ap + r * K_STEP + pair * 2, sizeof(bits));
+              const auto av = std::bit_cast<__m512bh>(_mm512_set1_epi32(bits));
+              unroll(
+                  [&](auto c) {
+                    const auto bv = std::bit_cast<__m512bh>(bp[pair * 8 + c]);
+                    sums[r][c] = _mm512_dpbf16_ps(sums[r][c], av, bv);
+                  },
+                  columns);
+            },
+            rows);
+      }
+    }
+    const auto multiplier = _mm512_set1_ps(scale);
+    unroll(
+        [&](auto r) {
+          unroll(
+              [&](auto c) {
+                auto* destination = output[c / 2] + (row + r) * N_STEP + (c % 2) * TILE_N;
+                const auto old = first_group ? _mm512_setzero_ps() : _mm512_load_ps(destination);
+                // Match the release scale-accumulation rounding, including K>128.
+                _mm512_store_ps(destination, _mm512_fmadd_ps(sums[r][c], multiplier, old));
+              },
+              columns);
+        },
+        rows);
+  }
+
+  static void mat_vec_wide_128(int m, int n, int k, BufferA* a, BufferB* b, BufferC* c, int ith, int nth) {
+    const auto [begin, end] = split_range_n(n, ith, nth);
+    // Exactly one 128x128 BF16 tile (32 KiB) per worker invocation, reused
+    // across all M blocks. No decoded panel/layer survives this invocation.
+    alignas(64) __m512i decoded[512];
+    for (int kb = 0; kb < k; kb += 128) {
+      for (int nb = begin; nb < end; nb += 128) {
+        for (int strip = 0; strip < 4; ++strip) {
+          const auto* bp = reinterpret_cast<const __m512i*>(b->get_submat(n, k, nb + strip * N_STEP, kb));
+          for (int pair = 0; pair < 64; ++pair) {
+            const auto converted = fp8x64_to_bf16x64(_mm512_load_si512(bp + pair));
+            decoded[pair * 8 + strip * 2] = converted.first;
+            decoded[pair * 8 + strip * 2 + 1] = converted.second;
+          }
+        }
+        const float scale = *b->get_scale(n, nb, k, kb);
+        for (int mb = 0; mb < m; mb += M_STEP) {
+          const auto* ap = a->get_submat(m, k, mb, kb);
+          std::array<float*, 4> output;
+          for (int strip = 0; strip < 4; ++strip) output[strip] = c->get_submat(m, n, mb, nb + strip * N_STEP);
+          const int count = std::min(m - mb, M_STEP);
+          int row = 0;
+          for (; row + 2 <= count; row += 2) decoded_rows_128<2>(ap, decoded, output, row, scale, kb == 0);
+          if (row < count) decoded_rows_128<1>(ap, decoded, output, row, scale, kb == 0);
+        }
+      }
+    }
+  }
+
+  static void mat_vec_nfirst(int m, int n, int k, BufferA* a, BufferB* b, BufferC* c, int ith, int nth) {
+    const auto [begin, end] = split_range_n(n, ith, nth);
+    // Small M benefits from contiguous packed weight strips. At large M this
+    // order instead hurts A locality; it is not a universal loop interchange.
+    for (int nb = begin; nb < end; nb += N_STEP) {
+      for (int kb = 0; kb < k; kb += 128) {
+        for (int mb = 0; mb < m; mb += M_STEP) {
+          auto* output = c->get_submat(m, n, mb, nb);
+          auto* scratch = c->get_reduce_submat(m, n, mb, nb);
+          if (kb == 0) std::memset(output, 0, std::min(m - mb, M_STEP) * N_STEP * sizeof(float));
+          avx_kernel(m, n, k, mb, nb, kb, scratch, a, b, 128);
+          apply_scale_kgroup(m, n, mb, nb, kb, output, scratch, a, b, k, 128);
+        }
+      }
     }
   }
 };
@@ -604,16 +716,32 @@ inline void vec_mul(int m, int n, int k, std::shared_ptr<GemmKernel224BF16::Buff
   float_mat_vec<GemmKernel224BF16, false>(m, n, k, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
+inline void GemmKernel224FP8::mat_vec_kgroup(int m, int n, int k, int group, BufferA* a, BufferB* b, BufferC* c,
+                                             int ith, int nth) {
+  // Only the native 128x128 block format has the shared-scale wide tile.
+  if (group == 128 && n % 128 == 0 && k % 128 == 0) {
+    if (m <= M_STEP) {
+      mat_vec_nfirst(m, n, k, a, b, c, ith, nth);
+    } else {
+      // Reuse decoding as soon as more than one packed M tile is consumed;
+      // waiting until two full tiles would leave a slow 33..63-row gap.
+      mat_vec_wide_128(m, n, k, a, b, c, ith, nth);
+    }
+    return;
+  }
+  float_mat_vec_kgroup<GemmKernel224FP8, false>(m, n, k, group, a, b, c, ith, nth);
+}
+
 inline void vec_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224FP8::BufferA> ba,
                            std::shared_ptr<GemmKernel224FP8::BufferB> bb, std::shared_ptr<GemmKernel224FP8::BufferC> bc,
                            int ith, int nth) {
-  float_mat_vec_kgroup<GemmKernel224FP8, false>(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+  GemmKernel224FP8::mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
 inline void mat_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224FP8::BufferA> ba,
                            std::shared_ptr<GemmKernel224FP8::BufferB> bb, std::shared_ptr<GemmKernel224FP8::BufferC> bc,
                            int ith, int nth) {
-  float_mat_vec_kgroup<GemmKernel224FP8, false>(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+  GemmKernel224FP8::mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
 // ============================================================================
