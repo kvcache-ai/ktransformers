@@ -191,6 +191,10 @@ jobs:
             --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/ktransformers/kt-kernel"
       - name: Compile SGL CUDA payload from the independently locked SGLang main
         env:
+          # qj5090 has enough RAM for these template-heavy CUDA translation
+          # units. Keep the CPU variant build conservative; scale SGL separately.
+          CMAKE_BUILD_PARALLEL_LEVEL: ${{ vars.KT_SGL_BUILD_JOBS || '16' }}
+          MAX_JOBS: ${{ vars.KT_SGL_BUILD_JOBS || '16' }}
           CMAKE_ARGS: >-
             -DENABLE_BELOW_SM90=ON
             -DSGL_KERNEL_ENABLE_FA3=ON
