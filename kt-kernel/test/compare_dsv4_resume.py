@@ -29,6 +29,11 @@ class Comparison:
                 self.failures.append(name + ": DTensor placements mismatch")
             left, right = left.to_local(), right.to_local()
         left, right = left.detach().cpu(), right.detach().cpu()
+        if (left.is_floating_point() or left.is_complex()) and not (
+            torch.isfinite(left).all() and torch.isfinite(right).all()
+        ):
+            self.failures.append(name + ": non-finite tensor")
+            return
         if torch.equal(left, right):
             return
         self.nonidentical_tensors += 1
@@ -71,6 +76,15 @@ class Comparison:
         elif left != right:
             self.failures.append(f"{name}: {left!r} != {right!r}")
 
+    def adapter_config(self, left, right):
+        # PEFT serializes target_modules from a set; list order is not semantic.
+        left, right = dict(left), dict(right)
+        for config in (left, right):
+            targets = config.get("target_modules")
+            if isinstance(targets, list) and all(isinstance(v, str) for v in targets):
+                config["target_modules"] = sorted(targets)
+        self.tree("adapter_config.json", left, right)
+
     def safetensors(self, name, left, right):
         with (
             safe_open(left, framework="pt", device="cpu") as a,
@@ -85,12 +99,16 @@ class Comparison:
 def compare(reference, resumed, atol=0.0, rtol=0.0):
     reference, resumed = Path(reference), Path(resumed)
     check = Comparison(atol, rtol)
-    for name in ("adapter_config.json", "kt_optimizer.index.json"):
-        check.tree(
-            name,
-            json.loads((reference / name).read_text()),
-            json.loads((resumed / name).read_text()),
-        )
+    check.adapter_config(
+        json.loads((reference / "adapter_config.json").read_text()),
+        json.loads((resumed / "adapter_config.json").read_text()),
+    )
+    name = "kt_optimizer.index.json"
+    check.tree(
+        name,
+        json.loads((reference / name).read_text()),
+        json.loads((resumed / name).read_text()),
+    )
     for name in ("adapter_model.safetensors", "fused_expert_lora.safetensors"):
         check.safetensors(name, reference / name, resumed / name)
     index = json.loads((reference / "kt_optimizer.index.json").read_text())
