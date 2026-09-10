@@ -122,7 +122,9 @@ jobs:
           echo "$release_work/venv/bin" >> "$GITHUB_PATH"
           echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$release_work/venv" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64" >> "$GITHUB_ENV"
+          # setup-python's CPython is linked against libpython in its own lib/.
+          # Do not discard that directory when adding the CUDA toolkit.
+          echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:$pythonLocation/lib" >> "$GITHUB_ENV"
           mkdir "$release_work/tmp"
           echo "TMPDIR=$release_work/tmp" >> "$GITHUB_ENV"
       - name: Check build prerequisites
