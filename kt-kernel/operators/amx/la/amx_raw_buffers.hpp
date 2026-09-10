@@ -385,8 +385,8 @@ struct BufferBFP8Impl {
     int k_block_begin = k_begin / K_BLOCK * K_BLOCK;
     k_begin -= k_block_begin;
     int k_block_size = std::min(K_BLOCK, k - k_block_begin);
-    return b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size + (size_t)n_begin * k_block_size +
-           (size_t)k_begin * N_STEP;
+    return b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size +
+           (size_t)n_begin * k_block_size + (size_t)k_begin * N_STEP;
   }
 
   const uint8_t* get_submat(int n, int k, int n_begin, int k_begin) const {
@@ -492,8 +492,8 @@ struct BufferBFP8Impl {
     if (k_group_size != FP8_BLOCK || src.k_group_size != FP8_BLOCK) {
       throw std::invalid_argument("FP8 BufferB transpose requires 128x128 block scales");
     }
-    if (N_BLOCK != FP8_BLOCK || N_STEP != 32 || K_STEP != 32 || n % FP8_BLOCK != 0 || k % FP8_BLOCK != 0 ||
-        src.n % FP8_BLOCK != 0 || src.k % FP8_BLOCK != 0) {
+    if (N_BLOCK != FP8_BLOCK || N_STEP != 32 || K_STEP != 32 || n % FP8_BLOCK != 0 ||
+        k % FP8_BLOCK != 0 || src.n % FP8_BLOCK != 0 || src.k % FP8_BLOCK != 0) {
       throw std::invalid_argument("FP8 BufferB transpose requires 128-aligned local matrix dimensions");
     }
 
@@ -505,8 +505,8 @@ struct BufferBFP8Impl {
 
     for (int dst_bn = dst_bn_begin; dst_bn < dst_bn_end; ++dst_bn) {
       for (int dst_bk = 0; dst_bk < dst_k_blocks; ++dst_bk) {
-        std::memcpy(d + (size_t)dst_bn * dst_k_blocks + dst_bk, src.d + (size_t)dst_bk * src_k_blocks + dst_bn,
-                    sizeof(float));
+        std::memcpy(d + (size_t)dst_bn * dst_k_blocks + dst_bk,
+                    src.d + (size_t)dst_bk * src_k_blocks + dst_bn, sizeof(float));
       }
     }
 

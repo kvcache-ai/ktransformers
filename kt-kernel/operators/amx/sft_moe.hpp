@@ -31,7 +31,6 @@
 #include "../../cpu_backend/worker_pool.h"
 #include "../sft_profile.hpp"
 #include "../sft_repack.hpp"
-#include "../sft_trace.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
@@ -1130,7 +1129,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     profiler_.record(SFTProfileStage::FwdRoute, stage_start);
     profiler_.record_workload(static_cast<uint64_t>(qlen), static_cast<uint64_t>(qlen) * k,
                               static_cast<uint64_t>(activated_expert));
-    profiler_.record_expert_rows(m_local_num_.data(), m_local_num_.size());
 
     // Step 2: Buffer pool allocation (reuse base class logic)
     stage_start = profiler_.start();
@@ -2929,46 +2927,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       auto pool = config_.pool->get_subpool(tp_part_idx);
 
-      // Fine-grained parallelism: nth_gate_up * expert_num * 2 + nth_down * expert_num tasks
-      int nth_gate_up = T::recommended_nth(config_.hidden_size);
-      int nth_down = T::recommended_nth(config_.intermediate_size);
+    // Fine-grained parallelism: nth_gate_up * expert_num * 2 + nth_down * expert_num tasks
+    int nth_gate_up = T::recommended_nth(config_.hidden_size);
+    int nth_down = T::recommended_nth(config_.intermediate_size);
 
-      // Phase 1: gate + up backward (both have same dimensions)
-      // gate/up_proj: [intermediate_size, hidden_size] -> transposed BufferB [hidden_size, intermediate_size]
-      pool->do_work_stealing_job(
-          nth_gate_up * config_.expert_num * 2, nullptr,
-          [this, nth_gate_up](int task_id) {
-            int proj_idx = task_id / (nth_gate_up * config_.expert_num);  // 0=gate, 1=up
-            int remaining = task_id % (nth_gate_up * config_.expert_num);
-            int expert_idx = remaining / nth_gate_up;
-            int ith = remaining % nth_gate_up;
+    // Phase 1: gate + up backward (both have same dimensions)
+    // gate/up_proj: [intermediate_size, hidden_size] -> transposed BufferB [hidden_size, intermediate_size]
+    pool->do_work_stealing_job(
+        nth_gate_up * config_.expert_num * 2, nullptr,
+        [this, nth_gate_up](int task_id) {
+          int proj_idx = task_id / (nth_gate_up * config_.expert_num);  // 0=gate, 1=up
+          int remaining = task_id % (nth_gate_up * config_.expert_num);
+          int expert_idx = remaining / nth_gate_up;
+          int ith = remaining % nth_gate_up;
 
-            const ggml_bf16_t* src =
-                (proj_idx == 0) ? (const ggml_bf16_t*)config_.gate_proj : (const ggml_bf16_t*)config_.up_proj;
-            auto& dst_bb = (proj_idx == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
+          const ggml_bf16_t* src =
+              (proj_idx == 0) ? (const ggml_bf16_t*)config_.gate_proj : (const ggml_bf16_t*)config_.up_proj;
+          auto& dst_bb = (proj_idx == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
 
-            // source: [intermediate_size, hidden_size], target: [hidden_size, intermediate_size]
-            size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
-            dst_bb->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.intermediate_size,
-                                        config_.hidden_size, ith, nth_gate_up);
-          },
-          nullptr);
+          // source: [intermediate_size, hidden_size], target: [hidden_size, intermediate_size]
+          size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
+          dst_bb->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.intermediate_size,
+                                      config_.hidden_size, ith, nth_gate_up);
+        },
+        nullptr);
 
-      // Phase 2: down backward
-      // down_proj: [hidden_size, intermediate_size] -> transposed BufferB [intermediate_size, hidden_size]
-      pool->do_work_stealing_job(
-          nth_down * config_.expert_num, nullptr,
-          [this, nth_down](int task_id) {
-            int expert_idx = task_id / nth_down;
-            int ith = task_id % nth_down;
+    // Phase 2: down backward
+    // down_proj: [hidden_size, intermediate_size] -> transposed BufferB [intermediate_size, hidden_size]
+    pool->do_work_stealing_job(
+        nth_down * config_.expert_num, nullptr,
+        [this, nth_down](int task_id) {
+          int expert_idx = task_id / nth_down;
+          int ith = task_id % nth_down;
 
-            const ggml_bf16_t* src = (const ggml_bf16_t*)config_.down_proj;
-            // source: [hidden_size, intermediate_size], target: [intermediate_size, hidden_size]
-            size_t expert_offset = (size_t)expert_idx * config_.hidden_size * config_.intermediate_size;
-            down_backward_bb_[expert_idx]->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.hidden_size,
-                                                               config_.intermediate_size, ith, nth_down);
-          },
-          nullptr);
+          const ggml_bf16_t* src = (const ggml_bf16_t*)config_.down_proj;
+          // source: [hidden_size, intermediate_size], target: [intermediate_size, hidden_size]
+          size_t expert_offset = (size_t)expert_idx * config_.hidden_size * config_.intermediate_size;
+          down_backward_bb_[expert_idx]->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.hidden_size,
+                                                             config_.intermediate_size, ith, nth_down);
+        },
+        nullptr);
 
       backward_weights_prepared_ = true;
     }
@@ -3090,7 +3088,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (backward_bb_pool_bytes_ == 0) return;
     shared_backward_repack_->ensure_ready(backward_weight_version_, [this]() {
       SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
-      sft::TraceScope trace("repack.numa", config_.layer_idx, tp_part_idx + 1);
       repack_shared_backward_weights();
     });
   }
@@ -3728,7 +3725,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     for (int i = 0; i < config_.expert_num; ++i) {
       grad_output_ba_[i] = std::make_shared<typename T::BufferA>(max_m, config_.hidden_size, nullptr);
-      grad_intermediate_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
+      grad_intermediate_bc_[i] =
+          std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
       grad_gate_up_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
     }
 
@@ -3899,12 +3897,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           make_base_backward_bb(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
       backward_bb_ptr += gate_up_backward_bb_size;
 
-      up_backward_bb_[i] =
-          make_base_backward_bb(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
+      up_backward_bb_[i] = make_base_backward_bb(config_.hidden_size, config_.intermediate_size,
+                                                 (void*)backward_bb_ptr);
       backward_bb_ptr += gate_up_backward_bb_size;
 
-      down_backward_bb_[i] =
-          make_base_backward_bb(config_.intermediate_size, config_.hidden_size, (void*)backward_bb_ptr);
+      down_backward_bb_[i] = make_base_backward_bb(config_.intermediate_size, config_.hidden_size,
+                                                   (void*)backward_bb_ptr);
       backward_bb_ptr += down_backward_bb_size;
     }
   }

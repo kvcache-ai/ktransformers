@@ -29,7 +29,6 @@
 #include "moe-tp.hpp"
 #include "sft_profile.hpp"
 #include "sft_repack.hpp"
-#include "sft_trace.hpp"
 
 struct TPBf16Stats {
   double abs_mean = 0.0;
@@ -248,16 +247,18 @@ class TP_MOE_SFT : public TP_MOE<T> {
         config.pool->get_subpool(numa_id)->do_work_stealing_job(
             tp_config.expert_num, nullptr,
             [&](int physical_expert) {
-              const int logical_expert = static_cast<int>(expert_map(physical_to_logical_map, physical_expert));
+              const int logical_expert =
+                  static_cast<int>(expert_map(physical_to_logical_map, physical_expert));
               amx::stage_block_fp8_tp_expert(config, tp_config.intermediate_size, intermediate_offsets[numa_id],
                                              logical_expert, tp_staging);
             },
             nullptr);
-        tps[numa_id]->set_staged_weight_pointers(tp_staging.gate.get(), tp_staging.up.get(), tp_staging.down.get(),
-                                                 tp_staging.gate_scale.get(), tp_staging.up_scale.get(),
-                                                 tp_staging.down_scale.get());
+        tps[numa_id]->set_staged_weight_pointers(
+            tp_staging.gate.get(), tp_staging.up.get(), tp_staging.down.get(), tp_staging.gate_scale.get(),
+            tp_staging.up_scale.get(), tp_staging.down_scale.get());
       });
-      run_numa_job_checked("native FP8 TP forward weight load", [this](int numa_id) { tps[numa_id]->load_weights(); });
+      run_numa_job_checked("native FP8 TP forward weight load",
+                           [this](int numa_id) { tps[numa_id]->load_weights(); });
     } catch (...) {
       for (auto& tp : tps) tp->clear_staged_weight_pointers();
       throw;
@@ -666,7 +667,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                    void* output, bool save_for_backward) {
     auto execution = acquire_execution();
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpFwdTotal);
-    sft::TraceScope trace("cpu.forward", config.layer_idx);
     if (weights_loaded == false) [[unlikely]] {
       throw std::runtime_error("Weights not loaded");
     }
@@ -720,7 +720,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 float optimizer_grad_scale = 1.0f) {
     auto execution = acquire_execution();
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
-    sft::TraceScope trace("cpu.backward", config.layer_idx);
     auto stage_start = profiler_.start();
     auto pool = config.pool;
 
@@ -1426,7 +1425,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
     wait_backward_repack();
     backward_repack_.submit([this]() {
       SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
-      sft::TraceScope trace("repack.async", config.layer_idx);
       run_numa_job_checked("async backward repack",
                            [this](int numa_id) { tps[numa_id]->prepare_shared_backward_weights(); });
     });
@@ -1439,7 +1437,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void wait_backward_repack() {
     if (!backward_repack_.pending()) return;
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepackWait);
-    sft::TraceScope trace("repack.wait", config.layer_idx);
     backward_repack_.wait();
   }
 
