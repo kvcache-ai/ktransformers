@@ -118,6 +118,9 @@ def make_release(final, root, lock_path, evidence):
         "run_id": int(os.environ["GITHUB_RUN_ID"]),
         "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
         "workflow_sha": lock["workflow_sha"],
+        # A packaging-only recovery can use a newer trusted CI implementation
+        # while preserving the original compiled four-main runtime snapshot.
+        "assembly_workflow_sha": os.environ["GITHUB_SHA"],
         "source_lock": lock,
         "wheels": {
             entry["name"]: {

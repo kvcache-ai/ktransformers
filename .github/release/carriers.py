@@ -1,8 +1,8 @@
 """Assemble fresh five-project carriers without version changes or source overlays.
 
-Only WHEEL/RECORD and the generated CUDA payload manifest are rewritten. Runtime
-files (including SM90 and licenses) are retained. Reject oversized wheels instead
-of deleting architectures. Native inputs must first pass auditwheel repair.
+Only wheel packaging metadata and cache-relative ELF RPATHs are rewritten.
+Python runtime files, CUDA code, SM90 and licenses are retained. Reject oversized
+wheels instead of deleting architectures. Native inputs require auditwheel repair.
 """
 
 from __future__ import annotations
@@ -137,8 +137,10 @@ def retag(root, python, abi):
     )
 
 
-def archive_payload(sgl, output):
+def archive_payload(sgl, output, libraries=None):
     hashes = {}
+    sources = {name: sgl / "sgl_kernel" / name for name in LARGE}
+    sources.update({".libs/" + name: path for name, path in (libraries or {}).items()})
     with (
         output.open("wb") as raw,
         gzip.GzipFile(
@@ -146,8 +148,7 @@ def archive_payload(sgl, output):
         ) as compressed,
     ):
         with tarfile.open(fileobj=compressed, mode="w|") as archive:
-            for name in LARGE:
-                source = sgl / "sgl_kernel" / name
+            for name, source in sources.items():
                 hashes[name] = sha256(source)
                 info = archive.gettarinfo(str(source), arcname=name)
                 info.uid = info.gid = info.mtime = 0
@@ -155,6 +156,33 @@ def archive_payload(sgl, output):
                 with source.open("rb") as stream:
                     archive.addfile(info, stream)
     return hashes
+
+
+def relocate_lazy_dependencies(sgl):
+    """Keep auditwheel's private small dependencies next to cached ELF files.
+
+    The main loader already materializes all manifest files. No Python loader
+    overlay is needed: only adjust ELF RPATH as a normal wheel-packaging step.
+    Directly loaded SM90/deep_gemm objects keep auditwheel's original layout.
+    """
+    libraries = {}
+    for path in sgl.rglob("*.so*"):
+        if path.is_file() and any(part.endswith(".libs") for part in path.parts):
+            require(path.name not in libraries, "Colliding bundled library names")
+            libraries[path.name] = path
+    changes = []
+    require(not any(name.startswith(("libcublas", "libnvrtc", "libnvJitLink")) for name in libraries),
+            "NVIDIA libraries must be supplied by the pinned Torch dependencies")
+    for name in LARGE:
+        path = sgl / "sgl_kernel" / name
+        dynamic = subprocess.check_output(["readelf", "--dynamic", str(path)], text=True)
+        needed = set(re.findall(r"Shared library: \[([^]]+)\]", dynamic))
+        if needed & libraries.keys():
+            before = sha256(path)
+            rpath = "$ORIGIN/../.libs" if "/" in name else "$ORIGIN/.libs"
+            subprocess.run(["patchelf", "--set-rpath", rpath, str(path)], check=True)
+            changes.append({"file": name, "operation": "set-rpath", "rpath": rpath, "before_sha256": before, "after_sha256": sha256(path)})
+    return libraries, changes
 
 
 def binary_evidence(roots):
@@ -222,33 +250,16 @@ def assemble(raw, output, evidence_dir):
         roots = {name: temp / name for name in by_name}
         for name, entry in by_name.items():
             unpack(entry["path"], roots[name])
-        save_json(evidence_dir / "cuda-binaries.json", binary_evidence(roots))
         sgl = roots["sgl-kernel-kt"]
-        # Lazy objects are extracted into a cache, not site-packages. An
-        # auditwheel-renamed dependency resolved via $ORIGIN would break there.
-        # Torch/CUDA-runtime libraries are supplied by the pinned torch wheel;
-        # reject any other bundled dependency rather than emitting a broken wheel.
-        bundled = {
-            path.name
-            for path in sgl.rglob("*.so*")
-            if any(part.endswith(".libs") for part in path.parts)
-        }
-        for name in LARGE:
-            dynamic = subprocess.check_output(
-                ["readelf", "--dynamic", str(sgl / "sgl_kernel" / name)], text=True
-            )
-            needed = set(re.findall(r"Shared library: \[([^]]+)\]", dynamic))
-            require(
-                not (needed & bundled),
-                "Lazy payload depends on a relocated auditwheel library; fix the main build linkage",
-            )
+        libraries, relocations = relocate_lazy_dependencies(sgl)
+        save_json(evidence_dir / "cuda-binaries.json", binary_evidence(roots))
         for name in ("payload_runtime.py", "load_utils.py", "flash_attn.py"):
             require(
                 (sgl / "sgl_kernel" / name).is_file(),
                 "Locked SGL main lacks the carrier loader: " + name,
             )
         archive = temp / "payload.tar.gz"
-        hashes = archive_payload(sgl, archive)
+        hashes = archive_payload(sgl, archive, libraries)
         # Only the two objects supported by main's lazy loader are externalized.
         # No SM90 deletion or copied Python implementation from another checkout.
         for name in LARGE:
@@ -374,6 +385,8 @@ def assemble(raw, output, evidence_dir):
                 "payload_files": hashes,
                 "parts": parts,
                 "direct_native_carriers": {"ktransformers": direct_files},
+                "elf_packaging_relocations": relocations,
+                "lazy_dependency_files": sorted(".libs/" + name for name in libraries),
                 "runtime_overlays": [],
                 "version_overrides": [],
                 "dependency_overrides": [],

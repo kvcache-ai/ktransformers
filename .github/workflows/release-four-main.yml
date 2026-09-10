@@ -10,9 +10,18 @@ on:
         required: true
         default: candidate
         options: [build, candidate, pypi]
+      reuse_raw_run_id:
+        description: 'Optional completed original compile run; packaging-only recovery, target must be build'
+        type: string
+        default: ''
+      reuse_raw_attempt:
+        description: 'Exact original compile attempt for recovery'
+        type: string
+        default: '1'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Share the existing release lock: native builds must not overlap a release
@@ -41,12 +50,15 @@ jobs:
           RELEASE_ENABLED: ${{ vars.KT_FOUR_MAIN_RELEASE_ENABLED }}
           E2E_ENABLED: ${{ vars.KT_MODEL_E2E_ENABLED }}
           TARGET: ${{ inputs.target }}
+          REUSE_RAW_RUN_ID: ${{ inputs.reuse_raw_run_id }}
         run: |
           test "$RELEASE_ENABLED" = true
           if [ "$TARGET" != build ]; then test "$E2E_ENABLED" = true; fi
+          if [ -n "$REUSE_RAW_RUN_ID" ]; then test "$TARGET" = build; fi
           test -f .github/workflows/model-e2e-release.yml
           test -f .github/model-e2e/release_contracts.py
       - name: Resolve latest main heads once
+        if: inputs.reuse_raw_run_id == ''
         env:
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
@@ -57,6 +69,24 @@ jobs:
           lock = json.load(open('source-lock.json'))
           assert lock['sources']['ktransformers']['sha'] == os.environ['WORKFLOW_SHA'], 'KT main moved after dispatch; start a fresh run'
           PY
+      - name: Verify packaging-only recovery of completed CI compilation
+        if: inputs.reuse_raw_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.reuse_raw_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.reuse_raw_attempt }}
+        run: |
+          python .github/release/recover_native.py preflight --run-id "$SOURCE_RUN" --attempt "$SOURCE_ATTEMPT"
+      - uses: actions/download-artifact@v4
+        if: inputs.reuse_raw_run_id != ''
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_raw_run_id }}
+          name: four-main-source-lock-${{ inputs.reuse_raw_run_id }}-${{ inputs.reuse_raw_attempt }}
+          path: .
+      - name: Retain the original four-main snapshot and explicit assembler identity
+        if: inputs.reuse_raw_run_id != ''
+        run: python .github/release/recover_native.py lock --lock source-lock.json
       - name: Name this snapshot
         id: names
         env:
@@ -157,6 +187,7 @@ jobs:
           python ci-tools/.github/release/four_main.py checkout \
             --lock lock/source-lock.json --destination "$RELEASE_WORK/sources"
       - name: Build Python package wheels from main source
+        if: inputs.reuse_raw_run_id == ''
         run: |
           set -euo pipefail
           for source in accelerate transformers ktransformers; do
@@ -169,6 +200,7 @@ jobs:
           SGLANG_KT_VERSION="$kt_version" python -m build --wheel --no-isolation \
             --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/sglang/python"
       - name: Fail on incompatible source pins before expensive native builds
+        if: inputs.reuse_raw_run_id == ''
         run: |
           python ci-tools/.github/release/four_main.py audit --python-only \
             --lock lock/source-lock.json --sources "$RELEASE_WORK/sources" \
@@ -177,6 +209,7 @@ jobs:
           python ci-tools/.github/release/release_stack.py unused \
             --wheels "$RELEASE_WORK/raw-wheels"
       - name: Compile all KT CPU variants and CUDA architectures
+        if: inputs.reuse_raw_run_id == ''
         env:
           CPUINFER_BUILD_ALL_VARIANTS: '1'
           CPUINFER_ENABLE_CPPTRACE: '0'
@@ -190,6 +223,7 @@ jobs:
           python -m build --wheel --no-isolation \
             --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/ktransformers/kt-kernel"
       - name: Compile SGL CUDA payload from the independently locked SGLang main
+        if: inputs.reuse_raw_run_id == ''
         env:
           # qj5090 has enough RAM for these template-heavy CUDA translation
           # units. Keep the CPU variant build conservative; scale SGL separately.
@@ -202,6 +236,28 @@ jobs:
         run: |
           python -m build --wheel --no-isolation \
             --outdir "$RELEASE_WORK/raw-wheels" "$RELEASE_WORK/sources/sglang/sgl-kernel"
+      - name: Recover the exact original CI raw wheel bytes
+        if: inputs.reuse_raw_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_raw_run_id }}
+          name: raw-wheels-not-for-pypi-${{ inputs.reuse_raw_run_id }}-${{ inputs.reuse_raw_attempt }}
+          path: ${{ env.RELEASE_WORK }}/raw-wheels
+      - name: Recover the original source and wheel-hash audit
+        if: inputs.reuse_raw_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.reuse_raw_run_id }}
+          name: four-main-evidence-${{ inputs.reuse_raw_run_id }}-${{ inputs.reuse_raw_attempt }}
+          path: ${{ env.RELEASE_WORK }}/evidence/original-build
+      - name: Reject altered or mixed raw inputs before repackaging
+        if: inputs.reuse_raw_run_id != ''
+        run: |
+          python ci-tools/.github/release/recover_native.py inputs \
+            --lock lock/source-lock.json --wheels "$RELEASE_WORK/raw-wheels" \
+            --report "$RELEASE_WORK/evidence/original-build/raw-wheel-report.json"
       - name: Inspect wheel metadata and source provenance
         run: |
           set -euo pipefail
@@ -212,28 +268,9 @@ jobs:
             --output "$RELEASE_WORK/evidence/raw-wheel-report.json"
       - name: Repair native inputs without changing runtime source
         run: |
-          set -euo pipefail
-          mkdir "$RELEASE_WORK/repaired"
-          python - <<'PY'
-          import os, pathlib, shutil, subprocess, sys
-          sys.path.insert(0, 'ci-tools/.github/release')
-          from four_main import inspect_wheel
-          work = pathlib.Path(os.environ['RELEASE_WORK'])
-          for path in sorted((work / 'raw-wheels').glob('*.whl')):
-              entry = inspect_wheel(path)
-              if entry['name'] in {'kt-kernel', 'sgl-kernel-kt'}:
-                  subprocess.run([
-                      sys.executable, '-m', 'auditwheel', 'repair', str(path),
-                      '--plat', 'manylinux_2_35_x86_64', '--exclude', 'libcuda.so.1',
-                      '--exclude', 'libtorch.so', '--exclude', 'libtorch_cpu.so',
-                      '--exclude', 'libtorch_cuda.so', '--exclude', 'libtorch_python.so',
-                      '--exclude', 'libc10.so', '--exclude', 'libc10_cuda.so',
-                      '--exclude', 'libcudart.so.12',
-                      '-w', str(work / 'repaired'),
-                  ], check=True)
-              else:
-                  shutil.copyfile(path, work / 'repaired' / path.name)
-          PY
+          python ci-tools/.github/release/repair_native.py \
+            --raw "$RELEASE_WORK/raw-wheels" --output "$RELEASE_WORK/repaired" \
+            --evidence "$RELEASE_WORK/evidence"
       - name: Assemble final carriers and inspect CUDA SASS coverage
         run: |
           python ci-tools/.github/release/carriers.py \

@@ -40,6 +40,7 @@ def check_attestation(data, manifest, digest):
     require(data.get("wheels") == manifest["wheels"], "Different accepted wheel bytes")
     require(data.get("candidate_run_id") == manifest["run_id"], "Different build run")
     require(data.get("candidate_attempt") == manifest["run_attempt"], "Different build attempt")
+    require(data.get("assembly_workflow_sha", data["source_lock"].get("workflow_sha")) == manifest.get("assembly_workflow_sha", manifest.get("workflow_sha")), "Different assembler revision")
     for host in ("sap4", "qj5090"):
         for extra in ("sglang", "sglang,sft"):
             verify_install_report(data["install_reports"][host][extra], manifest, extra, public=False)
@@ -89,7 +90,7 @@ def fetch():
     require(hashlib.sha256(content).hexdigest() == digest, "Acceptance record changed")
     data = json.loads(content)
     require(data["candidate_run_id"] == int(run_id) and data["candidate_attempt"] == int(attempt), "Acceptance belongs to another build")
-    require(data["source_lock"]["workflow_sha"] == run["head_sha"], "Different source revision")
+    require(data.get("assembly_workflow_sha", data["source_lock"]["workflow_sha"]) == run["head_sha"], "Different assembler revision")
     save_json(Path("accepted.json"), data)
     save_json(Path("build-run.json"), run)
 
