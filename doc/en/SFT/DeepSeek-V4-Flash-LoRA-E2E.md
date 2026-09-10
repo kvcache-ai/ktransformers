@@ -133,6 +133,10 @@ This first deployment is static, not `--lora-paths` hot swapping. Both
 components are required. The base model remains read-only. Use
 `--component base`, `experts`, or `nonexperts` only for controlled ablations;
 all use the same BF16 non-expert convention.
+For numerical ablations, add `--match-expert-kernel`: baseline/non-expert-only
+exports include an expert adapter with zero B matrices. This keeps the same
+native SFT forward path in all conditions, avoiding inference-kernel rounding
+differences as a confounder.
 
 The April SGLang path requires the following environment settings:
 

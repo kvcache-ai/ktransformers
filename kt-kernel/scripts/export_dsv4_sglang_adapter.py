@@ -76,7 +76,14 @@ def _validate_fused_experts(path, config, rank):
                 raise KTArtifactError(f"non-finite fused expert LoRA: {name}")
 
 
-def export(source_path, cache_path, adapter_path, output_path, component="all"):
+def export(
+    source_path,
+    cache_path,
+    adapter_path,
+    output_path,
+    component="all",
+    match_expert_kernel=False,
+):
     output, adapter = Path(output_path).absolute(), Path(adapter_path).absolute()
     if component not in {"all", "base", "experts", "nonexperts"}:
         raise KTArtifactError(f"invalid export component: {component}")
@@ -211,7 +218,8 @@ def export(source_path, cache_path, adapter_path, output_path, component="all"):
         if path.is_file():
             shutil.copyfile(path, model_dir / name)
     expert_count = 0
-    if component in {"all", "experts"}:
+    expert_enabled = component in {"all", "experts"}
+    if expert_enabled or match_expert_kernel:
         expert_tensors, expert_rank, targets = _convert_fused_expert_lora(
             adapter / FUSED_EXPERT_LORA_NAME
         )
@@ -223,6 +231,11 @@ def export(source_path, cache_path, adapter_path, output_path, component="all"):
             * 6
         ):
             raise KTArtifactError("expert adapter rank or tensor inventory mismatch")
+        if not expert_enabled:
+            expert_tensors = {
+                name: torch.zeros_like(tensor) if ".lora_B." in name else tensor
+                for name, tensor in expert_tensors.items()
+            }
         expert_dir = output / "experts"
         expert_dir.mkdir()
         save_file(expert_tensors, expert_dir / "adapter_model.safetensors")
@@ -250,6 +263,8 @@ def export(source_path, cache_path, adapter_path, output_path, component="all"):
         "standard_pairs_consumed": sorted(consumed),
         "standard_source_tensor_count": len(standard),
         "expert_exported_tensor_count": expert_count,
+        "expert_effect_enabled": expert_enabled,
+        "zero_expert_adapter_control": bool(match_expert_kernel and not expert_enabled),
         "model_files": files,
         "rounding": "standard LoRA merged in FP32 then rounded to BF16",
     }
@@ -274,5 +289,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--component", choices=("all", "base", "experts", "nonexperts"), default="all"
     )
+    parser.add_argument(
+        "--match-expert-kernel",
+        action="store_true",
+        help="Use zero-B expert LoRA in baseline ablations so every component uses the same native SFT forward kernel.",
+    )
     args = parser.parse_args()
-    export(args.source, args.cache, args.adapter, args.output, args.component)
+    export(
+        args.source,
+        args.cache,
+        args.adapter,
+        args.output,
+        args.component,
+        args.match_expert_kernel,
+    )

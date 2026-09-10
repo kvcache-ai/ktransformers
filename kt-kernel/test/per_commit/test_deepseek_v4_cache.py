@@ -205,3 +205,23 @@ def test_static_export_rejects_unknown_standard_module(adapter_export):
     seal()
     with pytest.raises(KTArtifactError, match="unsupported non-expert"):
         module.export(str(source), str(cache), str(adapter), str(output))
+
+
+def test_static_baseline_can_match_the_expert_forward_kernel(adapter_export):
+    module, source, cache, adapter, output, _ = adapter_export
+    report = module.export(
+        str(source),
+        str(cache),
+        str(adapter),
+        str(output),
+        component="base",
+        match_expert_kernel=True,
+    )
+    assert report["zero_expert_adapter_control"] and not report["expert_effect_enabled"]
+    assert (
+        report["expert_exported_tensor_count"] == 6
+        and report["standard_pairs_consumed"] == []
+    )
+    tensors = load_file(output / "experts" / "adapter_model.safetensors")
+    for name, tensor in tensors.items():
+        assert torch.all(tensor == (0 if ".lora_B." in name else 1))
