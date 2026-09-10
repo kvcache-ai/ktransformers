@@ -316,6 +316,7 @@ class QueueAndSandbox(unittest.TestCase):
         )
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--read-only", command)
+        self.assertIn("--no-healthcheck", command)
         self.assertNotIn("--privileged", command)
         self.assertNotIn("--network=host", command)
         self.assertNotIn("--ipc=host", command)

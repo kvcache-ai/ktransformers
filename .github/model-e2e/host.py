@@ -90,6 +90,7 @@ def docker_command(config, harness, inputs, output, name):
         "--name",
         name,
         "--pull=never",
+        "--no-healthcheck",
         "--init",
         "--user",
         f"{uid}:{gid}",
