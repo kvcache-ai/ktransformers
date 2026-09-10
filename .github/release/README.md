@@ -10,6 +10,26 @@
 `KT_RELEASE_WORK_ROOT` 为可执行的空闲内存盘目录，避免填满 runner 磁盘；
 构建和临时文件都进入该目录下本次创建、带 run ID 标记的独立子目录。
 
+### 模型验收 runner 未就绪时的人工接管
+
+`Promote manually validated CI wheels` 只接管上传，不重新编译、不执行 Kimi
+训练，也不伪造自动验收 workflow 的成功记录。它只能从官方 main 手动触发，
+读取成功的 `Release four-main stack` 构建 artifact，并要求：
+
+- 用完整 commit SHA 和文件 SHA256 固定维护者的人工验收 JSON；该文件只作为
+  数据读取，不能执行其中的代码。
+- 核对同一份四仓 source lock、构建 run/attempt、五个 wheels 与完整依赖哈希。
+- 核对两台机器的全新环境、两种 extras 安装报告、安装训练工具前后的核心
+  文件哈希，及 Qwen/DeepSeek 一个 optimizer step 的有限 raw loss 和 GLM 问答。
+- 本次 post4 的人工记录还包含 sap4 Kimi 的完整 LoRA 保存、转换、至少 32 步
+  风格训练及未出现在训练集中的风格问答；Kimi 不被添加为 CI 自动训练任务。
+
+凭据仅在最终上传 step 注入，先预检整批版本，再按 Accelerate → Transformers
+→ KT-Kernel → SGLang → KTransformers 的顺序上传同一批文件。上传后状态明确为
+`uploaded-awaiting-public-e2e`，正式 PyPI 新环境复验仍由维护者完成。
+人工记录依赖维护者真实执行、审核与授权，不等同于自动 runner 的执行证明。
+没有完成验收记录时，不能通过该入口发布。
+
 ```text
 Run workflow
   → 两次观测并锁定四仓 main SHA + 工作流 SHA

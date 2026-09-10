@@ -1,0 +1,87 @@
+name: Promote manually validated CI wheels
+
+# Contingency for an unavailable model runner. This does not execute Kimi in CI
+# or manufacture success receipts for the normal automated release gate.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Release four-main stack build run
+        type: string
+        required: true
+      candidate_attempt:
+        description: Exact build attempt
+        type: string
+        default: '1'
+        required: true
+      manifest_sha256:
+        description: SHA256 of the already tested release.json
+        type: string
+        required: true
+      acceptance_commit:
+        description: Full commit containing the manual post4 acceptance record
+        type: string
+        required: true
+      acceptance_sha256:
+        description: SHA256 of the manual acceptance JSON
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ktransformers-pypi-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: prod
+    timeout-minutes: 120
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      CANDIDATE_ATTEMPT: ${{ inputs.candidate_attempt }}
+      MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+      ACCEPTANCE_COMMIT: ${{ inputs.acceptance_commit }}
+      ACCEPTANCE_SHA256: ${{ inputs.acceptance_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging==25.0 twine==6.1.0
+      - name: Fetch immutable manual acceptance as data, never execute it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/release/manual_promote.py fetch
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          name: four-main-candidate-${{ inputs.candidate_run_id }}-${{ inputs.candidate_attempt }}
+          path: candidate
+      - name: Check wheel bytes, both extras, model results and runtime integrity
+        run: python .github/release/manual_promote.py verify
+      - name: Upload the same validated wheels, umbrella package last
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python .github/release/manual_promote.py publish
+      - name: Record upload status, not public PyPI E2E success
+        run: |
+          echo '### Uploaded after manual acceptance; public-PyPI revalidation is still required' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: manual-promotion-${{ github.run_id }}
+          path: |
+            accepted.json
+            build-run.json
+            promotion.json
+          if-no-files-found: warn
+          retention-days: 90
