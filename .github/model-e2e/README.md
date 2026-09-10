@@ -122,7 +122,11 @@ python3 -m unittest discover -s .github/model-e2e -p 'test_*.py' -v
 
 ### qj5090 首次现场检查（2026-09-10）
 
+- 本地和 qj5090 最终版本的 34 项框架单元测试通过。
 - 已验证真实 CUDA 进程存在时排队，不启动待测任务；占用探针自行退出。
 - 已验证 rootless Docker 的 CDI GPU 路径和 CUDA 小张量操作，无需 privileged 或修改宿主配置。
 - 已发现并修正控制器的 rootless 用户映射、memlock 参数，以及误用 Python 3.11 时 pip 回退旧栈的问题。
-- 模型 E2E 与完整 Actions 链路尚未验收；以上基础设施检查不代表三个模型通过。
+- CPython 3.12 的全新 venv 已正确解析目标五包，但在从 `files.pythonhosted.org` 下载 wheel 时发生 `ReadTimeoutError`；**没有完成安装，也没有进入 GLM 加载**。
+- 已检查现有 7897 代理：仅监听宿主 loopback，诊断容器通过默认 host-gateway 无法连接。未改代理监听、未开放端口、未使用 host network。
+- 本次所有自有诊断容器已清理；没有终止 qj5090 上其他训练进程。
+- 模型 E2E 与完整 Actions 链路尚未验收；以上基础设施检查不代表三个模型通过。下一步先准备容器可用的下载通道和公开 SFT 工具镜像，再分别验证两种入口。
