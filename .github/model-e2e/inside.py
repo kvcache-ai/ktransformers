@@ -26,6 +26,7 @@ from contracts import (
     write_json,
 )
 from recipes import accelerate_config, glm_command, training_config
+from resource_queue import ResourceUnavailable, reservation
 
 WORK = Path("/work")
 EVIDENCE = WORK / "evidence"
@@ -381,9 +382,19 @@ def main():
         )
         for case in CASES:
             try:
-                results["cases"][case] = (
-                    glm(env) if case == "glm53_inference" else lora(case, env)
-                )
+                # Installation may take a while. Recheck ALL GPUs before each
+                # model as well, in case a manual workload arrived meanwhile.
+                # The outer host reservation is still held throughout.
+                with reservation(
+                    WORK / "model-start.lock", EVIDENCE / "model-start-queue.jsonl"
+                ):
+                    results["cases"][case] = (
+                        glm(env) if case == "glm53_inference" else lora(case, env)
+                    )
+            except ResourceUnavailable as exc:
+                results["status"] = "resource_unavailable"
+                results["cases"][case] = {"status": "not_run", "error": str(exc)}
+                raise
             except Exception as exc:
                 results["cases"][case] = {"status": "failed", "error": str(exc)}
                 raise  # fail fast; no missing case can produce a green suite

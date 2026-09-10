@@ -223,6 +223,10 @@ def main():
                         export_evidence(sandbox / "evidence", evidence / "tests")
             if (evidence / "tests/suite.json").exists():
                 results = json.loads((evidence / "tests/suite.json").read_text())
+                if results["status"] == "resource_unavailable":
+                    raise ResourceUnavailable(
+                        "A manual workload arrived before a model test; queue wait expired"
+                    )
             require(
                 completed.returncode == 0
                 and state["ExitCode"] == 0
