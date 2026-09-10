@@ -761,11 +761,15 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
   }
 
   void prepare_decode_down_input(int expert_idx, int qlen) {
+#if defined(__AVX512BF16__)
     if (qlen != 1 || config_.quant_config.group_size != 32 || config_.intermediate_size % 32 != 0) {
       Base::prepare_decode_down_input(expert_idx, qlen);
       return;
     }
     assert(down_ba_[expert_idx]->natural_order);
+#else
+    Base::prepare_decode_down_input(expert_idx, qlen);
+#endif
   }
 
   void apply_decode_activation(int activated_expert, int nth, int qlen) {
