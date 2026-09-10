@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "image": "registry.example/kt-model-e2e@sha256:REPLACE_WITH_REVIEWED_IMAGE_DIGEST",
+  "lock_path": "/var/lock/ktransformers/qj5090-model-e2e.lock",
+  "queue_timeout_seconds": 21600,
+  "test_timeout_seconds": 43200,
+  "models": {
+    "qwen3": {
+      "path": "/mnt/data/models/Qwen3-30B-A3B-Instruct-2507",
+      "revision": "REPLACE",
+      "config_sha256": "REPLACE"
+    },
+    "deepseek_v31": {
+      "path": "/mnt/data/models/DeepSeek-V3.1",
+      "revision": "REPLACE",
+      "config_sha256": "REPLACE"
+    },
+    "glm53": {
+      "path": "/mnt/sft_yyj_yyj/models/GLM-5.3-Flash-public-04c4e9e9",
+      "revision": "REPLACE",
+      "config_sha256": "REPLACE"
+    }
+  }
+}
