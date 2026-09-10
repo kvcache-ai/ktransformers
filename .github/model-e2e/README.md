@@ -1,6 +1,19 @@
 # 模型 E2E 验收 CI（独立 Draft）
 
 这个 PR **只负责验收，不构建发行包、不上传 PyPI、不自动合并 PR**。
+
+新增 `model-e2e-release.yml`，供 #2194 的同次发布构建复用，分别运行候选验收和
+正式 PyPI 复验；没有新增上传权限。该接口只接受官方仓库 main 上手动触发的
+`release-four-main.yml`，绑定 run ID、构建 attempt、workflow SHA 及 manifest
+SHA256，不重新读取四仓 main，也不需要伪造 PR 编号。
+
+候选从已核对的完整离线 wheelhouse 安装；发布后从正式 PyPI 使用不固定版本的
+`pip install "ktransformers[sglang]"` 和 `pip install "ktransformers[sglang,sft]"`
+分别安装到全新 venv，核对依赖解析结果、版本、wheel 文件名、下载来源和 SHA256。
+三模型仍沿用本 PR 原有验收标准，qj5090 有任务时排队。上传凭据不传给此 workflow。
+GLM 实际使用 serving-only venv，避免 SFT 工具掩盖推理依赖缺失；SFT 工具也不能
+替换候选解析出的任何运行时依赖。
+这只是发布接口的代码接入，真实构建、三模型和完整 Actions 链路仍需首次验收。
 它与 [四仓 main 发版 PR #2194](https://github.com/kvcache-ai/ktransformers/pull/2194) 分开维护，后续通过候选 wheel artifact 对接。
 
 ## 1. 两个用途

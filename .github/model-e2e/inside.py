@@ -26,6 +26,7 @@ from contracts import (
     write_json,
 )
 from recipes import accelerate_config, glm_command, training_config
+from release_contracts import verify_install_report, verify_release
 from resource_queue import ResourceUnavailable, reservation
 
 WORK = Path("/work")
@@ -113,6 +114,9 @@ def install(request, env):
         "This initial GPU acceptance matrix requires CPython 3.12; do not silently resolve an older stack",
     )
     require(not (WORK / "venv").exists(), "Refusing to reuse an environment")
+    if request["mode"].startswith("release-"):
+        install_release(request, env)
+        return
     venv.EnvBuilder(with_pip=True).create(WORK / "venv")
     report = EVIDENCE / "pip-install.json"
     if request["mode"] == "pypi":
@@ -175,6 +179,64 @@ def install(request, env):
             )
 
 
+def install_release(request, env):
+    manifest = verify_release("/input/release", request["manifest_sha256"])
+    public = request["mode"] == "release-pypi"
+    # Serving-only resolution must work too; a union of extras could otherwise
+    # conceal a missing serving dependency. Neither test pins local wheel paths.
+    for extra, directory in (
+        ("sglang", WORK / "serving-venv"),
+        ("sglang,sft", WORK / "venv"),
+    ):
+        require(not directory.exists(), "Never reuse a release test venv")
+        venv.EnvBuilder(with_pip=True).create(directory)
+        python = directory / "bin/python"
+        label = "serving" if extra == "sglang" else "combined"
+        report = EVIDENCE / f"release-{label}-install.json"
+        command = [
+            python,
+            "-m",
+            "pip",
+            "--isolated",
+            "install",
+            "--no-cache-dir",
+            "--only-binary=:all:",
+        ]
+        if public:
+            command += ["--index-url", "https://pypi.org/simple"]
+        else:
+            command += ["--no-index", "--find-links", "/input/release/wheelhouse"]
+        command += ["--report", report, f"ktransformers[{extra}]"]
+        run(command, EVIDENCE / f"release-{label}-install.log", env=env, timeout=7200)
+        verify_install_report(
+            json.loads(report.read_text()), manifest, extra, public=public
+        )
+        run(
+            [python, "-m", "pip", "check"],
+            EVIDENCE / f"release-{label}-pip-check.txt",
+            env=env,
+            timeout=120,
+        )
+    run(
+        [PYTHON, "/harness/installed.py", EVIDENCE / "installed.json"],
+        EVIDENCE / "imports.log",
+        env=env,
+        timeout=21900,
+    )
+    run(
+        [PYTHON, "-m", "pip", "freeze", "--all"],
+        EVIDENCE / "pip-freeze.txt",
+        env=env,
+        timeout=120,
+    )
+    installed = json.loads((EVIDENCE / "installed.json").read_text())
+    for name, entry in manifest["wheels"].items():
+        require(
+            installed[name]["version"] == entry["version"],
+            "Installed release version changed",
+        )
+
+
 def install_training_tools(env):
     # The approved digest-pinned image provides a hash-locked PUBLIC tooling
     # wheelhouse. It must NOT contain any of the five tested distributions.
@@ -194,8 +256,19 @@ def install_training_tools(env):
     )
     installed = json.loads((EVIDENCE / "installed.json").read_text())
     constraint = WORK / "stack-constraints.txt"
+    protected_versions = {name: entry["version"] for name, entry in installed.items()}
+    release_report = EVIDENCE / "release-combined-install.json"
+    if release_report.exists():
+        protected_versions.update(
+            {
+                item["metadata"]["name"].lower().replace("_", "-"): item["metadata"][
+                    "version"
+                ]
+                for item in json.loads(release_report.read_text())["install"]
+            }
+        )
     constraint.write_text(
-        "".join(f"{name}=={entry['version']}\n" for name, entry in installed.items())
+        "".join(f"{name}=={version}\n" for name, version in protected_versions.items())
     )
     command = [
         PYTHON,
@@ -220,14 +293,18 @@ def install_training_tools(env):
         env=env,
         timeout=600,
     )
-    forbidden = PACKAGES | {
-        "transformers",
-        "accelerate",
-        "sglang",
-        "sgl-kernel",
-        "sgl-kernel-kt",
-        "torch",
-    }
+    forbidden = (
+        set(protected_versions)
+        | PACKAGES
+        | {
+            "transformers",
+            "accelerate",
+            "sglang",
+            "sgl-kernel",
+            "sgl-kernel-kt",
+            "torch",
+        }
+    )
     for item in json.loads(plan.read_text())["install"]:
         name = item["metadata"]["name"].lower().replace("_", "-")
         require(
@@ -301,12 +378,16 @@ def lora(case, env):
     )
 
 
-def glm(env):
+def glm(env, python=PYTHON):
     log = EVIDENCE / "glm-server.log"
     with log.open("w") as stream:
         process = subprocess.Popen(
-            glm_command(PYTHON),
-            env=env | {"CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+            glm_command(python),
+            env=env
+            | {
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+                "PATH": str(Path(python).parent) + ":" + env["PATH"],
+            },
             stdout=stream,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -388,9 +469,17 @@ def main():
                 with reservation(
                     WORK / "model-start.lock", EVIDENCE / "model-start-queue.jsonl"
                 ):
-                    results["cases"][case] = (
-                        glm(env) if case == "glm53_inference" else lora(case, env)
-                    )
+                    if case == "glm53_inference":
+                        # SFT extras/tooling must not hide a missing dependency
+                        # in the public serving-only installation.
+                        python = (
+                            WORK / "serving-venv/bin/python"
+                            if request["mode"].startswith("release-")
+                            else PYTHON
+                        )
+                        results["cases"][case] = glm(env, python=python)
+                    else:
+                        results["cases"][case] = lora(case, env)
             except ResourceUnavailable as exc:
                 results["status"] = "resource_unavailable"
                 results["cases"][case] = {"status": "not_run", "error": str(exc)}

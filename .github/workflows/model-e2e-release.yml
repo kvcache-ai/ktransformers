@@ -1,0 +1,73 @@
+name: Model E2E acceptance (release gate)
+
+# Reuses the PR/PyPI harness; cannot publish. Called twice by the release workflow.
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        required: true
+      artifact:
+        type: string
+        required: true
+      manifest_sha256:
+        type: string
+        required: true
+      build_attempt:
+        type: string
+        required: true
+    outputs:
+      evidence:
+        value: ${{ jobs.gpu.outputs.evidence }}
+
+permissions:
+  contents: read
+
+jobs:
+  gpu:
+    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
+    environment: qj5090-model-e2e
+    runs-on: [self-hosted, linux, x64, gpu, kt-model-e2e]
+    timeout-minutes: 1100
+    outputs:
+      evidence: ${{ steps.names.outputs.evidence }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: harness
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: input/release
+      - name: Check caller, run identity and exact wheelhouse
+        env:
+          ENABLED: ${{ vars.KT_MODEL_E2E_ENABLED }}
+          STAGE: ${{ inputs.stage }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          BUILD_ATTEMPT: ${{ inputs.build_attempt }}
+          CONTROLLER_PYTHON: ${{ vars.KT_MODEL_E2E_PYTHON || 'python3.12' }}
+        run: '"$CONTROLLER_PYTHON" harness/.github/model-e2e/release_prepare.py'
+      - name: Name stage evidence
+        id: names
+        env:
+          STAGE: ${{ inputs.stage }}
+        run: echo "evidence=release-e2e-$STAGE-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Queue, install into clean environments, and run all three models
+        env:
+          HOST_CONFIG: ${{ vars.KT_MODEL_E2E_HOST_CONFIG || '/etc/ktransformers/model-e2e/qj5090.json' }}
+          CONTROLLER_PYTHON: ${{ vars.KT_MODEL_E2E_PYTHON || 'python3.12' }}
+        run: |
+          set -euo pipefail
+          test_root="$(mktemp -d "$RUNNER_TEMP/kt-release-e2e.XXXXXXXX")"
+          echo "E2E_OUTPUT=$test_root/output" >> "$GITHUB_ENV"
+          "$CONTROLLER_PYTHON" harness/.github/model-e2e/host.py \
+            --config "$HOST_CONFIG" --input "$GITHUB_WORKSPACE/input" \
+            --output "$test_root/output"
+      - uses: actions/upload-artifact@v4
+        if: always() && env.E2E_OUTPUT != ''
+        with:
+          name: ${{ steps.names.outputs.evidence }}
+          path: ${{ env.E2E_OUTPUT }}/evidence/
+          if-no-files-found: error
+          retention-days: 90

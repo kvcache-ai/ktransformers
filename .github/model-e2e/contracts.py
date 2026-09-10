@@ -54,8 +54,28 @@ def write_json(path, data):
 
 def validate_request(request):
     require(request["schema"] == 1, "Unsupported request schema")
-    require(request["mode"] in ("pypi", "pr"), "Unknown mode")
+    require(
+        request["mode"] in ("pypi", "pr", "release-candidate", "release-pypi"),
+        "Unknown mode",
+    )
     sha(request["harness_sha"])
+    if request["mode"].startswith("release-"):
+        require("pr" not in request, "A release cannot report a PR status")
+        require(
+            re.fullmatch(r"[0-9a-f]{64}", request["manifest_sha256"]),
+            "Invalid release digest",
+        )
+        require(
+            type(request["build_run_id"]) is int and request["build_run_id"] > 0,
+            "Invalid release run",
+        )
+        require(
+            type(request["build_run_attempt"]) is int
+            and request["build_run_attempt"] > 0,
+            "Invalid release attempt",
+        )
+        sha(request["build_workflow_sha"])
+        return request
     if request["mode"] == "pypi":
         version = request["version"]
         require(

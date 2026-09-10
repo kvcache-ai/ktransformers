@@ -21,6 +21,7 @@ from contracts import (
     verify_candidate,
     write_json,
 )
+from release_contracts import verify_release
 from resource_queue import ResourceUnavailable, reservation
 
 
@@ -175,6 +176,21 @@ def main():
         )
         if request["mode"] == "pr":
             verify_candidate(args.input / "candidate", request)
+        elif request["mode"].startswith("release-"):
+            manifest = verify_release(
+                args.input / "release", request["manifest_sha256"]
+            )
+            require(
+                manifest["run_id"] == request["build_run_id"], "Release run mismatch"
+            )
+            require(
+                manifest["run_attempt"] == request["build_run_attempt"],
+                "Release attempt mismatch",
+            )
+            require(
+                manifest["workflow_sha"] == request["build_workflow_sha"],
+                "Release workflow mismatch",
+            )
         write_json(evidence / "host-config.json", config)
         write_json(evidence / "request.json", request)
         # The lock covers create, package installation, all three tests, AND
