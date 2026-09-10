@@ -1,0 +1,24 @@
+name: Model E2E harness unit tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/model-e2e/**'
+      - '.github/workflows/model-e2e*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s .github/model-e2e -p 'test_*.py' -v
