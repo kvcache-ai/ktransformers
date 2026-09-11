@@ -1,3 +1,5 @@
+# LF official main; prepare the JSON once before using template: empty.
+# Two-step smoke, not a complete fine-tuning run.
 model_name_or_path: /path/to/Kimi-K2.5
 trust_remote_code: true
 use_fast_tokenizer: false
@@ -9,10 +11,9 @@ lora_rank: 8
 lora_alpha: 16
 lora_dropout: 0.0
 lora_target: q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj
-dataset_dir: /path/to/neko-smoke
-dataset: neko_smoke
-template: kimi_k25_nothink
-enable_thinking: false
+dataset_dir: /path/to/prepared-neko
+dataset: neko_train
+template: empty
 cutoff_len: 512
 packing: false
 neat_packing: false

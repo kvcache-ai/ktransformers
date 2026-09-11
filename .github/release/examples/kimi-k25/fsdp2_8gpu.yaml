@@ -1,3 +1,5 @@
+# Pair with this directory's train.yaml using the external Accelerate launcher.
+# Eight GPUs; FSDP2 parameter offload is separate from activation recomputation.
 compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
 fsdp_config:
