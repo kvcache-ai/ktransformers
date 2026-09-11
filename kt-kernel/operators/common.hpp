@@ -5,6 +5,7 @@
 
 #include "../cpu_backend/worker_pool.h"
 #include "ggml.h"
+#include "kt_weight_arena.hpp"
 
 #if defined(__aarch64__) && defined(CPU_USE_KML)
 #include <arm_sve.h>
@@ -296,6 +297,14 @@ struct GeneralMOEConfig {
   bool load = false;
   bool share_backward_bb = false;
   bool share_cache_pool = false;
+
+  // When non-empty, back the per-expert BufferB weight blocks with a MAP_SHARED
+  // file per (layer, NUMA part) under this directory instead of anonymous heap,
+  // so a machine with barely enough RAM for the CPU expert working set can still
+  // serve the model (cold experts reclaim without swap, refault from the file).
+  // Set by the --kt-mmap-experts-dir server flag. Empty = unchanged behaviour.
+  // See operators/kt_weight_arena.hpp.
+  std::string mmap_weights_dir;
 
   // for llamafile
   int m_block = 4;
