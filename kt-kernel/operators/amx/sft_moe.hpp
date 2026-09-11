@@ -18,8 +18,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <type_traits>
@@ -28,6 +30,7 @@
 
 #include "../../cpu_backend/worker_pool.h"
 #include "../sft_profile.hpp"
+#include "../sft_repack.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
@@ -308,13 +311,12 @@ struct SFTSharedPools {
     size_t bwd_work_bytes = 0;
     void* bwd_bb = nullptr;
     size_t bwd_bb_bytes = 0;
-    int bwd_bb_owner_layer = -1;  // layer_idx that last repacked into this pool
+    std::shared_ptr<sft::RepackState> backward_repack = std::make_shared<sft::RepackState>();
     void* cache = nullptr;
     size_t cache_bytes = 0;
   };
   std::vector<PerNuma> pools;
   std::mutex mu;
-  std::mutex bwd_bb_mu;
 
   static SFTSharedPools& instance() {
     static SFTSharedPools inst;
@@ -665,6 +667,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   // true = per-instance alloc, false = shared pool or nullptr
   bool backward_bb_locally_owned_ = false;
 
+  std::shared_ptr<sft::RepackState> shared_backward_repack_;
+  sft::RepackState::Version backward_weight_version_ = sft::RepackState::new_version();
+
   // Flag to track if LoRA weights have been converted to BufferB format
   bool lora_weights_prepared_ = false;
   bool lora_backward_weights_prepared_ = false;
@@ -720,6 +725,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
+    {
+      auto& shared = SFTSharedPools::instance();
+      std::lock_guard<std::mutex> guard(shared.mu);
+      shared.ensure_numa_count(tp_part_idx + 1);
+      shared_backward_repack_ = shared.pools[tp_part_idx].backward_repack;
+    }
     printf(
         "Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s share_backward_bb %s share_cache_pool %s\n",
         config.layer_idx, tp_part_idx, numa_node_of_cpu(sched_getcpu()), SkipLoRA ? "true" : "false",
@@ -1684,23 +1695,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // ★ Allocate backward-phase buffers ★
     alloc_backward_buffers();
 
-    // ★ share_backward_bb: check if async repack already prepared this layer ★
+    // The TP caller holds the CPU execution lease through all backward GEMMs.
+    // Use prefetched weights if ready, or synchronously prepare the first layer.
     if (config_.share_backward_bb) {
-      auto& shared = SFTSharedPools::instance();
-      shared.ensure_numa_count(tp_part_idx + 1);
-      if constexpr (kIsFP8Backend) {
-        // FP8 phase one never publishes the shared pool from an async producer.
-        // Serialize the owner check, packed transpose and publication.
-        std::lock_guard<std::mutex> owner_guard(shared.bwd_bb_mu);
-        if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
-          prepare_backward_bb_for_async();
-        }
-      } else {
-        if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
-          // Pool was overwritten by another layer or not yet repacked — sync fallback
-          prepare_backward_bb_for_async();
-        }
-      }
+      prepare_shared_backward_weights();
     }
 
     // auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
@@ -2924,7 +2922,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if constexpr (!supports_standard_mat_mul_v<T>) {
       return;  // KGroup kernels use for-loop implementation
     } else {
-
       if (backward_weights_prepared_) return;
       if (config_.gate_proj == nullptr) return;  // No base weights to prepare
 
@@ -2975,69 +2972,64 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
   }
 
-  /**
-   * @brief Dynamically repack backward BufferB from forward weights using to_mat() + from_mat_transposed().
-   * Used in share_backward_bb mode (Mode 1) to avoid persistent backward_bb_pool_ per instance.
-   */
+ private:
+  static void repack_backward_matrix(typename T::BufferB& dst, typename T::BufferB& src, int ith, int nth) {
+    if constexpr (has_bb_transposed_repack_v<T>) {
+      if constexpr (kIsInt8Backend) {
+        // INT8 compensation belongs to a whole matrix; this task is not split.
+        dst.repack_from_bb_transposed(src);
+      } else {
+        const int partitions = T::recommended_nth(dst.n);
+        for (int part = partitions * ith / nth; part < partitions * (ith + 1) / nth; ++part)
+          dst.from_bb_transposed(src, part, partitions);
+      }
+    } else {
+      thread_local std::vector<ggml_bf16_t> workspace;
+      workspace.resize((size_t)src.n * src.k);
+      const int src_nth = T::recommended_nth(src.n);
+      for (int p = 0; p < src_nth; ++p) src.to_mat(workspace.data(), p, src_nth);
+      const int dst_nth = T::recommended_nth(dst.n);
+      for (int p = 0; p < dst_nth; ++p) dst.from_mat_transposed(workspace.data(), src.n, src.k, p, dst_nth);
+    }
+  }
+
+ public:
+  // Gate, up and down share one queue. Keep expert-sized tasks when they already
+  // fill the pool; otherwise split disjoint row partitions (FP8 and BF16). This
+  // avoids thousands of tiny tasks for large MoEs without underfilling small ones.
   void prepare_backward_weights_from_forward() {
     if constexpr (!supports_base_backward_v<T>) return;
-
     auto pool = config_.pool->get_subpool(tp_part_idx);
-
-    // Phase 1: gate + up (both use [intermediate_size, hidden_size] -> [hidden_size, intermediate_size])
+    constexpr bool partitioned = has_bb_transposed_repack_v<T> && !kIsInt8Backend;
+    const int matrices = 3 * config_.expert_num;
+    const int threads = config_.pool->config.subpool_thread_count.at(tp_part_idx);
+    const int tasks_per_matrix = std::max(1, (threads + matrices - 1) / matrices);
+    const int gate_up_parts = partitioned ? std::min(tasks_per_matrix, T::recommended_nth(config_.hidden_size)) : 1;
+    const int down_parts = partitioned ? std::min(tasks_per_matrix, T::recommended_nth(config_.intermediate_size)) : 1;
+    const int gate_up_tasks = config_.expert_num * gate_up_parts;
+    const int task_count = 2 * gate_up_tasks + config_.expert_num * down_parts;
+    std::vector<std::exception_ptr> errors(task_count);
     pool->do_work_stealing_job(
-        config_.expert_num * 2, nullptr,
-        [this](int task_id) {
-          int proj = task_id / config_.expert_num;
-          int expert_idx = task_id % config_.expert_num;
-          auto& src_bb = (proj == 0) ? gate_bb_[expert_idx] : up_bb_[expert_idx];
-          auto& dst_bb = (proj == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
-
-          if constexpr (has_bb_transposed_repack_v<T>) {
-            if constexpr (kIsInt8Backend) {
-              dst_bb->repack_from_bb_transposed(*src_bb);
-            } else {
-              int nth = T::recommended_nth(dst_bb->n);
-              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
-            }
-          } else {
-            thread_local std::vector<ggml_bf16_t> workspace;
-            workspace.resize((size_t)src_bb->n * src_bb->k);
-            int src_nth = T::recommended_nth(src_bb->n);
-            for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
-            int dst_nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < dst_nth; p++)
-              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
+        task_count, nullptr,
+        [&](int task_id) {
+          try {
+            const int projection = task_id < gate_up_tasks ? 0 : (task_id < 2 * gate_up_tasks ? 1 : 2);
+            const int parts = projection < 2 ? gate_up_parts : down_parts;
+            const int local_task = task_id - projection * gate_up_tasks;
+            const int expert = local_task / parts;
+            const int part = local_task % parts;
+            auto& src = projection == 0 ? gate_bb_ : (projection == 1 ? up_bb_ : down_bb_);
+            auto& dst = projection == 0 ? gate_backward_bb_ : (projection == 1 ? up_backward_bb_ : down_backward_bb_);
+            repack_backward_matrix(*dst[expert], *src[expert], part, parts);
+          } catch (...) {
+            // WorkerPool callbacks cannot throw through a worker thread.
+            errors[task_id] = std::current_exception();
           }
         },
         nullptr);
-
-    // Phase 2: down (uses [hidden_size, intermediate_size] -> [intermediate_size, hidden_size])
-    pool->do_work_stealing_job(
-        config_.expert_num, nullptr,
-        [this](int task_id) {
-          auto& src_bb = down_bb_[task_id];
-          auto& dst_bb = down_backward_bb_[task_id];
-
-          if constexpr (has_bb_transposed_repack_v<T>) {
-            if constexpr (kIsInt8Backend) {
-              dst_bb->repack_from_bb_transposed(*src_bb);
-            } else {
-              int nth = T::recommended_nth(dst_bb->n);
-              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
-            }
-          } else {
-            thread_local std::vector<ggml_bf16_t> workspace;
-            workspace.resize((size_t)src_bb->n * src_bb->k);
-            int src_nth = T::recommended_nth(src_bb->n);
-            for (int p = 0; p < src_nth; p++) src_bb->to_mat(workspace.data(), p, src_nth);
-            int dst_nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < dst_nth; p++)
-              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
-          }
-        },
-        nullptr);
-
+    for (const auto& error : errors) {
+      if (error) std::rethrow_exception(error);
+    }
     backward_weights_prepared_ = true;
   }
 
@@ -3089,17 +3081,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
   }
 
-  /**
-   * @brief Standalone method for async backward BB repack (Phase 2).
-   * Called from TP_MOE_SFT::submit_backward_repack() on a separate thread.
-   * Allocates/resizes the shared backward_bb pool, repacks from forward weights,
-   * and sets the owner layer on the shared pool.
-   */
-  void prepare_backward_bb_for_async() {
-    SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
+  // Called under the TP caller's CPU execution lease, either by prefetch or
+  // backward's synchronous fallback. Only complete repacks publish readiness.
+  void prepare_shared_backward_weights() {
     if constexpr (!supports_base_backward_v<T>) return;
     if (backward_bb_pool_bytes_ == 0) return;
+    shared_backward_repack_->ensure_ready(backward_weight_version_, [this]() {
+      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
+      repack_shared_backward_weights();
+    });
+  }
 
+  void invalidate_backward_repack() {
+    backward_weight_version_ = sft::RepackState::new_version();
+    backward_weights_prepared_ = false;
+  }
+
+ private:
+  void repack_shared_backward_weights() {
     // Free any locally-allocated pool before switching to shared
     if (backward_bb_locally_owned_ && backward_bb_pool_ != nullptr) {
       free(backward_bb_pool_);
@@ -3127,12 +3126,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 #endif
-
-    auto& shared = SFTSharedPools::instance();
-    shared.ensure_numa_count(tp_part_idx + 1);
-    shared.pools[tp_part_idx].bwd_bb_owner_layer = config_.layer_idx;
   }
 
+ public:
   /**
    * @brief Set base weight pointers for TP partitioning.
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights before calling load_weights().

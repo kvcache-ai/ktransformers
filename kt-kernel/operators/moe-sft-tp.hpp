@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -23,13 +22,13 @@
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include "amx/fp8_tp_staging.hpp"
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
 #include "sft_profile.hpp"
+#include "sft_repack.hpp"
 
 struct TPBf16Stats {
   double abs_mean = 0.0;
@@ -180,6 +179,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
  private:
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
+
+  [[nodiscard]] auto acquire_execution() {
+    // Retire our producer before taking the non-reentrant executor lease:
+    // the producer itself needs that lease, so the reverse order can deadlock.
+    wait_backward_repack();
+    return sft::acquire_cpu_execution();
+  }
 
   static typename Base::PartFactory make_sft_part_factory(const MOESFTConfig& full_config) {
     return [full_config](const GeneralMOEConfig& tp_config, int tp_index) -> std::unique_ptr<T> {
@@ -444,10 +450,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
   }
 
-  // Async backward repack state (Phase 2: overlap repack with GPU attention backward)
-  std::thread repack_thread_;
-  std::atomic<bool> repack_in_flight_{false};
-  std::exception_ptr repack_exception_;
+  sft::RepackTask backward_repack_;
   SFTProfiler profiler_;
 
   // Per-instance references to shared per-TP backward temporary pools.
@@ -504,7 +507,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
         update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
                             config.down_lora_a, config.down_lora_b);
       }
-
     }
   }
 
@@ -524,6 +526,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
     for (int i = 0; i < tp_count; ++i) tps[i]->reset_profile_stats();
   }
 
+  void warm_up() {
+    auto execution = acquire_execution();
+    Base::warm_up();
+  }
+
   /**
    * @brief Load weights on all NUMA nodes with TP partitioning.
    *
@@ -533,6 +540,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * resulting in 2x the expected output after merge.
    */
   void load_weights() override {
+    auto execution = acquire_execution();
+    for (auto& tp : tps) tp->invalidate_backward_repack();
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BaseWeightReload);
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
@@ -823,39 +832,25 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
   void forward_sft(int* qlen_ptr, int k, const int64_t* expert_ids, const float* weights, const void* input,
                    void* output, bool save_for_backward) {
+    auto execution = acquire_execution();
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpFwdTotal);
     if (weights_loaded == false) [[unlikely]] {
       throw std::runtime_error("Weights not loaded");
     }
 
     int qlen = *qlen_ptr;
-    auto pool = config.pool;
-
-    // Reset forward timing before computation
-    // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
-    for (int i = 0; i < tp_count; i++) {
-    }
-
     // Run forward on each NUMA node
     auto stage_start = profiler_.start();
-    pool->dispense_backend()->do_numa_job([this, qlen, k, expert_ids, input, weights, save_for_backward](int numa_id) {
+    run_numa_job_checked("SFT forward", [&](int numa_id) {
       tps[numa_id]->forward_sft(qlen, k, expert_ids, weights, input, this->local_output_numa[numa_id],
                                 save_for_backward);
     });
     profiler_.record(SFTProfileStage::TpFwdNumaCompute, stage_start);
 
-    // // Collect per-thread timing from all NUMA subpools
-    // for (int i = 0; i < tp_count; i++) {
-    // }
-
-    // // Print per-thread forward timing
-
     // Merge results from all NUMA nodes
     stage_start = profiler_.start();
     this->merge_results(qlen, output);
     profiler_.record(SFTProfileStage::TpFwdMerge, stage_start);
-
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
 
   /**
@@ -890,6 +885,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
                 void* grad_down_proj = nullptr, bool accumulate_optimizer_grads = false,
                 float optimizer_grad_scale = 1.0f) {
+    auto execution = acquire_execution();
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
     auto stage_start = profiler_.start();
     auto pool = config.pool;
@@ -1477,6 +1473,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
+    auto execution = acquire_execution();
     if constexpr (kSkipLoRA) return;  // No LoRA weights to update in SkipLoRA mode
     int full_intermediate_size = sft_config.intermediate_size;
     int expert_num = config.expert_num;
@@ -1575,6 +1572,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * @param path Output directory path
    */
   void prepare_and_save_bwd(void* gate, void* up, void* down, const std::string& path) {
+    auto execution = acquire_execution();
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -1626,52 +1624,29 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void submit_backward_repack() {
     if (!config.share_backward_bb) return;
-
-    // Block-FP8 publishes a single-layer shared backward pool synchronously
-    // inside backward(). This avoids an async producer overwriting packed FP8
-    // weights or their scale grid while a consumer is running.
-    if constexpr (T::kIsFP8Backend) {
-      wait_backward_repack();
-      return;
-    }
-
     wait_backward_repack();
-
-    repack_exception_ = nullptr;
-    repack_in_flight_.store(true, std::memory_order_release);
-    repack_thread_ = std::thread([this]() {
-      try {
-        SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
-        run_numa_job_checked("async backward repack",
-                             [this](int numa_id) { tps[numa_id]->prepare_backward_bb_for_async(); });
-      } catch (...) {
-        repack_exception_ = std::current_exception();
-      }
-      repack_in_flight_.store(false, std::memory_order_release);
+    backward_repack_.submit([this]() {
+      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
+      run_numa_job_checked("async backward repack",
+                           [this](int numa_id) { tps[numa_id]->prepare_shared_backward_weights(); });
     });
   }
 
   /**
    * @brief Wait for async backward weight repack to complete (blocking).
-   * Must be called before any operation that uses the CPU thread pool (e.g., checkpoint recompute).
+   * Wait at CPU submission, allowing GPU-only checkpoint recompute to proceed.
    */
   void wait_backward_repack() {
-    if (repack_thread_.joinable()) {
-      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepackWait);
-      repack_thread_.join();
-    }
-    if (repack_exception_) {
-      std::exception_ptr error = repack_exception_;
-      repack_exception_ = nullptr;
-      std::rethrow_exception(error);
-    }
+    if (!backward_repack_.pending()) return;
+    SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepackWait);
+    backward_repack_.wait();
   }
 
   /**
    * @brief Destructor - free partitioned weights.
    */
   ~TP_MOE_SFT() {
-    if (repack_thread_.joinable()) repack_thread_.join();
+    backward_repack_.drain();
     free_backward_temp_pools();
     free_partitioned_lora_weights();
     free_partitioned_base_weights();
@@ -1692,6 +1667,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * vs ~1.9s/layer for full object recreation).
    */
   void set_base_weight_pointers(void* gate, void* up, void* down) {
+    auto execution = acquire_execution();
     config.gate_proj = gate;
     config.up_proj = up;
     config.down_proj = down;
