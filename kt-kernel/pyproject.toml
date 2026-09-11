@@ -44,7 +44,11 @@ sglang = [
   "sglang-kt",
 ]
 convert = [
-  "compressed-tensors>=0.7.0",
+  # compressed-tensors 0.16.0 moved its offload stack onto torch.accelerator
+  # and requires torch>=2.10.0, but this package pins torch==2.9.1. Installing
+  # the newer release against that torch makes convert_gpu_weights.py fail with
+  # "module 'torch.accelerator' has no attribute 'get_memory_info'".
+  "compressed-tensors>=0.7.0,<0.16.0",
 ]
 test = [
   "pytest>=7.0.0",
