@@ -63,7 +63,9 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
   // ============================================================================
 
   size_t buffer_a_required_size_impl(size_t m, size_t k) const {
-    return T::BufferA::required_size(m, k, config_.quant_config.group_size);
+    // Keep subsequent shared-pool buffers aligned even with an odd row count.
+    const size_t bytes = T::BufferA::required_size(m, k, config_.quant_config.group_size);
+    return (bytes + 63) & ~size_t(63);
   }
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
     return T::BufferB::required_size(n, k, config_.quant_config.group_size);
