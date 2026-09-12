@@ -2,6 +2,7 @@
 """RAWINT4 group-32 SFT numerical and scratch-alignment regression."""
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,12 @@ import sys
 
 import pytest
 
-import test_sft_int8_numerical as reference
+_spec = importlib.util.spec_from_file_location(
+    "rawint4_reference_fixture", Path(__file__).with_name("test_sft_int8_numerical.py")
+)
+reference = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = reference
+_spec.loader.exec_module(reference)
 
 reference.register_cpu_ci(est_time=30, suite="default")
 
