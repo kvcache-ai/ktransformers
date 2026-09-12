@@ -1,8 +1,10 @@
 """Exercise carrier assembly with tiny synthetic wheels, not CUDA execution."""
 
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +16,7 @@ from four_main import inspect_wheel
 def raw_wheels(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
-    for package in (*carriers.MODULES, "accelerate-kt", "sgl-kernel-kt"):
+    for package in (*carriers.MODULES, "sgl-kernel-kt"):
         root = tmp_path / package
         root.mkdir()
         dist = root / (package.replace("-", "_") + "-1.0.dist-info")
@@ -73,6 +75,8 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
         assert "sgl_kernel/_payload_manifest.py" in wheel.namelist()
     with zipfile.ZipFile(next(output.glob("ktransformers-*.whl"))) as wheel:
         assert "sgl_kernel/sm90/common_ops.abi3.so" in wheel.namelist()
+    with zipfile.ZipFile(next(output.glob("accelerate_kt-*.whl"))) as wheel:
+        assert "accelerate_kt_sgl_kernel_payload/payload.part" in wheel.namelist()
     # Every final RECORD is independently checked, including regenerated payloads.
     for index, path in enumerate(output.iterdir()):
         carriers.unpack(path, tmp_path / f"verify-{index}")
@@ -96,3 +100,65 @@ def test_size_limit_fails_without_dropping_architectures(tmp_path, monkeypatch):
     evidence.mkdir()
     with pytest.raises(ValueError, match="capacity"):
         carriers.assemble(raw, tmp_path / "final", evidence)
+
+
+def test_payload_preserves_wheel_relative_libraries(tmp_path):
+    raw_wheels(tmp_path)
+    root = tmp_path / "sgl-kernel-kt"
+    library = root / "sgl_kernel_kt.libs/libnuma.so.1"
+    library.parent.mkdir()
+    library.write_bytes(b"dependency")
+    target = tmp_path / "payload.tar.gz"
+    hashes = carriers.archive_payload(root, target)
+    assert set(hashes) == {"sgl_kernel/" + name for name in carriers.LARGE} | {
+        "sgl_kernel_kt.libs/libnuma.so.1"
+    }
+    with tarfile.open(target) as archive:
+        assert set(archive.getnames()) == set(hashes)
+
+
+def test_embedded_metadata_does_not_shadow_wheel_metadata(tmp_path):
+    raw_wheels(tmp_path)
+    root = tmp_path / "accelerate-kt"
+    nested = root / "accelerate_kt/vendor/example.dist-info"
+    nested.mkdir(parents=True)
+    for name in ("METADATA", "RECORD"):
+        (nested / name).write_text("vendored metadata")
+    wheel = tmp_path / "accelerate_kt-1.0-py3-none-any.whl"
+    carriers.pack(root, wheel)
+    assert inspect_wheel(wheel)["name"] == "accelerate-kt"
+    carriers.unpack(wheel, tmp_path / "unpacked")
+
+
+@pytest.mark.parametrize("kt_cuda", [False, True])
+def test_cpu_only_kt_is_accepted_without_weakening_cuda_audit(
+    tmp_path, monkeypatch, kt_cuda
+):
+    kt, sgl = tmp_path / "kt", tmp_path / "sgl"
+    kt.mkdir()
+    (sgl / "sgl_kernel/sm100").mkdir(parents=True)
+    (kt / "extension.so").touch()
+    (sgl / "sgl_kernel/sm100/common_ops.abi3.so").touch()
+    monkeypatch.setattr(
+        carriers.subprocess,
+        "check_output",
+        lambda args, **kw: (
+            ".nv_fatbin" if kt_cuda or sgl in Path(args[-1]).parents else ""
+        ),
+    )
+    monkeypatch.setattr(
+        carriers.subprocess,
+        "run",
+        lambda args, **kw: SimpleNamespace(
+            stdout=(
+                "sm_80 sm_86 sm_89 sm_90 sm_120"
+                if sgl in Path(args[-1]).parents
+                else "sm_80"
+            )
+        ),
+    )
+    if kt_cuda:
+        with pytest.raises(ValueError, match="KT CUDA extension"):
+            carriers.binary_evidence({"kt-kernel": kt, "sgl-kernel-kt": sgl})
+    else:
+        carriers.binary_evidence({"kt-kernel": kt, "sgl-kernel-kt": sgl})

@@ -229,6 +229,10 @@ jobs:
                       '--exclude', 'libtorch_cuda.so', '--exclude', 'libtorch_python.so',
                       '--exclude', 'libc10.so', '--exclude', 'libc10_cuda.so',
                       '--exclude', 'libcudart.so.12',
+                      '--exclude', 'libcublas.so.12',
+                      '--exclude', 'libcublasLt.so.12',
+                      '--exclude', 'libcurand.so.10',
+                      '--exclude', 'libnvrtc.so.12',
                       '-w', str(work / 'repaired'),
                   ], check=True)
               else:

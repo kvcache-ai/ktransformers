@@ -30,6 +30,7 @@ MODULES = {
     "transformers-kt": "transformers_kt_sgl_kernel_payload",
     "sglang-kt": "sglang_kt_sgl_kernel_payload",
     "ktransformers": "ktransformers_sgl_kernel_payload",
+    "accelerate-kt": "accelerate_kt_sgl_kernel_payload",
 }
 LARGE = ("flash_ops.abi3.so", "sm100/common_ops.abi3.so")
 
@@ -44,7 +45,12 @@ def unpack(wheel, root):
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         require(len(names) == len(set(names)), "Duplicate ZIP entries")
-        records = [name for name in names if name.endswith(".dist-info/RECORD")]
+        records = [
+            name
+            for name in names
+            if name.endswith(".dist-info/RECORD")
+            and len(PurePosixPath(name).parts) == 2
+        ]
         require(len(records) == 1, "Require one wheel RECORD")
         rows = list(csv.reader(io.StringIO(archive.read(records[0]).decode())))
         record = {row[0]: row[1:] for row in rows}
@@ -139,6 +145,9 @@ def retag(root, python, abi):
 
 def archive_payload(sgl, output):
     hashes = {}
+    paths = [sgl / "sgl_kernel" / name for name in LARGE]
+    for directory in sorted(sgl.glob("*.libs")):
+        paths.extend(path for path in sorted(directory.rglob("*")) if path.is_file())
     with (
         output.open("wb") as raw,
         gzip.GzipFile(
@@ -146,8 +155,8 @@ def archive_payload(sgl, output):
         ) as compressed,
     ):
         with tarfile.open(fileobj=compressed, mode="w|") as archive:
-            for name in LARGE:
-                source = sgl / "sgl_kernel" / name
+            for source in paths:
+                name = source.relative_to(sgl).as_posix()
                 hashes[name] = sha256(source)
                 info = archive.gettarinfo(str(source), arcname=name)
                 info.uid = info.gid = info.mtime = 0
@@ -189,7 +198,7 @@ def binary_evidence(roots):
     )
     kt = [entry for name, entry in evidence.items() if name.startswith("kt-kernel/")]
     require(
-        any(required <= normalize(entry["sass"]) for entry in kt),
+        not kt or any(required <= normalize(entry["sass"]) for entry in kt),
         "KT CUDA extension is missing required SASS architectures",
     )
     return evidence
@@ -201,7 +210,7 @@ def assemble(raw, output, evidence_dir):
         inspect_wheel(path) | {"path": path} for path in sorted(raw.glob("*.whl"))
     ]
     by_name = {entry["name"]: entry for entry in entries}
-    expected = set(MODULES) | {"accelerate-kt", "sgl-kernel-kt"}
+    expected = set(MODULES) | {"sgl-kernel-kt"}
     require(
         set(by_name) == expected and len(entries) == len(expected),
         "Need six fresh inputs",
@@ -224,24 +233,6 @@ def assemble(raw, output, evidence_dir):
             unpack(entry["path"], roots[name])
         save_json(evidence_dir / "cuda-binaries.json", binary_evidence(roots))
         sgl = roots["sgl-kernel-kt"]
-        # Lazy objects are extracted into a cache, not site-packages. An
-        # auditwheel-renamed dependency resolved via $ORIGIN would break there.
-        # Torch/CUDA-runtime libraries are supplied by the pinned torch wheel;
-        # reject any other bundled dependency rather than emitting a broken wheel.
-        bundled = {
-            path.name
-            for path in sgl.rglob("*.so*")
-            if any(part.endswith(".libs") for part in path.parts)
-        }
-        for name in LARGE:
-            dynamic = subprocess.check_output(
-                ["readelf", "--dynamic", str(sgl / "sgl_kernel" / name)], text=True
-            )
-            needed = set(re.findall(r"Shared library: \[([^]]+)\]", dynamic))
-            require(
-                not (needed & bundled),
-                "Lazy payload depends on a relocated auditwheel library; fix the main build linkage",
-            )
         for name in ("payload_runtime.py", "load_utils.py", "flash_attn.py"):
             require(
                 (sgl / "sgl_kernel" / name).is_file(),
@@ -261,6 +252,7 @@ def assemble(raw, output, evidence_dir):
             f"VERSION = {by_name['sgl-kernel-kt']['version']!r}\n"
             f"ARCHIVE_SHA256 = {sha256(archive)!r}\n"
             f"PAYLOAD_MODULES = {tuple(MODULES.values())!r}\nFILES = {hashes!r}\n"
+            f"BINARIES = {dict((name, 'sgl_kernel/' + name) for name in LARGE)!r}\n"
         )
         kt = roots["kt-kernel"]
         kt_dist = next(kt.glob("*.dist-info"))
@@ -355,12 +347,6 @@ def assemble(raw, output, evidence_dir):
                     "Carrier changed dependency metadata",
                 )
             require(remaining == 0 and not source.read(1), "Incomplete payload split")
-        accelerate = by_name["accelerate-kt"]["path"]
-        require(
-            accelerate.stat().st_size < LIMIT,
-            "Accelerate wheel exceeds PyPI size limit",
-        )
-        shutil.copyfile(accelerate, output / accelerate.name)
         save_json(
             evidence_dir / "assembly.json",
             {
