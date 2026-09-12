@@ -205,7 +205,9 @@ def inspect_wheel(path: Path) -> dict:
     name, version, _, tags = parse_wheel_filename(path.name)
     with zipfile.ZipFile(path) as wheel:
         metadata_files = [
-            p for p in wheel.namelist() if p.endswith(".dist-info/METADATA")
+            p
+            for p in wheel.namelist()
+            if p.endswith(".dist-info/METADATA") and len(PurePosixPath(p).parts) == 2
         ]
         if len(metadata_files) != 1:
             raise ValueError(f"Expected one METADATA in {path.name}")
