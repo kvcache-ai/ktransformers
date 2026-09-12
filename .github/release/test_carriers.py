@@ -4,6 +4,7 @@ import sys
 from types import SimpleNamespace
 import zipfile
 from pathlib import Path
+import tarfile
 
 import pytest
 
@@ -47,6 +48,12 @@ def raw_wheels(tmp_path):
                 path = module / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fixture-data" * 20)
+            (module / "payload_runtime.py").write_text(
+                'getattr(manifest, "BINARIES", {})\n'
+            )
+            libraries = root / "sgl_kernel_kt.libs"
+            libraries.mkdir()
+            (libraries / "libnuma-fixture.so.1").write_bytes(b"shared dependency")
             (dist / "LICENSE").write_text("SGL license fixture")
         path = raw / f"{package.replace('-', '_')}-1.0-{tag}.whl"
         carriers.pack(root, path)
@@ -66,7 +73,14 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     assert {entry["version"] for entry in entries} == {"1.0"}
     kt = next(output.glob("kt_kernel-*.whl"))
     with zipfile.ZipFile(kt) as wheel:
-        assert wheel.read("sgl_kernel/payload_runtime.py") == b"fixture-data" * 20
+        assert (
+            wheel.read("sgl_kernel/payload_runtime.py")
+            == b'getattr(manifest, "BINARIES", {})\n'
+        )
+        assert (
+            wheel.read("sgl_kernel_kt.libs/libnuma-fixture.so.1")
+            == b"shared dependency"
+        )
         assert any(
             name.endswith("sgl-native-origin/LICENSE") for name in wheel.namelist()
         )
@@ -80,6 +94,20 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     # Every final RECORD is independently checked, including regenerated payloads.
     for index, path in enumerate(output.iterdir()):
         carriers.unpack(path, tmp_path / f"verify-{index}")
+
+
+def test_payload_retains_wheel_relative_dynamic_library_layout(tmp_path):
+    raw_wheels(tmp_path)
+    root = tmp_path / "sgl-kernel-kt"
+    archive = tmp_path / "payload.tar.gz"
+    hashes = carriers.archive_payload(root, archive)
+    expected = {"sgl_kernel/" + name for name in carriers.LARGE} | {
+        "sgl_kernel_kt.libs/libnuma-fixture.so.1"
+    }
+    assert set(hashes) == expected
+    with tarfile.open(archive) as bundle:
+        assert set(bundle.getnames()) == expected
+    assert (root / "sgl_kernel_kt.libs/libnuma-fixture.so.1").is_file()
 
 
 def test_tampered_raw_wheel_is_rejected(tmp_path):
