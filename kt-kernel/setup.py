@@ -890,6 +890,7 @@ setup(
     python_requires=">=3.10",
     packages=[
         "kt_kernel",
+        "kt_kernel_tools",
         "kt_kernel.utils",
         "kt_kernel.sft",
         "kt_kernel.cli",
@@ -900,6 +901,7 @@ setup(
     ],
     package_dir={
         "kt_kernel": "python",
+        "kt_kernel_tools": "python_tools",
         "kt_kernel.utils": "python/utils",
         "kt_kernel.sft": "python/sft",
         "kt_kernel.cli": "python/cli",
@@ -915,6 +917,8 @@ setup(
     entry_points={
         "console_scripts": [
             "kt=kt_kernel.cli.main:main",
+            "kt-prepare-kimi-data=kt_kernel_tools.prepare_kimi_data:main",
+            "kt-convert-lora=kt_kernel_tools.convert_lora:main",
         ],
     },
     ext_modules=[CMakeExtension("kt_kernel.kt_kernel_ext", str(REPO_ROOT))],

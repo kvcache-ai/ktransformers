@@ -25,8 +25,8 @@ KT_LARGE_ADAPTER_ENV = "KT_LORA_LARGE_ADAPTER_DIR"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "convert_kt_to_sglang_adapter.py"
+    / "python_tools"
+    / "convert_lora.py"
 )
 SPEC = importlib.util.spec_from_file_location("convert_kt_to_sglang_adapter", SCRIPT_PATH)
 converter = importlib.util.module_from_spec(SPEC)

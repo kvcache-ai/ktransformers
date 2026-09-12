@@ -1,5 +1,5 @@
-# LF official main; prepare the JSON once before using template: empty.
-# Two-step smoke, not a complete fine-tuning run.
+# Candidate LF KT build; prepare the JSON once before using template: empty.
+# Four-step save/resume smoke; not a style-training or throughput benchmark.
 model_name_or_path: /path/to/Kimi-K2.5
 trust_remote_code: true
 use_fast_tokenizer: false
@@ -22,9 +22,9 @@ preprocessing_num_workers: 4
 dataloader_num_workers: 0
 output_dir: /path/to/new-kimi-smoke-output
 logging_steps: 1
-save_steps: 5
-save_total_limit: 1
-save_only_model: true
+save_steps: 2
+save_total_limit: 2
+save_only_model: false
 report_to: none
 overwrite_output_dir: false
 per_device_train_batch_size: 1
@@ -33,6 +33,7 @@ learning_rate: 0.0001
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 0
+optim: adamw_torch
 bf16: true
 max_grad_norm: 1.0
 disable_gradient_checkpointing: false
@@ -44,6 +45,7 @@ per_device_eval_batch_size: 1
 prediction_loss_only: true
 seed: 42
 data_seed: 42
+ignore_data_skip: false
 ddp_timeout: 1800
 use_kt: true
 kt_weight_path: /path/to/Kimi-K2.5
@@ -60,5 +62,5 @@ kt_config:
   kt_share_backward_bb: false
   kt_force_fused_expert_lora: true
   kt_model_max_length: 512
-max_steps: 2
-save_strategy: 'no'
+max_steps: 4
+save_strategy: steps

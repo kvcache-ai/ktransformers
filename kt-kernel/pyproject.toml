@@ -53,6 +53,8 @@ test = [
 
 [project.scripts]
 kt = "kt_kernel.cli.main:main"
+kt-prepare-kimi-data = "kt_kernel_tools.prepare_kimi_data:main"
+kt-convert-lora = "kt_kernel_tools.convert_lora:main"
 
 [project.urls]
 Homepage = "https://github.com/kvcache-ai"
@@ -60,6 +62,7 @@ Homepage = "https://github.com/kvcache-ai"
 [tool.setuptools]
 packages = [
   "kt_kernel",
+  "kt_kernel_tools",
   "kt_kernel.utils",
   "kt_kernel.sft",
   "kt_kernel.cli",
@@ -72,6 +75,7 @@ include-package-data = true
 
 [tool.setuptools.package-dir]
 kt_kernel = "python"
+kt_kernel_tools = "python_tools"
 "kt_kernel.utils" = "python/utils"
 "kt_kernel.sft" = "python/sft"
 "kt_kernel.cli" = "python/cli"

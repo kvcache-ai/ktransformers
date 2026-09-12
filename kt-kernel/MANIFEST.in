@@ -20,6 +20,7 @@ include ext_bindings.cpp
 
 # Python package
 recursive-include python *.py
+recursive-include python_tools *.py
 
 # Third-party dependencies (vendored)
 recursive-include third_party *

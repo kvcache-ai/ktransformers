@@ -15,8 +15,8 @@ register_cpu_ci(est_time=5, suite="default")
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "convert_kt_to_sglang_adapter.py"
+    / "python_tools"
+    / "convert_lora.py"
 )
 SPEC = importlib.util.spec_from_file_location("convert_kt_to_sglang_adapter", SCRIPT_PATH)
 converter = importlib.util.module_from_spec(SPEC)
