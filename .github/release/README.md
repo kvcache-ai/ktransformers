@@ -57,8 +57,9 @@ Run workflow
 - 候选阶段不通过、缺一个测试、资源等待超时，均不能进入发布；上传成功但
   正式 PyPI 复验失败，不能标记“发布验收成功”。
 
-Kimi 的[实测配置参考](examples/kimi-k25/README.md)保留原样。它不是本流程
-构建 wheels 的验收证据，也未擅自加入当前约定的三模型必测集合。
+Kimi 的[候选教程](examples/kimi-k25/README.md)包含公共数据准备和保存/续训配置。
+它尚不是干净 wheel 的验收证据，也未被加入自动三模型训练任务；Kimi 的完整
+训练、真续训和新进程推理仍需独立验收。
 
 ## 源码、版本与产物
 
@@ -70,14 +71,15 @@ Kimi 的[实测配置参考](examples/kimi-k25/README.md)保留原样。它不�
   main 选择未用版本，并对齐交叉依赖。不覆盖运行时代码、依赖或版本，不从旧
   post2 wheels 补文件。
 - 首版统一构建五个最终发行包，不实现沿用旧 wheel。SGL payload 分布在 KT、
-  KT-Kernel、SGLang 和 Transformers 中，因此即使某仓 Python 逻辑未改，只要
+  KT-Kernel、SGLang、Transformers 和 Accelerate 中，因此即使某仓 Python 逻辑未改，只要
   载入的新 CUDA 片段变化，其发行版本也必须更新。
 - `carriers.py` 消费本次六个 raw wheels，保留 runtime 文件、许可证和 SM90
   对象；仅生成 payload 清单/分片及 `WHEEL`、`RECORD`，不改 METADATA 依赖和
   版本。SGL native wheel 是中间输入，不作为第六个公开发行包上传。
 - CPython 3.12、Linux x86-64、CUDA 12.8、Torch 2.9.1；全部 KT CPU variants，
-  CUDA `80;86;89;90;120`。auditwheel 修复到 manylinux_2_35 后检查 KT CUDA
-  扩展和 SGL common_ops 的 SASS。编译/静态检查不等于每种显卡实测。
+  CUDA `80;86;89;90;120`。auditwheel 修复到 manylinux_2_35 后检查六个 KT CPU
+  variants；仅含 CUDA fatbin 的扩展检查 SASS，SGL common_ops 必须保留上述架构。
+  不要求纯 CPU 库含有 CUDA SASS。编译/静态检查不等于每种显卡实测。
 - 每个最终 wheel 必须小于 104 MB。超限、缺架构、ABI 不兼容直接失败；不删除
   架构、不伪造 manylinux 标签。新版本 native 体积仍需真实构建确认。
 - 构建、诊断、验收、上传证据分别保留；候选 wheelhouse 保留 90 天。
@@ -124,6 +126,12 @@ Kimi 的[实测配置参考](examples/kimi-k25/README.md)保留原样。它不�
   环境。GPU 容器由 #2195 清理，宿主其他任务不受影响。
 
 ## 本地检查
+
+PEFT/TRL 的获准本地构建由 `repack_training_tools.py` 生成。只替换 Transformers /
+Accelerate 的依赖分发名，保留原有版本范围、markers、全部运行时文件和许可证；
+用显式 local version 和输入/输出 SHA256 区分，不冒充原始上游 wheel。工具拒绝 LF
+重打包和放宽依赖范围。正式交付还需公开提供这两个 wheel 及 provenance；它们不属于
+五个核心 PyPI 项目。本项不解决 LF main 自身的依赖冲突，不能绕过最终安装验收。
 
 依赖 #2195 的文件已在同一源码树中时：
 

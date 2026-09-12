@@ -30,8 +30,17 @@ MODULES = {
     "transformers-kt": "transformers_kt_sgl_kernel_payload",
     "sglang-kt": "sglang_kt_sgl_kernel_payload",
     "ktransformers": "ktransformers_sgl_kernel_payload",
+    "accelerate-kt": "accelerate_kt_sgl_kernel_payload",
 }
 LARGE = ("flash_ops.abi3.so", "sm100/common_ops.abi3.so")
+CPU_VARIANTS = (
+    "avx2",
+    "avx512_base",
+    "avx512_vnni",
+    "avx512_vbmi",
+    "avx512_bf16",
+    "amx",
+)
 
 
 def require(condition, message):
@@ -44,7 +53,12 @@ def unpack(wheel, root):
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         require(len(names) == len(set(names)), "Duplicate ZIP entries")
-        records = [name for name in names if name.endswith(".dist-info/RECORD")]
+        records = [
+            name
+            for name in names
+            if name.endswith(".dist-info/RECORD")
+            and len(PurePosixPath(name).parts) == 2
+        ]
         require(len(records) == 1, "Require one wheel RECORD")
         rows = list(csv.reader(io.StringIO(archive.read(records[0]).decode())))
         record = {row[0]: row[1:] for row in rows}
@@ -159,6 +173,7 @@ def archive_payload(sgl, output):
 
 def binary_evidence(roots):
     evidence = {}
+    variants = {}
     for package, root in roots.items():
         for path in sorted(root.rglob("*.so*")):
             if not path.is_file():
@@ -166,8 +181,20 @@ def binary_evidence(roots):
             sections = subprocess.check_output(
                 ["readelf", "--wide", "--sections", str(path)], text=True
             )
+            name = package + "/" + path.relative_to(root).as_posix()
+            entry = {"sha256": sha256(path), "kind": "host", "sass": []}
+            evidence[name] = entry
+            if package == "kt-kernel" and path.parent == root / "kt_kernel":
+                for variant in CPU_VARIANTS:
+                    if path.name.startswith(f"_kt_kernel_ext_{variant}."):
+                        require(
+                            variant not in variants,
+                            "Duplicate KT CPU variant: " + variant,
+                        )
+                        variants[variant] = name
+                        entry["cpu_variant"] = variant
             if ".nv_fatbin" not in sections and ".nvFatBinSegment" not in sections:
-                # Most KT CPU variants and repaired system libraries have no CUDA code.
+                # Host-only extensions must not be required to contain CUDA SASS.
                 continue
             result = subprocess.run(
                 ["cuobjdump", "--list-elf", str(path)],
@@ -176,10 +203,11 @@ def binary_evidence(roots):
                 check=True,
             )
             arches = sorted(set(re.findall(r"sm_([0-9]+[af]?)", result.stdout)))
-            evidence[package + "/" + path.relative_to(root).as_posix()] = {
-                "sha256": sha256(path),
-                "sass": arches,
-            }
+            entry.update(kind="cuda", sass=arches)
+    require(
+        set(variants) == set(CPU_VARIANTS),
+        "Missing KT CPU variants: " + str(sorted(set(CPU_VARIANTS) - set(variants))),
+    )
     common = evidence.get("sgl-kernel-kt/sgl_kernel/sm100/common_ops.abi3.so", {})
     required = {80, 86, 89, 90, 120}
     normalize = lambda values: {int(re.match(r"[0-9]+", value)[0]) for value in values}
@@ -187,9 +215,13 @@ def binary_evidence(roots):
         required <= normalize(common.get("sass", [])),
         "SGL common_ops is missing required CUDA SASS architectures",
     )
-    kt = [entry for name, entry in evidence.items() if name.startswith("kt-kernel/")]
+    kt = [
+        entry
+        for name, entry in evidence.items()
+        if name.startswith("kt-kernel/") and entry["kind"] == "cuda"
+    ]
     require(
-        any(required <= normalize(entry["sass"]) for entry in kt),
+        not kt or any(required <= normalize(entry["sass"]) for entry in kt),
         "KT CUDA extension is missing required SASS architectures",
     )
     return evidence
@@ -201,7 +233,7 @@ def assemble(raw, output, evidence_dir):
         inspect_wheel(path) | {"path": path} for path in sorted(raw.glob("*.whl"))
     ]
     by_name = {entry["name"]: entry for entry in entries}
-    expected = set(MODULES) | {"accelerate-kt", "sgl-kernel-kt"}
+    expected = set(MODULES) | {"sgl-kernel-kt"}
     require(
         set(by_name) == expected and len(entries) == len(expected),
         "Need six fresh inputs",
@@ -355,12 +387,6 @@ def assemble(raw, output, evidence_dir):
                     "Carrier changed dependency metadata",
                 )
             require(remaining == 0 and not source.read(1), "Incomplete payload split")
-        accelerate = by_name["accelerate-kt"]["path"]
-        require(
-            accelerate.stat().st_size < LIMIT,
-            "Accelerate wheel exceeds PyPI size limit",
-        )
-        shutil.copyfile(accelerate, output / accelerate.name)
         save_json(
             evidence_dir / "assembly.json",
             {
