@@ -16,11 +16,12 @@
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md).
 
 ## 🔥 Updates
+* **Sep 13, 2026**: **Kimi K2.5 / K2.6 LoRA fine-tuning** is supported with native RAWINT4 routed experts.
 * **Aug 26, 2026**: Added native support for **GLM-5.3-flash**, bringing 1M-token context and multimodal input to consumer GPUs. ([Tutorial](./doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md))
 * **Aug 25, 2026**: Uploaded a new easy-to-use [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md), covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.
 * **Aug 17, 2026**: LoRA fine-tuning now supports compatible AVX512 x86 CPUs, including AMD servers, without requiring AMX. ([v0.7.0 Release Notes](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0))
 * **Aug 16, 2026**: DeepSeek-V4-Flash on a single Ascend NPU with CPU expert offload. ([Tutorial](./doc/en/DeepSeek-V4-Flash_tutorial_for_Ascend_NPU.md))
-* **Aug 5, 2026**: Introduced native block-FP8 LoRA fine-tuning, loading FP8 routed-expert weights directly from the checkpoint without materializing a complete BF16 copy. ([PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141))
+* **Aug 5, 2026**: Introduced native block-FP8 LoRA fine-tuning ([PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141))
 * **July 23, 2026**: Added end-to-end BF16 full-parameter fine-tuning for MoE models, including complete checkpoint saving. ([PR #2094](https://github.com/kvcache-ai/ktransformers/pull/2094))
 * **June 21, 2026**: MiniMax-M3 Day0 Support! ([Tutorial](./doc/en/kt-kernel/MiniMax-M3-Tutorial.md))
 * **June 17, 2026**: GLM-5.2 Day0 Support! ([Tutorial](./doc/en/kt-kernel/GLM-5.2-Tutorial.md))
@@ -100,6 +101,8 @@ pip install .
 ### 🎓 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md) - Fine-Tuning with LlamaFactory
 
 KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.
+
+**Kimi K2.5 / K2.6 LoRA fine-tuning** is supported with native RAWINT4 routed experts. Follow the [PyPI installation, training, resume and SGLang serving guide (中文)](./.github/release/examples/kimi-k25/README.md). End-to-end validation uses Kimi K2.5; K2.6 follows the same model-architecture path.
 
 ![LlamaFactory and KTransformers MoE fine-tuning architecture](./doc/assets/llamafactory-kt-integration-overview.png)
 

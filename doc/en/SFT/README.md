@@ -1,5 +1,6 @@
 # KTransformers SFT Docs
 
+- [Kimi K2.5: PyPI Install, LoRA Training, Resume and Serving (中文)](../../../.github/release/examples/kimi-k25/README.md)
 - [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](./KTransformers-Fine-Tuning_Cookbook.md)
 - [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook (中文)](../../zh/KTransformers-Fine-Tuning_Cookbook_zh.md)
 - [v0.6.1 Quick Start](./KTransformers-Fine-Tuning_Quick-Start.md)

@@ -1,5 +1,9 @@
 # Kimi-K2.5 LoRA SFT Tutorial
 
+> For the `0.7.0.post4` wheel release, use the
+> [PyPI installation, training, resume and serving tutorial (中文)](../../.github/release/examples/kimi-k25/README.md).
+> The source-install instructions below describe an older release; do not mix the two environments.
+
 This tutorial demonstrates how to perform **LoRA Supervised Fine-Tuning (SFT)** on **Kimi-K2.5** using **LlamaFactory** with **KTransformers** as the backend, and then serve the fine-tuned model using **SGLang**.
 
 The workflow is:

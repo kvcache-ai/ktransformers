@@ -1,5 +1,5 @@
-# post4 user kit: examples/train-smoke.yaml; see README.md for installation.
-# Four-step save/resume smoke; prepare the JSON before using template: empty.
+# post4 user kit: examples/train-neko.yaml; see README.md for installation.
+# One epoch; retain checkpoint-100 without changing the scheduler horizon.
 model_name_or_path: /path/to/Kimi-K2.5
 trust_remote_code: true
 use_fast_tokenizer: false
@@ -14,21 +14,21 @@ lora_target: q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj
 dataset_dir: /path/to/prepared-neko
 dataset: neko_train
 template: empty
-cutoff_len: 512
+cutoff_len: 4096
 packing: false
 neat_packing: false
 train_on_prompt: false
 preprocessing_num_workers: 1
 dataloader_num_workers: 0
-output_dir: /path/to/new-smoke-output
+output_dir: /path/to/new-neko-output
 logging_steps: 1
-save_steps: 2
+save_steps: 100
 save_total_limit: 2
 save_only_model: false
 report_to: none
 overwrite_output_dir: false
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 8
 learning_rate: 0.0001
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
@@ -37,9 +37,9 @@ bf16: true
 max_grad_norm: 1.0
 disable_gradient_checkpointing: false
 use_reentrant_gc: false
-do_eval: false
-eval_strategy: 'no'
-eval_steps: 50
+do_eval: true
+eval_strategy: steps
+eval_steps: 100
 per_device_eval_batch_size: 1
 prediction_loss_only: true
 seed: 42
@@ -59,8 +59,9 @@ kt_config:
   kt_max_cache_depth: 2
   kt_share_backward_bb: false
   kt_force_fused_expert_lora: true
-  kt_model_max_length: 512
-max_steps: 4
+  kt_model_max_length: 4096
+max_steps: -1
 save_strategy: steps
-max_samples: 64
 ignore_data_skip: false
+warmup_ratio: 0.03
+eval_dataset: neko_eval

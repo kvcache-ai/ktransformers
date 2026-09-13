@@ -88,6 +88,8 @@ pip install .
 
 KTransformers × LlamaFactory 集成，面向超大 MoE 模型微调。新的 Cookbook 提供从硬件检查、环境安装到 BF16/FP8/INT8 配置、LoRA/全量训练、资源规划和故障排查的易用流程。
 
+**支持 Kimi K2.5 / K2.6 LoRA 微调**，保留 routed experts 的原生 RAWINT4 权重。参见 [PyPI 安装、训练、续训与 SGLang 推理教程](./.github/release/examples/kimi-k25/README.md)。端到端实机验证使用 Kimi K2.5；K2.6 沿用相同模型架构路径。
+
 ![LlamaFactory 与 KTransformers MoE 微调架构](./doc/assets/llamafactory-kt-integration-overview.png)
 
 **主要特性:**
