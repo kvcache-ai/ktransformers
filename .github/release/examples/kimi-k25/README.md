@@ -9,13 +9,13 @@
 
 ## 开始前
 
-下面是**已验证的配置，不是最低硬件要求**：
+实测参考配置：
 
 | 项目 | 配置 |
 | --- | --- |
 | GPU | 8 张 RTX 5090 训练，4 张 RTX 5090 推理 |
 | CPU / 内存 | 双 AMD EPYC 9355，约 1.5 TiB RAM |
-| 系统 | Linux x86_64、glibc 2.35+、Python 3.12 |
+| 系统 | Linux x86_64、glibc 2.35+；Python 3.11 / 3.12 分别验收 |
 | CUDA | CUDA 12.8 工具链、C++ 编译器；实测驱动 580.173.02 |
 
 确认 `nvidia-smi`、`nvcc --version` 正常，使用的 GPU 空闲。磁盘除了容纳完整
@@ -23,14 +23,12 @@
 推理 LoRA 约 9.6 GiB**。本训练配置最多保留两个 checkpoint，另有最终 LoRA
 和临时文件；请使用空间充足的持久化磁盘，不要把输出放到 `/dev/shm`。
 
-本教程验证的是 **K2.5 纯文本训练**。K2.6 沿用相同架构路径，但未单独实机验收；
-视觉训练不在本教程范围内。
+本文介绍 **Kimi K2.5 纯文本 LoRA 微调**。
 
 ## 1. 安装
 
 **核心组件从 PyPI 安装；LF、PEFT、TRL 三个配套安装包随 Release 工具包提供。**
-下面的 pip 命令会一起安装，不需要克隆仓库或修改源码。仅执行
-`pip install ktransformers` 还不能得到完整的训练环境。
+按以下命令安装完整的训练与推理环境，无需克隆仓库或修改源码。
 
 在容量充足的磁盘上打开 Bash，下载并解压工具包：
 
@@ -38,11 +36,11 @@
 mkdir kimi-post4-work
 cd kimi-post4-work
 curl --fail --location --retry 5 --remote-name \
-  https://github.com/kvcache-ai/ktransformers/releases/download/v0.7.0.post4/kimi-k25-post4-user-kit.tar.gz
+  https://github.com/kvcache-ai/ktransformers/releases/download/v0.7.0.post4/kimi-k25-post4-user-kit-r2.tar.gz
 printf '%s  %s\n' \
-  f9b6ca3dcde3e9349e8bddb92d3a48cdf4c4cfbddb274b17685053abba4aaa26 \
-  kimi-k25-post4-user-kit.tar.gz | sha256sum --check
-tar -xzf kimi-k25-post4-user-kit.tar.gz
+  88fa5e473e06b67b5ac39605de82da09207ba1b82555f6d4b98d2b6a81de8813 \
+  kimi-k25-post4-user-kit-r2.tar.gz | sha256sum --check
+tar -xzf kimi-k25-post4-user-kit-r2.tar.gz
 cd kimi-k25-post4
 ```
 
@@ -50,7 +48,8 @@ cd kimi-k25-post4
 训练 YAML、数据处理脚本和安装清单。
 
 接着创建两个独立环境：`train-env` 用于训练，`serve-env` 用于推理，避免两套
-依赖相互影响。无需手动激活环境。国内网络可按注释换成清华源：
+依赖相互影响。两者使用同一种 Python，无需手动激活环境。
+只需选择下面的 `KIMI_PYTHON`，安装清单会自动匹配；国内网络可换成清华源：
 
 ```bash
 unset PYTHONPATH PYTHONHOME
@@ -62,19 +61,25 @@ export TMPDIR="$PWD/tmp"
 mkdir -p "$TMPDIR"
 export KIMI_PYPI_INDEX=https://pypi.org/simple
 # 国内网络可将上行替换为：https://pypi.tuna.tsinghua.edu.cn/simple
-python3.12 -m venv train-env
+KIMI_PYTHON=python3.12  # 使用 Python 3.11 时改为 python3.11
+KIMI_PYTHON_TAG=$("$KIMI_PYTHON" -c '
+import sys
+assert sys.version_info[:2] in ((3, 11), (3, 12)), "Use Python 3.11 or 3.12"
+print("cp%d%d" % sys.version_info[:2])
+') || exit 1
+"$KIMI_PYTHON" -m venv train-env
 train-env/bin/python -m pip install --index-url "$KIMI_PYPI_INDEX" pip==25.2
 train-env/bin/python -m pip install \
   --index-url "$KIMI_PYPI_INDEX" --timeout 120 --retries 10 --resume-retries 10 \
   --only-binary=:all: --no-binary=antlr4-python3-runtime \
-  --require-hashes --find-links training-tools -r locks/train.lock
+  --require-hashes --find-links training-tools -r "locks/$KIMI_PYTHON_TAG/train.lock"
 train-env/bin/python -m pip check
 
-python3.12 -m venv serve-env
+"$KIMI_PYTHON" -m venv serve-env
 serve-env/bin/python -m pip install --index-url "$KIMI_PYPI_INDEX" pip==25.2
 serve-env/bin/python -m pip install \
   --index-url "$KIMI_PYPI_INDEX" --timeout 120 --retries 10 --resume-retries 10 \
-  --only-binary=:all: --require-hashes -r locks/serve.lock
+  --only-binary=:all: --require-hashes -r "locks/$KIMI_PYTHON_TAG/serve.lock"
 serve-env/bin/python -m pip check
 ```
 
@@ -202,7 +207,7 @@ curl --noproxy 127.0.0.1 --fail http://127.0.0.1:30000/v1/chat/completions \
 <summary>4 步试跑与续训：想先确认环境能跑通时使用</summary>
 
 在完成第 1、2 步后运行，使用相同终端和工作目录，确认 8 张 GPU 空闲。
-它只验证训练、保存、续训和加载，**4 步不足以学会 Neko 风格**。
+4 步用于验证训练、保存、续训和加载；风格训练请使用第 3 步的正式配置。
 两次试跑和一次 adapter 转换另需至少 140 GiB 持久化磁盘空间，不含模型、环境和缓存。
 
 先运行 4 步，输出单独放在 `smoke-a/`，不影响正式训练目录：
@@ -288,9 +293,8 @@ PY
 打开 `neko-heldout-responses.jsonl`，检查 `choices[0].message.content` 和
 `finish_reason`。若为 `length`，回答被长度上限截断，不能算完整回答。
 
-此前 checkpoint-100 的验证 loss 为 1.1463，32 条回答均呈现明显风格，
-但两项严格输出格式测试失败。风格变化不代表通用能力或指令遵循没有损失；
-建议另外测试“17+25 只输出数字”、原样输出文字和 JSON 格式指令。
+除语气变化外，建议同时检查事实准确性和指令遵循，例如“17+25 只输出数字”、
+原样输出文字和 JSON 格式指令。
 
 </details>
 
@@ -303,7 +307,7 @@ PY
 | `hf download` 超时 | 检查 Hugging Face 连通性；可在联网机器下载固定 revision 后完整拷贝，换 PyPI 源对此无效。 |
 | pip 依赖冲突、找不到 LF/PEFT/TRL 版本 | 是否在新环境，是否下载了配套资料包并使用 `--find-links training-tools`。 |
 | 训练 loss 异常或模板重复 | 是否先执行数据准备，且保持 `template: empty`、`packing: false`。 |
-| 加载时 rank 0 消失、Gloo connection closed | 查看 rank 0 日志、主机 OOM 记录和可用 RAM；模型加载的内存峰值可能高于稳定训练，避免同时加载多个模型。 |
+| 加载时 rank 0 消失、Gloo connection closed | 查看 rank 0 日志、主机 OOM 记录和各 NUMA 节点的可用 RAM；全机仍有空闲内存时也可能单节点不足。避免把大量 checkpoint 放进 RAM 或同时加载多个模型。 |
 | 续训变成从零开始 | 是否传入完整 checkpoint 的 `resume_from_checkpoint`，而非只加载 adapter。 |
 | 推理像 base 或只有部分变化 | 转换是否包含两类 LoRA，是否以新进程加载，expert 1–60 层是否都加载，以及请求名是否为 `kimi:neko`。 |
 
@@ -330,6 +334,10 @@ PEFT/TRL 只调整依赖元数据，不修改运行时代码；这三个配套�
 上游 `transformers` / `accelerate` 与 KT 包使用同名 Python 模块，不能混装。
 安装使用 Torch 2.9.1；ANTLR 4.9.3 从校验过的官方源码包构建，其余依赖使用 wheel。
 
+`locks/cp311/` 和 `locks/cp312/` 分别固定对应解释器的版本及文件哈希。
+3.11 使用 NumPy 2.4.6、SciPy 1.17.1、ContourPy 1.3.3；3.12 保留已验收版本。
+两种 Python 共用相同训练 YAML，不需要修改训练参数。
+
 仓库与工具包的 YAML 配置值一致，文件对应关系如下：
 
 | 仓库文件 | 工具包内文件 | 用途 |
@@ -341,7 +349,7 @@ PEFT/TRL 只调整依赖元数据，不修改运行时代码；这三个配套�
 数据按 seed 42 去重划分为 9,477 条训练、468 条验证、32 条独立问答。
 预处理使用 Kimi 原生 non-thinking 模板，只有回答参与 loss；保持
 `template: empty`、`train_on_prompt: false`，不要直接传入未经处理的 Neko JSON。
-处理后的最长样本为 2,120 token，本教程不做满长吞吐测试。
+处理后的最长样本为 2,120 token。
 
 完整 checkpoint 应包含以下内容，`save_only_model: false` 必须保留：
 
@@ -371,13 +379,11 @@ for name in ("adapter_model.safetensors", "fused_expert_lora.safetensors"):
 PY
 ```
 
-两项都应输出 `EXACT_RESUME_PASSED`。公开包验收还比较了各 rank 的 optimizer、
+两项都应输出 `EXACT_RESUME_PASSED`。完整验收还比较了各 rank 的 optimizer、
 RNG、scheduler 和恢复后的 loss。adapter 转换导出 610 个普通 LoRA tensor 和
 138,240 个 expert LoRA tensor，SGLang 加载了第 1–60 个 expert 层。
 
-验收记录见 [PUBLIC_WHEEL_VERIFICATION.json](https://github.com/kvcache-ai/ktransformers/releases/download/v0.7.0.post4/PUBLIC_WHEEL_VERIFICATION.json)。
-它记录的是 4 步训练、续训和推理闭环；前文 checkpoint-100 的风格结果来自另一次训练。
-工具包内 `PUBLICATION.json` 记录包的校验值，`main-equivalence.json` 记录源码来源证明。
+源码来源、包校验值和验收结果见[发布与验证记录](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0.post4)。
 保留训练日志、完整 checkpoint、数据划分记录和推理响应，便于复现自己的结果。
 
 </details>
