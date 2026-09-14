@@ -1,8 +1,5 @@
 # Kimi K2.5 LoRA 微调：安装、训练与对话
 
-> r2 工具包和 Python 3.11 wheel 已上传 GitHub Release；cp311 补包尚未上传 PyPI。
-> 下列 PyPI 安装命令目前请使用 Python 3.12；3.11 的候选验收已通过，待补包发布。
-
 本教程使用 KTransformers `0.7.0.post4` 和 NekoQA 数据集，让 Kimi K2.5
 学会猫娘风格的语气，再用 SGLang 加载训练结果进行对话。原始模型权重不变，
 训练结果单独保存为 LoRA。
