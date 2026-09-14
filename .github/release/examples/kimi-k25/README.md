@@ -9,7 +9,7 @@
 
 ## 开始前
 
-下面是**已验证的配置，不是最低硬件要求**：
+实测参考配置：
 
 | 项目 | 配置 |
 | --- | --- |
@@ -23,14 +23,12 @@
 推理 LoRA 约 9.6 GiB**。本训练配置最多保留两个 checkpoint，另有最终 LoRA
 和临时文件；请使用空间充足的持久化磁盘，不要把输出放到 `/dev/shm`。
 
-本教程验证的是 **K2.5 纯文本训练**。K2.6 沿用相同架构路径，但未单独实机验收；
-视觉训练不在本教程范围内。
+本文介绍 **Kimi K2.5 纯文本 LoRA 微调**。
 
 ## 1. 安装
 
 **核心组件从 PyPI 安装；LF、PEFT、TRL 三个配套安装包随 Release 工具包提供。**
-下面的 pip 命令会一起安装，不需要克隆仓库或修改源码。仅执行
-`pip install ktransformers` 还不能得到完整的训练环境。
+按以下命令安装完整的训练与推理环境，无需克隆仓库或修改源码。
 
 在容量充足的磁盘上打开 Bash，下载并解压工具包：
 
@@ -88,9 +86,6 @@ serve-env/bin/python -m pip check
 **安装成功的标志：**两次 `pip check` 都输出 `No broken requirements found.`。
 安装清单已固定配套版本，请不要再往这两个环境里安装上游 `transformers`、
 `accelerate` 或替换为最新版 LLaMA-Factory。
-
-Python 3.11 请使用 **r2 工具包**，不能套用旧版的 Python 3.12 依赖锁或重命名
-cp312 wheel。若镜像暂未同步补包，切回上面的 PyPI 官方源。
 
 ## 2. 准备模型和数据
 
@@ -212,7 +207,7 @@ curl --noproxy 127.0.0.1 --fail http://127.0.0.1:30000/v1/chat/completions \
 <summary>4 步试跑与续训：想先确认环境能跑通时使用</summary>
 
 在完成第 1、2 步后运行，使用相同终端和工作目录，确认 8 张 GPU 空闲。
-它只验证训练、保存、续训和加载，**4 步不足以学会 Neko 风格**。
+4 步用于验证训练、保存、续训和加载；风格训练请使用第 3 步的正式配置。
 两次试跑和一次 adapter 转换另需至少 140 GiB 持久化磁盘空间，不含模型、环境和缓存。
 
 先运行 4 步，输出单独放在 `smoke-a/`，不影响正式训练目录：
@@ -298,10 +293,8 @@ PY
 打开 `neko-heldout-responses.jsonl`，检查 `choices[0].message.content` 和
 `finish_reason`。若为 `length`，回答被长度上限截断，不能算完整回答。
 
-此前 checkpoint-100 的验证 loss 为 1.1463，32 条回答均呈现明显风格，
-但两项严格输出格式测试失败。风格变化不代表通用能力或指令遵循没有损失；
-建议另外测试“17+25 只输出数字”、原样输出文字和 JSON 格式指令。
-本样例仅演示语气适配；部分回答存在事实错误或回应不足，不能作为高风险任务的可靠性证明。
+除语气变化外，建议同时检查事实准确性和指令遵循，例如“17+25 只输出数字”、
+原样输出文字和 JSON 格式指令。
 
 </details>
 
@@ -356,7 +349,7 @@ PEFT/TRL 只调整依赖元数据，不修改运行时代码；这三个配套�
 数据按 seed 42 去重划分为 9,477 条训练、468 条验证、32 条独立问答。
 预处理使用 Kimi 原生 non-thinking 模板，只有回答参与 loss；保持
 `template: empty`、`train_on_prompt: false`，不要直接传入未经处理的 Neko JSON。
-处理后的最长样本为 2,120 token，本教程不做满长吞吐测试。
+处理后的最长样本为 2,120 token。
 
 完整 checkpoint 应包含以下内容，`save_only_model: false` 必须保留：
 
@@ -390,11 +383,7 @@ PY
 RNG、scheduler 和恢复后的 loss。adapter 转换导出 610 个普通 LoRA tensor 和
 138,240 个 expert LoRA tensor，SGLang 加载了第 1–60 个 expert 层。
 
-原始 Python 3.12 公开包验收见 [PUBLIC_WHEEL_VERIFICATION.json](https://github.com/kvcache-ai/ktransformers/releases/download/v0.7.0.post4/PUBLIC_WHEEL_VERIFICATION.json)。
-r2 工具包中的 `PYTHON_COMPATIBILITY.json` 分别记录两种 Python 的验收结果；
-4 步闭环与 checkpoint-100 的风格验证分开记录，不互相替代。
-`PUBLICATION.json` 记录原始五个公开包，`CP311-SUPPLEMENT.json` 记录 3.11 补包的校验值，
-`main-equivalence.json` 记录原始发布的源码来源证明。
+源码来源、包校验值和验收结果见[发布与验证记录](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0.post4)。
 保留训练日志、完整 checkpoint、数据划分记录和推理响应，便于复现自己的结果。
 
 </details>
