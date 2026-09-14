@@ -97,22 +97,51 @@ struct GemmKernelAVX2MXFP4 {
 
   // ---- Buffer types --------------------------------------------------------
 
+  // Decode emission order of the 256-bit PSHUFB group decode in gemm_mxfp4:
+  // activations are stored pre-permuted so the inner loops pair weights and
+  // activations with plain loads.
+  static constexpr int kGroupPerm[32] = {0,  2,  4,  6,  1,  3,  5,  7,  8,  10, 12, 14, 9,  11, 13, 15,
+                                         16, 18, 20, 22, 17, 19, 21, 23, 24, 26, 28, 30, 25, 27, 29, 31};
+
   struct BufferA {
     ggml_bf16_t* data = nullptr;
+    // Pre-permuted FP32 copy of the same rows (null when k % 32 != 0). Filled
+    // once per expert by from_mat. Previously every gemm_mxfp4 call — one per
+    // 64-row weight slice, 36-80 per expert in prefill — redid this conversion
+    // for the whole m x k block, which was ~40% of such a task.
+    float* perm = nullptr;
     size_t max_m = 0, k = 0;
 
     BufferA() = default;
-    BufferA(size_t m, size_t k_, int /*group_size*/, void* ptr) : data((ggml_bf16_t*)ptr), max_m(m), k(k_) {}
+    BufferA(size_t m, size_t k_, int /*group_size*/, void* ptr) : max_m(m), k(k_) { set_data(ptr); }
 
-    static size_t required_size(size_t m, size_t k, int /*group_size*/) { return m * k * sizeof(ggml_bf16_t); }
-    void set_data(void* ptr) { data = (ggml_bf16_t*)ptr; }
+    static size_t required_size(size_t m, size_t k, int /*group_size*/) {
+      return m * k * (sizeof(ggml_bf16_t) + sizeof(float));
+    }
+    void set_data(void* ptr) {
+      data = (ggml_bf16_t*)ptr;
+      perm = (k % 32 == 0) ? (float*)((uint8_t*)ptr + max_m * k * sizeof(ggml_bf16_t)) : nullptr;
+    }
 
     void from_mat(int m, const ggml_bf16_t* src, int ith, int nth) {
-      if (ith == 0 && nth == 1) {
-        std::memcpy(data, src, (size_t)m * k * sizeof(ggml_bf16_t));
-      } else {
-        auto [m_start, m_end] = split_range(m, ith, nth);
-        std::memcpy(data + m_start * k, src + m_start * k, (size_t)(m_end - m_start) * k * sizeof(ggml_bf16_t));
+      int m_start = 0, m_end = m;
+      if (!(ith == 0 && nth == 1)) {
+        auto r = split_range(m, ith, nth);
+        m_start = r.first;
+        m_end = r.second;
+      }
+      std::memcpy(data + (size_t)m_start * k, src + (size_t)m_start * k,
+                  (size_t)(m_end - m_start) * k * sizeof(ggml_bf16_t));
+      if (perm == nullptr) return;
+      const int groups = (int)(k / 32);
+      for (int mi = m_start; mi < m_end; mi++) {
+        const ggml_bf16_t* a_row = src + (size_t)mi * k;
+        float* p_row = perm + (size_t)mi * k;
+        for (int g = 0; g < groups; g++) {
+          const int base = g * 32;
+          float* dst = p_row + base;
+          for (int j = 0; j < 32; j++) dst[j] = GGML_BF16_TO_FP32(a_row[base + kGroupPerm[j]]);
+        }
       }
     }
   };
@@ -214,21 +243,24 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   // single-row loop.  Very large per-expert batches fall back to the generic
   // path to bound the per-thread FP32 staging buffer.
   // --------------------------------------------------------------------------
-  if (group_size == 32 && (k % 32) == 0 && (size_t)m * (size_t)k <= (size_t)(4 << 20)) {
+  if (group_size == 32 && (k % 32) == 0 && (a.perm != nullptr || (size_t)m * (size_t)k <= (size_t)(4 << 20))) {
     // Decode emission order within each 32-value group (see w0..w3 below).
-    static constexpr int kPerm[32] = {0,  2,  4,  6,  1,  3,  5,  7,  8,  10, 12, 14, 9,  11, 13, 15,
-                                      16, 18, 20, 22, 17, 19, 21, 23, 24, 26, 28, 30, 25, 27, 29, 31};
+    const int* kPerm = GemmKernelAVX2MXFP4::kGroupPerm;
     static thread_local std::vector<float> a_perm_storage;
-    if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
-    float* a_perm = a_perm_storage.data();
-    for (int mi = 0; mi < m; mi++) {
-      const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
-      float* p_row = a_perm + (size_t)mi * k;
-      for (int g = 0; g < group_count; g++) {
-        const int base = g * 32;
-        float* dst = p_row + base;
-        for (int j = 0; j < 32; j++) dst[j] = GGML_BF16_TO_FP32(a_row[base + kPerm[j]]);
+    const float* a_perm = a.perm;
+    if (a_perm == nullptr) {
+      if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
+      float* tmp = a_perm_storage.data();
+      for (int mi = 0; mi < m; mi++) {
+        const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
+        float* p_row = tmp + (size_t)mi * k;
+        for (int g = 0; g < group_count; g++) {
+          const int base = g * 32;
+          float* dst = p_row + base;
+          for (int j = 0; j < 32; j++) dst[j] = GGML_BF16_TO_FP32(a_row[base + kPerm[j]]);
+        }
       }
+      a_perm = tmp;
     }
 
     const __m256i lut_lo256 = _mm256_broadcastsi128_si256(lut_lo);
@@ -344,21 +376,24 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   // because kPerm never crosses the 16-value halves (indices 0-15 stay in the
   // first half, 16-31 in the second).
   // --------------------------------------------------------------------------
-  if (group_size == 16 && (k % 32) == 0 && (size_t)m * (size_t)k <= (size_t)(4 << 20)) {
-    static constexpr int kPerm[32] = {0,  2,  4,  6,  1,  3,  5,  7,  8,  10, 12, 14, 9,  11, 13, 15,
-                                      16, 18, 20, 22, 17, 19, 21, 23, 24, 26, 28, 30, 25, 27, 29, 31};
+  if (group_size == 16 && (k % 32) == 0 && (a.perm != nullptr || (size_t)m * (size_t)k <= (size_t)(4 << 20))) {
+    const int* kPerm = GemmKernelAVX2MXFP4::kGroupPerm;
     static thread_local std::vector<float> a_perm_storage;
-    if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
-    float* a_perm = a_perm_storage.data();
     const int block_count = k / 32;  // 32-value decode blocks; 2 groups each
-    for (int mi = 0; mi < m; mi++) {
-      const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
-      float* p_row = a_perm + (size_t)mi * k;
-      for (int blk = 0; blk < block_count; blk++) {
-        const int base = blk * 32;
-        float* dst = p_row + base;
-        for (int j = 0; j < 32; j++) dst[j] = GGML_BF16_TO_FP32(a_row[base + kPerm[j]]);
+    const float* a_perm = a.perm;
+    if (a_perm == nullptr) {
+      if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
+      float* tmp = a_perm_storage.data();
+      for (int mi = 0; mi < m; mi++) {
+        const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
+        float* p_row = tmp + (size_t)mi * k;
+        for (int blk = 0; blk < block_count; blk++) {
+          const int base = blk * 32;
+          float* dst = p_row + base;
+          for (int j = 0; j < 32; j++) dst[j] = GGML_BF16_TO_FP32(a_row[base + kPerm[j]]);
+        }
       }
+      a_perm = tmp;
     }
 
     const __m256i lut_lo256 = _mm256_broadcastsi128_si256(lut_lo);
