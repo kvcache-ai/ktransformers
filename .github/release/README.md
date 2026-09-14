@@ -110,6 +110,31 @@ Kimi 的[实测配置参考](examples/kimi-k25/README.md)保留原样。它不�
 自动 push 触发，手动点击旧入口会提示迁移并失败，旧发布 jobs 不会执行，避免
 绕过新门禁。旧实现暂留文件中供审阅/追溯。
 
+## 为已发布版本补充 CPython wheel
+
+`supplement.py` 用于增加 Python 3.11 / 3.12 的缺失 wheel，不重分配已经发布的
+CUDA 载荷，也不覆盖已有文件。先从该版本的固定源码编译并 auditwheel 修复
+KT 和 SGL 两个 native wheel；SGL 的 `_mscclpp` 也必须匹配目标 Python。
+
+输入包含五个原始发行包、两个新 native wheel，以及固定它们 SHA256 和源码
+来源的 JSON。工具仅替换 CPython 扩展，保留原来的 Python 代码、ABI3 对象、
+CUDA 分片及依赖元数据；不一致或超过包体限制时失败，须另做新版本发布。
+独立的 MSCCL++ C++ 库也保留原始字节；新绑定不能动态依赖这些保留的库。
+检查需要 `readelf`，不代替源码审核、native 链接审计和实机验证。
+将 `KT_NATIVE_WHEEL`、`SGL_NATIVE_WHEEL` 设为修复后的两个 wheel 路径，再执行：
+
+```bash
+python .github/release/supplement.py \
+  --reference accepted-wheels \
+  --kt-wheel "$KT_NATIVE_WHEEL" --sgl-wheel "$SGL_NATIVE_WHEEL" \
+  --lock supplement-inputs.json --output supplement-wheels --evidence evidence
+```
+
+JSON 字段：`reference_wheels`、`native_wheels` 均为文件名到 SHA256 的映射；
+`source_lock` 记录这批编译的固定源码证明。生成结果只是候选包：两个 Python
+环境都要独立验证 Kimi 训练、真续训和 LoRA 推理，上传仍需维护者批准。
+补包不调用现有“所有版本必须未使用”的整套发布流程。
+
 ## 失败与重试
 
 - 构建/候选验收失败：没有上传。修改源码后重新运行，得到新快照。
