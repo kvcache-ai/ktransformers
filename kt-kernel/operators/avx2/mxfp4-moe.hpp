@@ -110,6 +110,13 @@ struct GemmKernelAVX2MXFP4 {
     // 64-row weight slice, 36-80 per expert in prefill — redid this conversion
     // for the whole m x k block, which was ~40% of such a task.
     float* perm = nullptr;
+    // Rows the pre-permuted copy holds. Filled by from_mat only for prefill-
+    // sized inputs: writing and reading it for the 1-8 rows of a decode step
+    // cost 13-30% of single-stream decode (Qwen3.8-Flash-Next 36.4 -> 31.7
+    // tok/s, DeepSeek V4.1-Flash 34 -> 24), while the gemm's own per-thread
+    // scratch stays hot in cache at those sizes.
+    int perm_m = 0;
+    static constexpr int kPermMinRows = 16;
     size_t max_m = 0, k = 0;
 
     BufferA() = default;
@@ -132,7 +139,11 @@ struct GemmKernelAVX2MXFP4 {
       }
       std::memcpy(data + (size_t)m_start * k, src + (size_t)m_start * k,
                   (size_t)(m_end - m_start) * k * sizeof(ggml_bf16_t));
-      if (perm == nullptr) return;
+      if (perm == nullptr || m < kPermMinRows) {
+        perm_m = 0;
+        return;
+      }
+      perm_m = m;
       const int groups = (int)(k / 32);
       for (int mi = m_start; mi < m_end; mi++) {
         const ggml_bf16_t* a_row = src + (size_t)mi * k;
@@ -247,7 +258,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
     // Decode emission order within each 32-value group (see w0..w3 below).
     const int* kPerm = GemmKernelAVX2MXFP4::kGroupPerm;
     static thread_local std::vector<float> a_perm_storage;
-    const float* a_perm = a.perm;
+    const float* a_perm = (a.perm != nullptr && a.perm_m >= m) ? a.perm : nullptr;
     if (a_perm == nullptr) {
       if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
       float* tmp = a_perm_storage.data();
@@ -380,7 +391,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
     const int* kPerm = GemmKernelAVX2MXFP4::kGroupPerm;
     static thread_local std::vector<float> a_perm_storage;
     const int block_count = k / 32;  // 32-value decode blocks; 2 groups each
-    const float* a_perm = a.perm;
+    const float* a_perm = (a.perm != nullptr && a.perm_m >= m) ? a.perm : nullptr;
     if (a_perm == nullptr) {
       if (a_perm_storage.size() < (size_t)m * k) a_perm_storage.resize((size_t)m * k);
       float* tmp = a_perm_storage.data();
