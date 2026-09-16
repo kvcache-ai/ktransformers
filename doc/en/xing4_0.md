@@ -1,19 +1,20 @@
-# Running XingChen4 with SGLang in KTransformers
+# Running Xing with SGLang in KTransformers
 
-This guide shows how to run XingChen4 (`XingChen4ForCausalLM`) with
+This guide shows how to run Xing (`Xing4_0ForCausalLM`) with
 KTransformers and the bundled `third_party/sglang` code.
 
-The names and configuration values below follow the current implementation in
-`sglang/srt/configs/xingchen4.py` and `sglang/srt/models/xingchen4.py`.
+The checkpoint architecture and model type below follow the supplied `config.json`.
+The runtime implementation names remain those in
+`sglang/srt/configs/xing4_0.py` and `sglang/srt/models/xing4_0.py`.
 
 ## Model profile
 
-XingChen4 uses a 40-layer decoder architecture with MLA attention, MoE feed-forward
+Xing uses a 40-layer decoder architecture with MLA attention, MoE feed-forward
 layers, and mHC (Manifold-constrained Hyper-Connection) residual streams.
 
-- Architecture: `XingChen4ForCausalLM`
-- Configuration class: `XingChen4Config`
-- Model type: `xingchen4`
+- Architecture: `Xing4_0ForCausalLM`
+- Configuration class: `Xing4_0Config`
+- Model type: `xing4_0`
 - Decoder layers: `num_hidden_layers = 40`
 - Hidden size: `hidden_size = 3584`
 - Dense MLP size: `intermediate_size = 9216`
@@ -112,36 +113,36 @@ pip install kt-kernel sglang-kt
 
 ## Prepare model weights
 
-Place the XingChen4 checkpoint in a local directory. The examples below use:
+Place the Xing checkpoint in a local directory. The examples below use:
 
 ```text
-/data/models/xingchen4
+/data/models/xing4_0
 ```
 
 The checkpoint configuration must declare:
 
 ```json
 {
-  "architectures": ["XingChen4ForCausalLM"],
-  "model_type": "xingchen4"
+  "architectures": ["Xing4_0ForCausalLM"],
+  "model_type": "xing4_0"
 }
 ```
 
 ## Start the server
 
-The following example runs XingChen4 on one RTX 4090 and places 24 routed
+The following example runs Xing on one RTX 4090 and places 24 routed
 experts on the GPU:
 
 ```bash
 python -m sglang.launch_server \
   --host 0.0.0.0 \
   --port 30000 \
-  --model-path /data/models/xingchen4 \
-  --served-model-name xingchen4 \
+  --model-path /data/models/xing4_0 \
+  --served-model-name xing4_0 \
   --tensor-parallel-size 1 \
   --trust-remote-code \
   --attention-backend triton \
-  --kt-weight-path /data/models/xingchen4 \
+  --kt-weight-path /data/models/xing4_0 \
   --kt-method BF16 \
   --kt-cpuinfer 50 \
   --kt-threadpool-count 2 \
@@ -149,8 +150,8 @@ python -m sglang.launch_server \
   --mem-fraction-static 0.9 \
   --chunked-prefill-size 512 \
   --max-total-tokens 65540 \
-  --tool-call-parser xingchen4 \
-  --reasoning-parser xingchen4
+  --tool-call-parser xing4_0 \
+  --reasoning-parser xing4_0
 ```
 
 See the [KT-Kernel parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters)
@@ -162,7 +163,7 @@ for additional CPU/GPU expert placement options.
 curl http://127.0.0.1:30000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "xingchen4",
+    "model": "xing4_0",
     "messages": [
       {"role": "user", "content": "Hi, who are you?"}
     ],
@@ -179,13 +180,13 @@ Response:
   "id": "6a0d6434acde47d087a240810e1034cb",
   "object": "chat.completion",
   "created": 1787124661,
-  "model": "xingchen4",
+  "model": "xing4_0",
   "choices": [
     {
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "Hello! I am the TeleChat.\nI was developed by China Telecom Artificial Intelligence Technology Co., Ltd.\n\nAs an all-around AI assistant, I have a vast knowledge base and can help you with general Q&A, content creation, language translation, deep logical reasoning, programming assistance, and much more.\n\nI am dedicated to providing you with efficient and professional support in your work, studies, and creative endeavors.\n\nHow can I assist you today?",
+        "content": "Hello! I am the Xing.\nI was developed by China Telecom Artificial Intelligence Technology Co., Ltd.\n\nAs an all-around AI assistant, I have a vast knowledge base and can help you with general Q&A, content creation, language translation, deep logical reasoning, programming assistance, and much more.\n\nI am dedicated to providing you with efficient and professional support in your work, studies, and creative endeavors.\n\nHow can I assist you today?",
         "reasoning_content": null,
         "tool_calls": null
       },
@@ -212,20 +213,20 @@ With thinking disabled, a successful response returns assistant text in
 
 ## Tool-call and reasoning parsers
 
-- `--tool-call-parser xingchen4` parses XingChen4 tool calls represented by
+- `--tool-call-parser xing4_0` parses Xing tool calls represented by
   `<tool_call>...</tool_call>` blocks.
-- `--reasoning-parser xingchen4` separates content enclosed by
+- `--reasoning-parser xing4_0` separates content enclosed by
   `<think>...</think>` into `reasoning_content`.
 
 The parser implementations are registered in:
 
-- `sglang/srt/function_call/xingchen4_detector.py`
+- `sglang/srt/function_call/xing4_0_detector.py`
 - `sglang/srt/function_call/function_call_parser.py`
 - `sglang/srt/parser/reasoning_parser.py`
 
 ## Implementation paths
 
-- Model: `third_party/sglang/python/sglang/srt/models/xingchen4.py`
-- Configuration: `third_party/sglang/python/sglang/srt/configs/xingchen4.py`
-- Tool-call parser: `third_party/sglang/python/sglang/srt/function_call/xingchen4_detector.py`
-- Model-specific runtime defaults: `third_party/sglang/python/sglang/srt/server_args.py`
+- Model: `third_party/sglang/python/sglang/srt/models/xing4_0.py`
+- Configuration: `third_party/sglang/python/sglang/srt/configs/xing4_0.py`
+- Tool-call parser: `third_party/sglang/python/sglang/srt/function_call/xing4_0_detector.py`
+- Model-specific runtime defaults: `third_party/sglang/python/sglang/srt/arg_groups/model_hook.py`
