@@ -1,5 +1,7 @@
 # Kimi K2.5 LoRA 微调：安装、训练与对话
 
+[English version](README_EN.md)
+
 本教程使用 KTransformers `0.7.0.post4` 和 NekoQA 数据集，让 Kimi K2.5
 学会猫娘风格的语气，再用 SGLang 加载训练结果进行对话。原始模型权重不变，
 训练结果单独保存为 LoRA。
