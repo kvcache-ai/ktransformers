@@ -552,6 +552,14 @@ def _run_sft_contract(tp_count):
     return result
 
 
+def _inference_moe_class():
+    """Frozen-base inference kernel of the same tier as MXFP4_SFT_MOE (AMX or AVX2 build)."""
+    for name in ("AMXFP4_KGroup_MOE", "AVX2MXFP4_MOE"):
+        if hasattr(kt_kernel_ext.moe, name):
+            return getattr(kt_kernel_ext.moe, name)
+    return None
+
+
 def _run_inference_regression():
     base, _, experts = _make_weights()
     before_hash = base_storage_hash(experts)
@@ -572,7 +580,7 @@ def _run_inference_regression():
     config.gate_scale = base["gate_scale"].data_ptr()
     config.up_scale = base["up_scale"].data_ptr()
     config.down_scale = base["down_scale"].data_ptr()
-    moe = kt_kernel_ext.moe.AMXFP4_KGroup_MOE(config)
+    moe = _inference_moe_class()(config)
     cpu_infer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     cpu_infer.sync()
 
@@ -627,10 +635,10 @@ def _require_extension(*, allow_source_only_skip):
         if allow_source_only_skip:
             pytest.skip("built extension does not contain MXFP4_SFT_MOE")
         raise AssertionError("built extension is missing required MXFP4_SFT_MOE")
-    if not hasattr(kt_kernel_ext.moe, "AMXFP4_KGroup_MOE"):
+    if _inference_moe_class() is None:
         if allow_source_only_skip:
-            pytest.skip("built extension does not contain AMXFP4_KGroup_MOE")
-        raise AssertionError("built extension is missing existing AMXFP4_KGroup_MOE")
+            pytest.skip("built extension does not contain AMXFP4_KGroup_MOE / AVX2MXFP4_MOE")
+        raise AssertionError("built extension is missing an MXFP4 inference MoE (AMXFP4_KGroup_MOE / AVX2MXFP4_MOE)")
 
 
 @pytest.mark.cpu

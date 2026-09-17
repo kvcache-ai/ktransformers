@@ -27,8 +27,13 @@
 #include <thread>
 #include <vector>
 
+#include <filesystem>
+#if defined(__AVX512F__)
 #include "amx/fp8_tp_staging.hpp"
 #include "amx/la/amx.hpp"
+#else
+#include "avx2/avx2_bf16_utils.hpp"
+#endif
 #include "moe-tp.hpp"
 #include "sft_profile.hpp"
 
@@ -378,6 +383,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   void load_fp8_weights_with_tp_staging() {
+#if !defined(__AVX512F__)
+    throw std::runtime_error("block-FP8 SFT TP staging needs an AVX-512 build");
+#else
     amx::validate_block_fp8_tp_source(config);
     const int group_size = config.quant_config.group_size;
     const auto* physical_to_logical_map = static_cast<const uint64_t*>(config.physical_to_logical_map);
@@ -424,6 +432,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw;
     }
     for (auto& tp : tps) tp->clear_staged_weight_pointers();
+  #endif
   }
 
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
@@ -803,6 +812,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     auto merge_fn = [this, output, incremental, &tp_count_ref, &local_output_numa_ref, &tp_configs_ref](int token_nth) {
       float* merge_to = local_output_numa_ref[0] + token_nth * tp_configs_ref[0].hidden_size;
+#if !defined(__AVX512F__)
+      ggml_bf16_t* out_row = (ggml_bf16_t*)output + (size_t)token_nth * config.hidden_size;
+      for (int e = 0; e < config.hidden_size; e += 8) {
+        __m256 acc = _mm256_loadu_ps(merge_to + e);
+        if (incremental) acc = _mm256_add_ps(acc, avx2::load_bf16_to_fp32(out_row + e));
+        for (int i = 1; i < tp_count_ref; i++)
+          acc = _mm256_add_ps(acc, _mm256_loadu_ps(local_output_numa_ref[i] + (size_t)token_nth * tp_configs_ref[i].hidden_size + e));
+        _mm256_storeu_ps(merge_to + e, acc);
+        avx2::store_fp32_to_bf16(out_row + e, acc);
+      }
+#else
       if (incremental) {
         for (int e = 0; e < config.hidden_size; e += 32) {
           __m512 x0, x1;
@@ -822,6 +842,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
         __m512 x1 = *(__m512*)(merge_to + e + 16);
         avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
       }
+#endif
     };
 
     auto pool = config.pool;
@@ -1243,6 +1264,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
             ggml_bf16_t* dst = out + (size_t)token_id * hidden_size;
 
             int h = 0;
+#if defined(__AVX512F__)
             for (; h + 32 <= hidden_size; h += 32) {
               __m512 sum0, sum1;
               avx512_32xbf16_to_32xfp32((__m512i*)(src0 + h), &sum0, &sum1);
@@ -1266,6 +1288,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
               }
               avx512_32xfp32_to_32xbf16(&sum0, &sum1, (__m512i*)(dst + h));
             }
+#endif
+
             for (; h < hidden_size; h++) {
               float sum = GGML_BF16_TO_FP32(src0[h]);
               if (src1) sum += GGML_BF16_TO_FP32(src1[h]);
@@ -1301,6 +1325,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 ggml_bf16_t* ud = out_up_a + dst_base;
 
                 int h = 0;
+#if defined(__AVX512F__)
                 for (; h + 32 <= hidden_size; h += 32) {
                   __m512 gs0 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h);
                   __m512 gs1 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h + 16);
@@ -1326,6 +1351,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                   avx512_32xfp32_to_32xbf16(&gs0, &gs1, (__m512i*)(gd + h));
                   avx512_32xfp32_to_32xbf16(&us0, &us1, (__m512i*)(ud + h));
                 }
+#endif
+
                 for (; h < hidden_size; h++) {
                   float gs = ((const float*)tp_fp32_gate_a[0])[src_base + h];
                   float us = ((const float*)tp_fp32_up_a[0])[src_base + h];
@@ -1397,6 +1424,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
             const float* s3 = (tp_count > 3) ? part_grad_weights_[3] : nullptr;
 
             size_t i = begin;
+#if defined(__AVX512F__)
             for (; i + 16 <= end; i += 16) {
               __m512 v = _mm512_loadu_ps(s0 + i);
               if (s1) v = _mm512_add_ps(v, _mm512_loadu_ps(s1 + i));
@@ -1404,6 +1432,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
               if (s3) v = _mm512_add_ps(v, _mm512_loadu_ps(s3 + i));
               _mm512_storeu_ps(out_grad_weights + i, v);
             }
+#endif
+
             for (; i < end; i++) {
               float sum = s0[i];
               if (s1) sum += s1[i];
