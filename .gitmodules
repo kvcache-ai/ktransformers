@@ -10,5 +10,5 @@
 	branch = fix-precision-mla-merge-main
 [submodule "third_party/sglang"]
 	path = third_party/sglang
-	url = https://github.com/kvcache-ai/sglang.git
-	branch = main
+	url = https://github.com/PaddyXj/sglang.git
+	branch = support_xing4_0
