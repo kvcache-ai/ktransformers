@@ -48,6 +48,20 @@ struct GemmKernelAVX2MXFP4 {
   static std::pair<int, int> split_range_n(int n, int ith, int nth) { return split_range(n, ith, nth); }
   static std::string name() { return "AVX2_MXFP4"; }
 
+  // Row tile for the group-32 / group-16 fast paths in gemm_mxfp4. Both walk
+  // every activation row once per output column, so their working set is the
+  // whole pre-permuted FP32 block (m * k * 4 bytes): 4 MB at m = 256, k = 4096,
+  // which spills L2 and leaves the loop L3-bandwidth bound. Walking m in tiles
+  // bounded to M_TILE_BYTES keeps the block L2-resident and repeats the cheap
+  // per-column weight decode (2 KB of nibbles) once per tile instead. Each
+  // output element sees the same operations in the same order, so results are
+  // bit-identical to the untiled loop.
+  static constexpr size_t M_TILE_BYTES = 256 << 10;
+  static int m_tile(int k) {
+    const int rows = (int)(M_TILE_BYTES / ((size_t)k * sizeof(float)));
+    return std::max(4, rows & ~3);
+  }
+
   // FP4 E2M1 → BF16 lookup tables (low byte and high byte of BF16)
   // Identical to amx/fp4-moe.hpp GemmKernel224MXFP4SmallKGroup LUTs
   alignas(16) static constexpr uint8_t fp4_bf16_lo[16] = {0x00, 0x00, 0x80, 0xC0, 0x00, 0x40, 0x80, 0xC0,
@@ -285,81 +299,85 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   const __m256 w2 = _mm256_castsi256_ps(_mm256_unpacklo_epi16(zero256, u16b));       \
   const __m256 w3 = _mm256_castsi256_ps(_mm256_unpackhi_epi16(zero256, u16b))
 
-    for (int ni = n_start; ni < n_end; ni++) {
-      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
-      const float* b_scales = b.d + (size_t)ni * group_count;
-      if (ni + 1 < n_end) {
-        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
-        _mm_prefetch(nr, _MM_HINT_T0);
-        _mm_prefetch(nr + 64, _MM_HINT_T0);
-        _mm_prefetch(nr + 128, _MM_HINT_T0);
-        _mm_prefetch(nr + 192, _MM_HINT_T0);
-      }
-
-      // 4-token blocked path: each decoded group feeds 4 accumulators.
-      int mi = 0;
-      for (; mi + 4 <= m; mi += 4) {
-        const float* p0 = a_perm + (size_t)(mi + 0) * k;
-        const float* p1 = a_perm + (size_t)(mi + 1) * k;
-        const float* p2 = a_perm + (size_t)(mi + 2) * k;
-        const float* p3 = a_perm + (size_t)(mi + 3) * k;
-        __m256 tot0 = _mm256_setzero_ps(), tot1 = _mm256_setzero_ps();
-        __m256 tot2 = _mm256_setzero_ps(), tot3 = _mm256_setzero_ps();
-
-        for (int g = 0; g < group_count; g++) {
-          const int base = g * 32;
-          KT_MXFP4_DECODE_GROUP(b_row, g);
-
-          __m256 g0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base), w0);
-          __m256 g1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base), w0);
-          __m256 g2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base), w0);
-          __m256 g3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base), w0);
-          g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 8), w1, g0);
-          g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 8), w1, g1);
-          g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 8), w1, g2);
-          g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 8), w1, g3);
-          g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 16), w2, g0);
-          g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 16), w2, g1);
-          g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 16), w2, g2);
-          g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 16), w2, g3);
-          g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 24), w3, g0);
-          g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 24), w3, g1);
-          g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 24), w3, g2);
-          g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 24), w3, g3);
-
-          const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
-          tot0 = _mm256_fmadd_ps(g0, sv, tot0);
-          tot1 = _mm256_fmadd_ps(g1, sv, tot1);
-          tot2 = _mm256_fmadd_ps(g2, sv, tot2);
-          tot3 = _mm256_fmadd_ps(g3, sv, tot3);
+    const int m_tile = GemmKernelAVX2MXFP4::m_tile(k);
+    for (int m0 = 0; m0 < m; m0 += m_tile) {
+      const int m1 = std::min(m, m0 + m_tile);
+      for (int ni = n_start; ni < n_end; ni++) {
+        const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
+        const float* b_scales = b.d + (size_t)ni * group_count;
+        if (ni + 1 < n_end) {
+          const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
+          _mm_prefetch(nr, _MM_HINT_T0);
+          _mm_prefetch(nr + 64, _MM_HINT_T0);
+          _mm_prefetch(nr + 128, _MM_HINT_T0);
+          _mm_prefetch(nr + 192, _MM_HINT_T0);
         }
-        c.data[(size_t)(mi + 0) * n + ni] = hsum_avx2(tot0);
-        c.data[(size_t)(mi + 1) * n + ni] = hsum_avx2(tot1);
-        c.data[(size_t)(mi + 2) * n + ni] = hsum_avx2(tot2);
-        c.data[(size_t)(mi + 3) * n + ni] = hsum_avx2(tot3);
-      }
 
-      // Single-row remainder (also the whole decode path when m == 1).
-      for (; mi < m; mi++) {
-        const float* ap_row = a_perm + (size_t)mi * k;
-        __m256 total0 = _mm256_setzero_ps();
-        __m256 total1 = _mm256_setzero_ps();
-        for (int g = 0; g < group_count; g++) {
-          const float* ap = ap_row + g * 32;
-          KT_MXFP4_DECODE_GROUP(b_row, g);
+        // 4-token blocked path: each decoded group feeds 4 accumulators.
+        int mi = m0;
+        for (; mi + 4 <= m1; mi += 4) {
+          const float* p0 = a_perm + (size_t)(mi + 0) * k;
+          const float* p1 = a_perm + (size_t)(mi + 1) * k;
+          const float* p2 = a_perm + (size_t)(mi + 2) * k;
+          const float* p3 = a_perm + (size_t)(mi + 3) * k;
+          __m256 tot0 = _mm256_setzero_ps(), tot1 = _mm256_setzero_ps();
+          __m256 tot2 = _mm256_setzero_ps(), tot3 = _mm256_setzero_ps();
 
-          __m256 gacc = _mm256_mul_ps(_mm256_loadu_ps(ap), w0);
-          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 8), w1, gacc);
-          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 16), w2, gacc);
-          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, gacc);
+          for (int g = 0; g < group_count; g++) {
+            const int base = g * 32;
+            KT_MXFP4_DECODE_GROUP(b_row, g);
 
-          const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
-          if (g & 1)
-            total1 = _mm256_fmadd_ps(gacc, sv, total1);
-          else
-            total0 = _mm256_fmadd_ps(gacc, sv, total0);
+            __m256 g0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base), w0);
+            __m256 g1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base), w0);
+            __m256 g2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base), w0);
+            __m256 g3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base), w0);
+            g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 8), w1, g0);
+            g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 8), w1, g1);
+            g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 8), w1, g2);
+            g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 8), w1, g3);
+            g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 16), w2, g0);
+            g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 16), w2, g1);
+            g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 16), w2, g2);
+            g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 16), w2, g3);
+            g0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 24), w3, g0);
+            g1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 24), w3, g1);
+            g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 24), w3, g2);
+            g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 24), w3, g3);
+
+            const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+            tot0 = _mm256_fmadd_ps(g0, sv, tot0);
+            tot1 = _mm256_fmadd_ps(g1, sv, tot1);
+            tot2 = _mm256_fmadd_ps(g2, sv, tot2);
+            tot3 = _mm256_fmadd_ps(g3, sv, tot3);
+          }
+          c.data[(size_t)(mi + 0) * n + ni] = hsum_avx2(tot0);
+          c.data[(size_t)(mi + 1) * n + ni] = hsum_avx2(tot1);
+          c.data[(size_t)(mi + 2) * n + ni] = hsum_avx2(tot2);
+          c.data[(size_t)(mi + 3) * n + ni] = hsum_avx2(tot3);
         }
-        c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
+
+        // Single-row remainder (also the whole decode path when m == 1).
+        for (; mi < m1; mi++) {
+          const float* ap_row = a_perm + (size_t)mi * k;
+          __m256 total0 = _mm256_setzero_ps();
+          __m256 total1 = _mm256_setzero_ps();
+          for (int g = 0; g < group_count; g++) {
+            const float* ap = ap_row + g * 32;
+            KT_MXFP4_DECODE_GROUP(b_row, g);
+
+            __m256 gacc = _mm256_mul_ps(_mm256_loadu_ps(ap), w0);
+            gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 8), w1, gacc);
+            gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 16), w2, gacc);
+            gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, gacc);
+
+            const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+            if (g & 1)
+              total1 = _mm256_fmadd_ps(gacc, sv, total1);
+            else
+              total0 = _mm256_fmadd_ps(gacc, sv, total0);
+          }
+          c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
+        }
       }
     }
 #undef KT_MXFP4_DECODE_GROUP
@@ -416,89 +434,93 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   const __m256 w2 = _mm256_castsi256_ps(_mm256_unpacklo_epi16(zero256, u16b));       \
   const __m256 w3 = _mm256_castsi256_ps(_mm256_unpackhi_epi16(zero256, u16b))
 
-    for (int ni = n_start; ni < n_end; ni++) {
-      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
-      const float* b_scales = b.d + (size_t)ni * group_count;
-      if (ni + 1 < n_end) {
-        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
-        _mm_prefetch(nr, _MM_HINT_T0);
-        _mm_prefetch(nr + 64, _MM_HINT_T0);
-        _mm_prefetch(nr + 128, _MM_HINT_T0);
-        _mm_prefetch(nr + 192, _MM_HINT_T0);
-      }
-
-      // 4-token blocked path: per block, each half folds with its own scale.
-      int mi = 0;
-      for (; mi + 4 <= m; mi += 4) {
-        const float* p0 = a_perm + (size_t)(mi + 0) * k;
-        const float* p1 = a_perm + (size_t)(mi + 1) * k;
-        const float* p2 = a_perm + (size_t)(mi + 2) * k;
-        const float* p3 = a_perm + (size_t)(mi + 3) * k;
-        __m256 tot0 = _mm256_setzero_ps(), tot1 = _mm256_setzero_ps();
-        __m256 tot2 = _mm256_setzero_ps(), tot3 = _mm256_setzero_ps();
-
-        for (int blk = 0; blk < block_count; blk++) {
-          const int base = blk * 32;
-          KT_MXFP4_DECODE_GROUP(b_row, blk);
-          const __m256 sa = _mm256_broadcast_ss(&b_scales[2 * blk]);
-          const __m256 sb = _mm256_broadcast_ss(&b_scales[2 * blk + 1]);
-
-          __m256 h0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base), w0);
-          __m256 h1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base), w0);
-          __m256 h2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base), w0);
-          __m256 h3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base), w0);
-          h0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 8), w1, h0);
-          h1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 8), w1, h1);
-          h2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 8), w1, h2);
-          h3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 8), w1, h3);
-          tot0 = _mm256_fmadd_ps(h0, sa, tot0);
-          tot1 = _mm256_fmadd_ps(h1, sa, tot1);
-          tot2 = _mm256_fmadd_ps(h2, sa, tot2);
-          tot3 = _mm256_fmadd_ps(h3, sa, tot3);
-
-          h0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base + 16), w2);
-          h1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base + 16), w2);
-          h2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base + 16), w2);
-          h3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base + 16), w2);
-          h0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 24), w3, h0);
-          h1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 24), w3, h1);
-          h2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 24), w3, h2);
-          h3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 24), w3, h3);
-          tot0 = _mm256_fmadd_ps(h0, sb, tot0);
-          tot1 = _mm256_fmadd_ps(h1, sb, tot1);
-          tot2 = _mm256_fmadd_ps(h2, sb, tot2);
-          tot3 = _mm256_fmadd_ps(h3, sb, tot3);
+    const int m_tile = GemmKernelAVX2MXFP4::m_tile(k);
+    for (int m0 = 0; m0 < m; m0 += m_tile) {
+      const int m1 = std::min(m, m0 + m_tile);
+      for (int ni = n_start; ni < n_end; ni++) {
+        const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
+        const float* b_scales = b.d + (size_t)ni * group_count;
+        if (ni + 1 < n_end) {
+          const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
+          _mm_prefetch(nr, _MM_HINT_T0);
+          _mm_prefetch(nr + 64, _MM_HINT_T0);
+          _mm_prefetch(nr + 128, _MM_HINT_T0);
+          _mm_prefetch(nr + 192, _MM_HINT_T0);
         }
-        c.data[(size_t)(mi + 0) * n + ni] = hsum_avx2(tot0);
-        c.data[(size_t)(mi + 1) * n + ni] = hsum_avx2(tot1);
-        c.data[(size_t)(mi + 2) * n + ni] = hsum_avx2(tot2);
-        c.data[(size_t)(mi + 3) * n + ni] = hsum_avx2(tot3);
-      }
 
-      // Single-row remainder (also the whole decode path when m == 1).  The two
-      // half-scales per block go to their own accumulators; group-16 folds a
-      // scale for each 16-value half, which is twice the group-32 rate, and at
-      // m==1 (no token blocking to amortize the decode) that scale work is the
-      // path's floor -- roughly 1.4x the group-32 single-row cost.  It is a
-      // property of the format's scale density, not the accumulator count: a
-      // four-way split by block parity was measured and made no difference.
-      for (; mi < m; mi++) {
-        const float* ap_row = a_perm + (size_t)mi * k;
-        __m256 total0 = _mm256_setzero_ps();
-        __m256 total1 = _mm256_setzero_ps();
-        for (int blk = 0; blk < block_count; blk++) {
-          const float* ap = ap_row + blk * 32;
-          KT_MXFP4_DECODE_GROUP(b_row, blk);
+        // 4-token blocked path: per block, each half folds with its own scale.
+        int mi = m0;
+        for (; mi + 4 <= m1; mi += 4) {
+          const float* p0 = a_perm + (size_t)(mi + 0) * k;
+          const float* p1 = a_perm + (size_t)(mi + 1) * k;
+          const float* p2 = a_perm + (size_t)(mi + 2) * k;
+          const float* p3 = a_perm + (size_t)(mi + 3) * k;
+          __m256 tot0 = _mm256_setzero_ps(), tot1 = _mm256_setzero_ps();
+          __m256 tot2 = _mm256_setzero_ps(), tot3 = _mm256_setzero_ps();
 
-          __m256 ha = _mm256_mul_ps(_mm256_loadu_ps(ap), w0);
-          ha = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 8), w1, ha);
-          __m256 hb = _mm256_mul_ps(_mm256_loadu_ps(ap + 16), w2);
-          hb = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, hb);
+          for (int blk = 0; blk < block_count; blk++) {
+            const int base = blk * 32;
+            KT_MXFP4_DECODE_GROUP(b_row, blk);
+            const __m256 sa = _mm256_broadcast_ss(&b_scales[2 * blk]);
+            const __m256 sb = _mm256_broadcast_ss(&b_scales[2 * blk + 1]);
 
-          total0 = _mm256_fmadd_ps(ha, _mm256_broadcast_ss(&b_scales[2 * blk]), total0);
-          total1 = _mm256_fmadd_ps(hb, _mm256_broadcast_ss(&b_scales[2 * blk + 1]), total1);
+            __m256 h0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base), w0);
+            __m256 h1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base), w0);
+            __m256 h2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base), w0);
+            __m256 h3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base), w0);
+            h0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 8), w1, h0);
+            h1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 8), w1, h1);
+            h2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 8), w1, h2);
+            h3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 8), w1, h3);
+            tot0 = _mm256_fmadd_ps(h0, sa, tot0);
+            tot1 = _mm256_fmadd_ps(h1, sa, tot1);
+            tot2 = _mm256_fmadd_ps(h2, sa, tot2);
+            tot3 = _mm256_fmadd_ps(h3, sa, tot3);
+
+            h0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base + 16), w2);
+            h1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base + 16), w2);
+            h2 = _mm256_mul_ps(_mm256_loadu_ps(p2 + base + 16), w2);
+            h3 = _mm256_mul_ps(_mm256_loadu_ps(p3 + base + 16), w2);
+            h0 = _mm256_fmadd_ps(_mm256_loadu_ps(p0 + base + 24), w3, h0);
+            h1 = _mm256_fmadd_ps(_mm256_loadu_ps(p1 + base + 24), w3, h1);
+            h2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 24), w3, h2);
+            h3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 24), w3, h3);
+            tot0 = _mm256_fmadd_ps(h0, sb, tot0);
+            tot1 = _mm256_fmadd_ps(h1, sb, tot1);
+            tot2 = _mm256_fmadd_ps(h2, sb, tot2);
+            tot3 = _mm256_fmadd_ps(h3, sb, tot3);
+          }
+          c.data[(size_t)(mi + 0) * n + ni] = hsum_avx2(tot0);
+          c.data[(size_t)(mi + 1) * n + ni] = hsum_avx2(tot1);
+          c.data[(size_t)(mi + 2) * n + ni] = hsum_avx2(tot2);
+          c.data[(size_t)(mi + 3) * n + ni] = hsum_avx2(tot3);
         }
-        c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
+
+        // Single-row remainder (also the whole decode path when m == 1).  The two
+        // half-scales per block go to their own accumulators; group-16 folds a
+        // scale for each 16-value half, which is twice the group-32 rate, and at
+        // m==1 (no token blocking to amortize the decode) that scale work is the
+        // path's floor -- roughly 1.4x the group-32 single-row cost.  It is a
+        // property of the format's scale density, not the accumulator count: a
+        // four-way split by block parity was measured and made no difference.
+        for (; mi < m1; mi++) {
+          const float* ap_row = a_perm + (size_t)mi * k;
+          __m256 total0 = _mm256_setzero_ps();
+          __m256 total1 = _mm256_setzero_ps();
+          for (int blk = 0; blk < block_count; blk++) {
+            const float* ap = ap_row + blk * 32;
+            KT_MXFP4_DECODE_GROUP(b_row, blk);
+
+            __m256 ha = _mm256_mul_ps(_mm256_loadu_ps(ap), w0);
+            ha = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 8), w1, ha);
+            __m256 hb = _mm256_mul_ps(_mm256_loadu_ps(ap + 16), w2);
+            hb = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, hb);
+
+            total0 = _mm256_fmadd_ps(ha, _mm256_broadcast_ss(&b_scales[2 * blk]), total0);
+            total1 = _mm256_fmadd_ps(hb, _mm256_broadcast_ss(&b_scales[2 * blk + 1]), total1);
+          }
+          c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
+        }
       }
     }
 #undef KT_MXFP4_DECODE_GROUP
