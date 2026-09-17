@@ -243,6 +243,12 @@ class TP_MOE<AVX2_BF16_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_BF16_MOE
 
     pool->dispense_backend()->do_numa_job([&, this](int i) {
       auto& tpc = tps[i]->config_;
+      // The per-part load_weights() below maps physical slot -> logical
+      // expert through its own config; without this the placement was
+      // applied to the staging copy only and slot p ended up holding
+      // logical expert p (--init-expert-location silently ignored on the
+      // CPU side). The MXFP4 path already does this.
+      tpc.physical_to_logical_map = config.physical_to_logical_map;
       const size_t tp_weight_elems = (size_t)tpc.intermediate_size * tpc.hidden_size;
 
       // Allocate temporary BF16 buffers for this TP part
