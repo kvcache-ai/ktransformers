@@ -600,6 +600,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
 template <class T = avx2::GemmKernelAVX2MXFP4>
 class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
   using Base = AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>>;
+ protected:  // re-exported for the SFT subclass (operators/avx2/sft_mxfp4-moe.hpp)
   using Base::config_;
   using Base::down_ba_;
   using Base::down_bb_;
