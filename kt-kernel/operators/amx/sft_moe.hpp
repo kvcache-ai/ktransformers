@@ -5950,7 +5950,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           g_val = std::min(g_val, config_.swiglu_limit);
           u_val = std::min(std::max(u_val, -config_.swiglu_limit), config_.swiglu_limit);
         }
-        float sigmoid_val = 1.0f / (1.0f + expf(-g_val));
+        float sigmoid_val = 1.0f / (1.0f + expf(kIsMXFP4Backend ? std::min(-g_val, 88.0f) : -g_val));
         float silu_val = g_val * sigmoid_val;
         float grad_i_val = GGML_BF16_TO_FP32(grad_inter[i]);
         const float gate_grad =
