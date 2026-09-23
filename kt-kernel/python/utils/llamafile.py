@@ -209,6 +209,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
+        moe_config.mmap_weights_dir = getattr(self, "mmap_experts_dir", "") or ""
         moe_config.pool = self.cpu_infer.backend_
 
         # Llamafile-specific configuration

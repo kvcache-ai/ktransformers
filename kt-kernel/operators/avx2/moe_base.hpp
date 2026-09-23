@@ -62,7 +62,13 @@ class AVX2_MOE_BASE {
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
 
+  // BufferB blocks this class must std::free() itself. File-backed blocks (see
+  // bb_arena_) are NOT added here; bb_arena_'s destructor munmaps those.
   std::vector<void*> owned_aligned_allocs_;
+
+  // Optional file backing for the per-expert BufferB blocks below
+  // (--kt-mmap-experts-dir); a no-op unless config_.mmap_weights_dir is set.
+  KtWeightArena bb_arena_;
 
   size_t pool_count_ = 0;
   size_t gate_up_ba_pool_bytes_ = 0;
@@ -112,6 +118,14 @@ class AVX2_MOE_BASE {
     m_local_up_output_ptr_.resize(config_.expert_num);
     m_local_down_output_ptr_.resize(config_.expert_num);
 
+    // Optionally back the per-expert BufferB blocks with a file instead of
+    // anonymous heap (--kt-mmap-experts-dir). No-op when the dir is unset.
+    const size_t bb_block_max =
+        std::max((buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL,
+                 (buffer_b_required_size(config_.hidden_size, config_.intermediate_size) + 63) & ~63ULL);
+    bb_arena_.open(config_.mmap_weights_dir, config_.layer_idx, tp_part_idx,
+                   static_cast<size_t>(config_.expert_num) * 3, bb_block_max);
+
     for (size_t i = 0; i < config_.expert_num; i++) {
       gate_up_ba_.push_back(make_buffer_a(config_.max_len, config_.hidden_size, nullptr));
       gate_bc_.push_back(make_buffer_c(config_.max_len, config_.intermediate_size, nullptr));
@@ -119,22 +133,28 @@ class AVX2_MOE_BASE {
       down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
-      void* gate_bb_ptr = std::aligned_alloc(
-          64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      // Only std::aligned_alloc results go in owned_aligned_allocs_ (freed in the
+      // dtor); file-backed blocks are released by bb_arena_'s destructor.
+      bool gate_fb, up_fb, down_fb;
+      void* gate_bb_ptr =
+          bb_arena_.alloc((buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL,
+                          &gate_fb);
       if (!gate_bb_ptr) throw std::runtime_error("aligned_alloc failed for gate BufferB");
-      owned_aligned_allocs_.push_back(gate_bb_ptr);
+      if (!gate_fb) owned_aligned_allocs_.push_back(gate_bb_ptr);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr = std::aligned_alloc(
-          64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      void* up_bb_ptr =
+          bb_arena_.alloc((buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL,
+                          &up_fb);
       if (!up_bb_ptr) throw std::runtime_error("aligned_alloc failed for up BufferB");
-      owned_aligned_allocs_.push_back(up_bb_ptr);
+      if (!up_fb) owned_aligned_allocs_.push_back(up_bb_ptr);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
-      void* down_bb_ptr = std::aligned_alloc(
-          64, (buffer_b_required_size(config_.hidden_size, config_.intermediate_size) + 63) & ~63ULL);
+      void* down_bb_ptr =
+          bb_arena_.alloc((buffer_b_required_size(config_.hidden_size, config_.intermediate_size) + 63) & ~63ULL,
+                          &down_fb);
       if (!down_bb_ptr) throw std::runtime_error("aligned_alloc failed for down BufferB");
-      owned_aligned_allocs_.push_back(down_bb_ptr);
+      if (!down_fb) owned_aligned_allocs_.push_back(down_bb_ptr);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
 
