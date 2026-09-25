@@ -26,6 +26,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install Rust
         run: |
           rustup set profile minimal

@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Fail if the PR does not have the 'run-ci' label
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'run-ci')
@@ -61,6 +63,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Install KT-Kernel
