@@ -34,7 +34,7 @@ jobs:
           rustup toolchain install stable
           rustup default stable
       - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v2
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0
         with:
           mdbook-version: "latest"
       - run: mdbook build
@@ -43,7 +43,7 @@ jobs:
       #     chmod +x ci/copy-assets.sh
       #     ci/copy-assets.sh ${{ matrix.os }}
       - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@373f7f263a76c20808c831209c920827a82a2847 # v3.9.3
         # or || github.ref == 'refs/heads/server_support'
         if: ${{ github.ref == 'refs/heads/main' }}
         with:
