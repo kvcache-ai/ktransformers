@@ -12,6 +12,9 @@ concurrency:
   group: pr-kt-kernel-test-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # =============================================== check changes ====================================================
   check-changes:

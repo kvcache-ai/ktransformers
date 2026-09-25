@@ -31,6 +31,9 @@ on:
   #     - main
 env:
   DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/ktransformers
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
