@@ -12,6 +12,32 @@ We set the argument `temperature=0.6`, and to simplify the test process, we skip
 
 Given that we have only tested 1,000 cases, which provides only a preliminary judgment, some fluctuations in the results are reasonable. We selected all datasets and shuffled them with a fixed random seed to ensure consistency.
 
+## Online API Benchmarking
+
+For online serving benchmarks, you can run a standard OpenAI-compatible benchmark tool against the KTransformers `/v1/chat/completions` endpoint after the server is already healthy. For example, with EvalScope:
+
+```bash
+# First verify the server with a few direct API requests.
+curl -s http://127.0.0.1:10002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"DeepSeek-R1","messages":[{"role":"user","content":"hello"}],"stream":false}'
+
+# Install EvalScope if needed: pip install evalscope
+# Then run a small benchmark and scale parallelism gradually.
+evalscope perf \
+  --url "http://127.0.0.1:10002/v1/chat/completions" \
+  --parallel 1 \
+  --model DeepSeek-R1 \
+  --number 4 \
+  --api openai \
+  --dataset openqa \
+  --stream
+```
+
+Add `--tokenizer-path /path/to/tokenizer-or-model` only when you need local token-count metrics or use a dataset that requires a tokenizer path.
+
+Start with a small `--number` and `--parallel 1`, then increase concurrency only after repeated direct API requests are stable. If the server process crashes during the benchmark, reproduce the same prompt with plain `curl` first; benchmark tools can amplify model-format, quantization, or server-side sampling issues that are easier to debug with one request at a time.
+
 ## Some Details
 
 - The bf16 model of DeepSeek-V3 is available [here](https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16/tree/main) (you may convert it to gguf by llama.cpp). The q4km model can be found [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M).
