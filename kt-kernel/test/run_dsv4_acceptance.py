@@ -94,9 +94,10 @@ class AcceptanceAudit(TrainerCallback):
         local = _local(parameter).reshape(-1)
         if not local.numel():
             return local.cpu().clone()
-        indices = torch.linspace(
-            0, local.numel() - 1, min(64, local.numel()), device=local.device
-        ).long()
+        count = min(64, local.numel())
+        # Float32 linspace can round a large tensor's last index up to numel.
+        indices = torch.arange(count, device=local.device, dtype=torch.int64)
+        indices = indices * (local.numel() - 1) // max(count - 1, 1)
         return local[indices].cpu().clone()
 
     def _observe_batch(self, model, positional, kwargs):
