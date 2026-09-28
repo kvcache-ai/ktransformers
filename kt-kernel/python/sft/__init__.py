@@ -24,6 +24,8 @@ from .backend import (
     get_int8_runtime,
     get_rawint4_checkpoint_contract,
     get_rawint4_runtime,
+    MXFP4_SFT_METHOD,
+    get_mxfp4_runtime,
 )
 from .weight_manifest import validate_persistent_int8_weights
 from .artifacts import (
@@ -125,6 +127,8 @@ __all__ = [
     "RAWINT4_WEIGHT_LAYOUT",
     "get_rawint4_checkpoint_contract",
     "get_rawint4_runtime",
+    "MXFP4_SFT_METHOD",
+    "get_mxfp4_runtime",
     "validate_persistent_int8_weights",
     "FUSED_EXPERT_LORA_NAME",
     "KT_ADAPTER_MANIFEST_NAME",
