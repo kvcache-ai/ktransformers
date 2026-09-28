@@ -4,9 +4,11 @@
 import argparse
 import json
 import math
+import random
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 from safetensors import safe_open
@@ -27,6 +29,7 @@ class AcceptanceAudit(TrainerCallback):
         self.audit_steps = set(audit_steps)
         self.initial = {}
         self.resume_checkpoint = resume_checkpoint
+        self.batches = []
 
     def _write(self, args, event):
         output = Path(args.output_dir)
@@ -54,11 +57,21 @@ class AcceptanceAudit(TrainerCallback):
             "optimizer parameter inventory differs from the adapter inventory"
         )
         assert all(p.requires_grad for p in self.params.values())
+        assert all("lora" in name.lower() for name in self.params)
         assert not any(
             ".indexer." in name or ".o_a_proj." in name for name in self.params
         )
         for name, parameter in self.params.items():
             self.initial[name] = _local(parameter).cpu().clone()
+        self.frozen = {
+            name: self._sample(parameter)
+            for name, parameter in model.named_parameters()
+            if not parameter.requires_grad
+        }
+        assert self.frozen, "no frozen base parameters found"
+        self.input_hook = model.register_forward_pre_hook(
+            self._observe_batch, with_kwargs=True
+        )
         if self.resume_checkpoint:
             self._verify_restored_state(args, state, optimizer, lr_scheduler)
         self._write(
@@ -70,9 +83,40 @@ class AcceptanceAudit(TrainerCallback):
                     name: {"shape": list(p.shape), "device": str(p.device)}
                     for name, p in self.params.items()
                 },
+                "frozen_parameter_count": len(self.frozen),
+                "frozen_check": "optimizer exclusion and up to 64 evenly spaced values per local tensor",
             },
         )
         self.started = time.perf_counter()
+
+    @staticmethod
+    def _sample(parameter):
+        local = _local(parameter).reshape(-1)
+        if not local.numel():
+            return local.cpu().clone()
+        indices = torch.linspace(
+            0, local.numel() - 1, min(64, local.numel()), device=local.device
+        ).long()
+        return local[indices].cpu().clone()
+
+    def _observe_batch(self, model, positional, kwargs):
+        if not model.training:
+            return
+        ids, labels, mask = (
+            kwargs.get("input_ids"),
+            kwargs.get("labels"),
+            kwargs.get("attention_mask"),
+        )
+        assert ids is not None and labels is not None and mask is not None
+        assert ids.ndim == labels.ndim == mask.ndim == 2
+        self.batches.append(
+            {
+                "input_shape": list(ids.shape),
+                "nonpadding_tokens": int(mask.sum()),
+                "supervised_tokens": int((labels != -100).sum()),
+                "lengths": mask.sum(dim=-1).tolist(),
+            }
+        )
 
     def _verify_restored_state(self, args, state, optimizer, scheduler):
         from torch.distributed.tensor import Replicate, Shard
@@ -118,7 +162,11 @@ class AcceptanceAudit(TrainerCallback):
             assert seen_experts == (
                 set(experts.keys()) if args.process_index == 0 else set()
             )
-        name = f"optimizer_rank_{args.process_index:05d}.pt"
+        name = (
+            f"optimizer_rank_{args.process_index:05d}.pt"
+            if (root / "kt_optimizer.index.json").is_file()
+            else "optimizer.pt"
+        )
         check.tree(
             "optimizer",
             torch.load(root / name, map_location="cpu", weights_only=False, mmap=True),
@@ -148,6 +196,7 @@ class AcceptanceAudit(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         self.step_started = time.perf_counter()
+        self.batches = []
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
@@ -176,6 +225,7 @@ class AcceptanceAudit(TrainerCallback):
             "event": "step_end",
             "step": step,
             "seconds": time.perf_counter() - self.step_started,
+            "batches": self.batches,
         }
         if torch.cuda.is_available():
             event.update(
@@ -183,6 +233,18 @@ class AcceptanceAudit(TrainerCallback):
                 cuda_peak_reserved=torch.cuda.max_memory_reserved(),
             )
         if step in self.audit_steps:
+            frozen = {
+                name: parameter
+                for name, parameter in kwargs["model"].named_parameters()
+                if not parameter.requires_grad
+            }
+            assert frozen.keys() == self.frozen.keys(), "frozen inventory changed"
+            assert all(
+                parameter.grad is None
+                and torch.equal(self._sample(parameter), self.frozen[name])
+                for name, parameter in frozen.items()
+            ), "a frozen base parameter changed or accumulated gradients"
+            event["frozen_samples_unchanged"] = True
             records = {}
             for name, parameter in self.params.items():
                 current = _local(parameter).float().cpu()
@@ -198,6 +260,41 @@ class AcceptanceAudit(TrainerCallback):
             control.should_save = True
             control.should_training_stop = True
         return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self.input_hook.remove()
+
+    def verify_rng_restore(self, args, checkpoint):
+        from compare_dsv4_resume import Comparison
+
+        name = (
+            "rng_state.pth"
+            if args.world_size == 1
+            else f"rng_state_{args.process_index}.pth"
+        )
+        saved = torch.load(
+            Path(checkpoint) / name, map_location="cpu", weights_only=False
+        )
+        check = Comparison(atol=0.0, rtol=0.0)
+        check.tree("python", saved["python"], random.getstate())
+        check.tree("numpy", saved["numpy"], np.random.get_state())
+        check.tensor("torch_cpu", saved["cpu"], torch.random.get_rng_state())
+        if "cuda" in saved:
+            current = (
+                torch.cuda.get_rng_state_all()
+                if args.world_size > 1
+                else torch.cuda.get_rng_state()
+            )
+            check.tree("torch_cuda", saved["cuda"], current)
+        self._write(
+            args,
+            {
+                "event": "rng_restore",
+                "exact": not check.failures,
+                "failures": check.failures,
+            },
+        )
+        assert not check.failures, check.failures
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         for key, value in (logs or {}).items():
@@ -223,7 +320,22 @@ def main():
     callback = AcceptanceAudit(
         args.stop_after, [int(v) for v in args.audit_steps.split(",")], args.resume
     )
-    run_exp(config, callbacks=[callback])
+    # Observe restoration at the real Trainer restore point, which is after
+    # on_train_begin. Do not change the RNG state or resumed training trajectory.
+    from transformers import Trainer
+
+    original_load_rng = Trainer._load_rng_state
+
+    def audited_load_rng(trainer, checkpoint):
+        original_load_rng(trainer, checkpoint)
+        if checkpoint:
+            callback.verify_rng_restore(trainer.args, checkpoint)
+
+    Trainer._load_rng_state = audited_load_rng
+    try:
+        run_exp(config, callbacks=[callback])
+    finally:
+        Trainer._load_rng_state = original_load_rng
 
 
 if __name__ == "__main__":
