@@ -48,16 +48,16 @@ def _install_fake_runtime(monkeypatch, *, variant="avx512_bf16", has_symbol=True
 
 
 def test_mxfp4_runtime_contract(monkeypatch):
-    for variant in ("avx512_bf16", "amx"):
+    for variant in ("avx512_bf16", "amx", "avx2"):
         _install_fake_runtime(monkeypatch, variant=variant)
         runtime = backend.get_mxfp4_runtime()
         assert runtime.cpu_variant == variant
-        assert runtime.kernel == backend.MXFP4_KERNEL
+        assert runtime.kernel == (backend.MXFP4_AVX2_KERNEL if variant == "avx2" else backend.MXFP4_KERNEL)
         assert runtime.weight_layout == backend.MXFP4_WEIGHT_LAYOUT
 
 
 def test_mxfp4_runtime_rejects_wrong_isa_and_stale_extension(monkeypatch):
-    _install_fake_runtime(monkeypatch, variant="avx2")
+    _install_fake_runtime(monkeypatch, variant="avx512_vnni")
     with pytest.raises(RuntimeError, match="requires an AVX512-BF16"):
         backend.get_mxfp4_runtime()
 
