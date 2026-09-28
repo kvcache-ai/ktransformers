@@ -17,6 +17,12 @@ continues the v0.7.1 companion release with PyTorch 2.9.1/CUDA 12.8 and PEFT
 leave normal package-version and provider checks enabled. Development
 candidate versions are not a public release or evidence of completed acceptance.
 
+The serving wheel declares `tilelang==0.1.10` and `apache-tvm-ffi==0.1.11`,
+matching the KT Docker recipe. TileLang is used by the compressed indexer on
+consumer GPUs even when the FlashMLA backend is Triton. The older TileLang
+release conflicts with newer TVM FFI versions during import, so retain the
+tested dependency pair in the installation lock.
+
 The LF companion adds the `deepseek4_nothink` raw-conversation template and
 validates the supported recipe before loading weights. It accepts ordinary
 Alpaca and ShareGPT conversations, including multiple turns. Thinking, tool
@@ -175,7 +181,7 @@ python -m sglang.launch_server \
   --kt-num-gpu-experts 0 --kt-gpu-prefill-token-threshold 0 \
   --tp 2 --dtype bfloat16 --attention-backend flashinfer \
   --mem-fraction-static 0.65 --max-running-requests 2 \
-  --context-length 2048 --chunked-prefill-size 1024 \
+  --context-length 2056 --chunked-prefill-size 1024 \
   --disable-cuda-graph --disable-custom-all-reduce \
   --disable-shared-experts-fusion --host 127.0.0.1 --port 31300
 ```
@@ -185,7 +191,10 @@ Send official chat-mode encoded prompts to `/generate`. The acceptance helper
 `kt-kernel/test/generate_dsv4_acceptance.py` records prompts, outputs, finish
 reasons, timing, and token log-probabilities for the prepared held-out split.
 
-The total serving context limit is 2048 input plus output tokens. For the
+The certified serving budget is 2048 input plus output tokens. The internal
+capacity above includes SGLang's reserved token slots; setting it to 2048
+would shorten the usable request budget. Acceptance checks both 1920 input
+plus 128 output tokens and 2047 input plus 1 output token. For the
 forced AVX2 acceptance path, set both `KT_KERNEL_CPU_VARIANT=avx2` and
 `KT_MXFP4_BACKEND=avx2` before starting the process. AVX512-BF16 uses
 `KT_KERNEL_CPU_VARIANT=avx512_bf16`. Final tested commands and wheel hashes
