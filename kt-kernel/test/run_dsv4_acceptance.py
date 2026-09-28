@@ -4,6 +4,7 @@
 import argparse
 import json
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -47,6 +48,21 @@ class AcceptanceAudit(TrainerCallback):
         lr_scheduler=None,
         **kwargs,
     ):
+        import kt_kernel
+
+        requested_variant = os.environ.get("KT_KERNEL_CPU_VARIANT")
+        if requested_variant:
+            assert kt_kernel.__cpu_variant__ == requested_variant
+        runtime = {
+            "cpu_variant": kt_kernel.__cpu_variant__,
+            "extension": kt_kernel.kt_kernel_ext.__file__,
+        }
+        if model.config.model_type == "deepseek_v4":
+            from dataclasses import asdict
+
+            from kt_kernel.sft import get_mxfp4_runtime
+
+            runtime.update(asdict(get_mxfp4_runtime()))
         self.params = dict(
             (name, p) for name, p in model.named_parameters() if p.requires_grad
         )
@@ -79,6 +95,7 @@ class AcceptanceAudit(TrainerCallback):
             {
                 "event": "train_begin",
                 "step": state.global_step,
+                "runtime": runtime,
                 "parameters": {
                     name: {"shape": list(p.shape), "device": str(p.device)}
                     for name, p in self.params.items()
