@@ -100,36 +100,131 @@ def test_cache_roundtrip_and_tampering(native_cache):
         resolve_native_load_plan(cfg, str(source))
 
 
+def test_first_load_prepares_cache_and_reuses_without_conversion(native_cache, tmp_path, monkeypatch):
+    import kt_kernel.sft.deepseek_v4 as v4
+
+    source, _ = native_cache
+    cache = tmp_path / "automatic"
+    cfg = SimpleNamespace(kt_weight_path=str(source), kt_non_expert_weight_path=str(cache))
+    first = resolve_native_load_plan(cfg, str(source))
+    before = {p.name: p.stat().st_mtime_ns for p in cache.iterdir()}
+
+    def unexpected_conversion(*args):
+        pytest.fail("warm load must not regenerate the cache")
+
+    monkeypatch.setattr(v4, "_convert_non_expert_cache", unexpected_conversion)
+    second = resolve_native_load_plan(cfg, str(source))
+    assert first.manifest == second.manifest
+    assert before == {p.name: p.stat().st_mtime_ns for p in cache.iterdir()}
+
+
+def test_concurrent_preparation_has_one_writer(native_cache, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import kt_kernel.sft.deepseek_v4 as v4
+
+    source, _ = native_cache
+    cache = tmp_path / "concurrent"
+    convert = v4._convert_non_expert_cache
+    calls = []
+
+    def counted(source, staging):
+        calls.append(staging)
+        assert not cache.exists(), "unvalidated weights must not be published"
+        return convert(source, staging)
+
+    monkeypatch.setattr(v4, "_convert_non_expert_cache", counted)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        jobs = [executor.submit(prepare_non_expert_cache, str(source), str(cache)) for _ in range(2)]
+        manifests = [job.result(timeout=30) for job in jobs]
+    assert len(calls) == 1
+    assert manifests[0] == manifests[1]
+
+
+def test_interrupted_owned_preparation_is_retried(native_cache, tmp_path, monkeypatch):
+    import kt_kernel.sft.deepseek_v4 as v4
+
+    source, _ = native_cache
+    cache = tmp_path / "retry"
+    convert = v4._convert_non_expert_cache
+
+    def interrupted(source, staging):
+        (staging / "incomplete.safetensors").write_bytes(b"partial")
+        raise KeyboardInterrupt("simulated interrupted converter")
+
+    monkeypatch.setattr(v4, "_convert_non_expert_cache", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        prepare_non_expert_cache(str(source), str(cache))
+    assert not cache.exists()
+    monkeypatch.setattr(v4, "_convert_non_expert_cache", convert)
+    assert prepare_non_expert_cache(str(source), str(cache))["status"] == "ready"
+    assert not (cache / "incomplete.safetensors").exists()
+    assert not (tmp_path / ".retry.kt-v4-cache.partial").exists()
+
+
+def test_cache_failure_does_not_publish_or_delete_unrelated_data(native_cache, tmp_path, monkeypatch):
+    import kt_kernel.sft.deepseek_v4 as v4
+
+    source, _ = native_cache
+    cache = tmp_path / "full-disk"
+    monkeypatch.setattr(v4.shutil, "disk_usage", lambda _: SimpleNamespace(free=0))
+    with pytest.raises(KTArtifactError, match="Insufficient space"):
+        prepare_non_expert_cache(str(source), str(cache))
+    assert not cache.exists()
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    note = unrelated / "user.txt"
+    note.write_text("keep me")
+    with pytest.raises(KTArtifactError):
+        prepare_non_expert_cache(str(source), str(unrelated))
+    assert note.read_text() == "keep me"
+
+
+def test_changed_source_and_symlink_cache_are_rejected(native_cache, tmp_path):
+    source, cache = native_cache
+    link = tmp_path / "linked-cache"
+    link.symlink_to(cache, target_is_directory=True)
+    with pytest.raises(KTArtifactError, match="real directory"):
+        prepare_non_expert_cache(str(source), str(link))
+    config_path = source / "config.json"
+    config = json.loads(config_path.read_text())
+    config["initializer_range"] = 0.01
+    config_path.write_text(json.dumps(config))
+    with pytest.raises(KTArtifactError, match="changed after cache"):
+        prepare_non_expert_cache(str(source), str(cache))
+
+
+def test_config_loading_allows_an_unprepared_cache(native_cache, tmp_path):
+    from kt_kernel.sft.artifacts import should_disable_kt_source_quantizer
+
+    cfg = SimpleNamespace(kt_expert_weight_format="mxfp4", kt_non_expert_weight_path=str(tmp_path / "future"))
+    assert should_disable_kt_source_quantizer(cfg, SimpleNamespace(model_type="deepseek_v4"))
+    assert not (tmp_path / "future").exists()
+
+
 @pytest.fixture
 def adapter_export(native_cache, tmp_path, monkeypatch):
     source, cache = native_cache
-    scripts = Path(__file__).resolve().parents[2] / "scripts"
-    monkeypatch.syspath_prepend(str(scripts))
-    spec = importlib.util.spec_from_file_location(
-        "v4_export", scripts / "export_dsv4_sglang_adapter.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from kt_kernel.sft import export_dsv4_sglang_adapter as module
     adapter = tmp_path / "adapter"
     adapter.mkdir()
-    (adapter / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 4}))
+    (adapter / "adapter_config.json").write_text(json.dumps({"r": 8, "lora_alpha": 16, "lora_dropout": 0.0}))
     prefix = "base_model.model.model.layers.0.self_attn.q_a_proj.lora_"
     save_file(
         {
-            prefix + "A.weight": torch.full((2, 32), 0.25),
-            prefix + "B.weight": torch.full((32, 2), 0.5),
+            prefix + "A.weight": torch.full((8, 32), 0.25),
+            prefix + "B.weight": torch.full((32, 8), 0.125),
         },
         adapter / "adapter_model.safetensors",
     )
     fused = {}
     for proj in ("gate", "up", "down"):
-        fused[f"layers.0.experts.{proj}_lora_a"] = torch.ones(1, 2, 32)
-        fused[f"layers.0.experts.{proj}_lora_b"] = torch.ones(1, 32, 2)
+        fused[f"layers.0.experts.{proj}_lora_a"] = torch.ones(1, 8, 32)
+        fused[f"layers.0.experts.{proj}_lora_b"] = torch.ones(1, 32, 8)
     save_file(fused, adapter / "fused_expert_lora.safetensors")
     manifest = {
         "status": "ready",
         "expert_weight_format": "mxfp4",
-        "lora": {"rank": 2, "alpha": 4},
+        "lora": {"rank": 8, "alpha": 16},
         "base": {
             "fingerprint": module.inspect_native_checkpoint(source)["fingerprint"]
         },

@@ -19,8 +19,8 @@ setup(
     ],
     extras_require={
         "sft": [
-            "transformers-kt==5.6.0.post5",
-            "accelerate-kt==1.14.0.post3",
+            "transformers-kt==5.6.0.post6.dev20260928",
+            "accelerate-kt==1.14.0.post4.dev20260928",
         ],
         "sglang": [
             f"sglang-kt=={_v}",

@@ -220,6 +220,15 @@ def assemble(raw, output, evidence_dir):
             any(PLATFORM in tag for tag in by_name[package]["tags"]),
             "Native input must be auditwheel-repaired for " + PLATFORM,
         )
+    kernel_abis = {
+        tuple(tag.split("-")[:2])
+        for tag in by_name["kt-kernel"]["tags"]
+    }
+    require(
+        len(kernel_abis) == 1 and next(iter(kernel_abis)) in {("cp311", "cp311"), ("cp312", "cp312")},
+        "KT native input must have one matching CPython 3.11 or 3.12 ABI",
+    )
+    kernel_python, kernel_abi = next(iter(kernel_abis))
     require(
         not by_name["sgl-kernel-kt"]["requires_dist"],
         "SGL native dependencies must be explicitly carried by main package metadata",
@@ -292,14 +301,7 @@ def assemble(raw, output, evidence_dir):
         capacities = {}
         for name in MODULES:
             root = roots[name]
-            python, abi = ("cp312", "cp312") if name == "kt-kernel" else ("py3", "none")
-            if name == "kt-kernel":
-                require(
-                    any(
-                        tag.startswith("cp312-cp312-") for tag in by_name[name]["tags"]
-                    ),
-                    "Initial release supports CPython 3.12 only",
-                )
+            python, abi = (kernel_python, kernel_abi) if name == "kt-kernel" else ("py3", "none")
             retag(root, python, abi)
             filename = f"{name.replace('-', '_')}-{by_name[name]['version']}-{python}-{abi}-{PLATFORM}.whl"
             filenames[name] = filename

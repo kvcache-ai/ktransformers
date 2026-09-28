@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import logging
+import shutil
+import stat
 import math
 import os
 from pathlib import Path
@@ -19,6 +23,7 @@ from .artifacts import (
     _canonical_json_sha256,
     _config_value,
     _distributed_validation_context,
+    _fsync_directory,
     _rawint4_shard_record,
     _read_json,
     _safe_root,
@@ -27,7 +32,10 @@ from .artifacts import (
     _write_json_atomic,
 )
 
+logger = logging.getLogger(__name__)
+
 _KIND = "deepseek-v4-non-expert-bf16"
+_PREPARATION_NAME = ".kt-v4-cache-owner.json"
 _FP8_DTYPES = {"F8_E4M3", "F8_E4M3FN"}
 
 
@@ -210,16 +218,10 @@ def _expected_cache_inventory(source: dict) -> dict:
     return result
 
 
-def prepare_non_expert_cache(source_path: str, output_path: str) -> dict:
-    """Stream non-experts only and publish a ready manifest after full validation."""
-    source = inspect_native_checkpoint(source_path)
+def _convert_non_expert_cache(source: dict, output: Path) -> dict:
+    """Write only inside a private staging directory owned by the cache lock."""
+    source_path = source["model_name_or_path"]
     expected = _expected_cache_inventory(source)
-    output = Path(output_path).absolute()
-    output.mkdir(parents=True, exist_ok=True)
-    if output.is_symlink() or any(output.iterdir()):
-        raise KTArtifactError(
-            f"cache destination must be an empty real directory: {output}"
-        )
     weight_map, records = {}, []
     root = Path(source["model_name_or_path"])
     for shard in sorted(set(source["weight_map"].values())):
@@ -284,6 +286,133 @@ def prepare_non_expert_cache(source_path: str, output_path: str) -> dict:
     return payload
 
 
+def _validate_non_expert_cache(source: dict, root: Path, *, verify_payload: bool = True) -> dict:
+    manifest_path = root / KT_NON_EXPERT_MANIFEST_NAME
+    manifest = _read_json(manifest_path, "V4 non-expert cache manifest")
+    if (manifest.get("kind"), manifest.get("version"), manifest.get("status")) != (
+        _KIND,
+        1,
+        "ready",
+    ):
+        raise KTArtifactError("invalid V4 cache ready manifest")
+    body = {key: value for key, value in manifest.items() if key != "fingerprint"}
+    if manifest.get("fingerprint") != _canonical_json_sha256(body):
+        raise KTArtifactError("V4 cache manifest fingerprint mismatch")
+    if manifest.get("source") != {
+        key: source[key]
+        for key in ("model_name_or_path", "fingerprint", "identity")
+    }:
+        raise KTArtifactError("native V4 checkpoint changed after cache conversion")
+    expected = _expected_cache_inventory(source)
+    if manifest.get("tensors") != expected:
+        raise KTArtifactError("V4 cache tensor inventory differs from its source")
+    index_path = root / KT_NON_EXPERT_INDEX_NAME
+    if manifest.get("index_sha256") != _sha256_file(index_path):
+        raise KTArtifactError("V4 cache index hash mismatch")
+    index = _read_json(index_path, "V4 cache index")["weight_map"]
+    observed, files = {}, []
+    for record in manifest["files"]:
+        name = record["name"]
+        if Path(name).name != name or name in files:
+            raise KTArtifactError("invalid V4 cache shard name")
+        path = root / name
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != record["size"]
+        ):
+            raise KTArtifactError(f"invalid V4 cache shard: {path}")
+        if verify_payload and _sha256_file(path) != record["sha256"]:
+            raise KTArtifactError(f"V4 cache payload hash mismatch: {path}")
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                tensor = handle.get_slice(key)
+                if key in observed or index.get(key) != name:
+                    raise KTArtifactError(
+                        f"duplicate or unindexed cache tensor: {key}"
+                    )
+                observed[key] = {
+                    "shape": tensor.get_shape(),
+                    "dtype": tensor.get_dtype(),
+                }
+        files.append(name)
+    if (
+        observed != expected
+        or set(index) != set(expected)
+        or set(index.values()) != set(files)
+    ):
+        raise KTArtifactError("V4 cache payload inventory mismatch")
+    return manifest
+
+
+def _ensure_non_expert_cache(source: dict, output_path: str, *, verify_payload: bool = True) -> dict:
+    if not output_path:
+        raise KTArtifactError("Set kt_non_expert_weight_path to a writable non-expert cache directory")
+    output = Path(output_path).expanduser().absolute()
+    source_root = Path(source["model_name_or_path"])
+    resolved_output = output.resolve()
+    if resolved_output.is_relative_to(source_root) or source_root.is_relative_to(resolved_output):
+        raise KTArtifactError("V4 non-expert cache must not overlap the source checkpoint")
+    if output.is_symlink():
+        raise KTArtifactError(f"V4 cache must be a real directory: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Never unlink the lock: all processes must keep locking the same inode.
+    lock_path = output.with_name(f".{output.name}.kt-v4-cache.lock")
+    flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise KTArtifactError(f"V4 cache lock must be a regular file: {lock_path}")
+        logger.info("Waiting for V4 non-expert cache lock: %s", lock_path)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise KTArtifactError(f"V4 cache must be a real directory: {output}")
+        if output.exists() and any(output.iterdir()):
+            # Existing caches are immutable. Never silently replace damaged or unrelated data.
+            return _validate_non_expert_cache(source, output, verify_payload=verify_payload)
+
+        staging = output.with_name(f".{output.name}.kt-v4-cache.partial")
+        owner = {"kind": _KIND, "target": str(output), "source": source["fingerprint"]}
+        if staging.is_symlink():
+            raise KTArtifactError(f"V4 cache staging directory must not be a symlink: {staging}")
+        if staging.exists():
+            if not staging.is_dir() or _read_json(staging / _PREPARATION_NAME, "V4 cache owner") != owner:
+                raise KTArtifactError(f"Refusing to replace an unowned V4 staging directory: {staging}")
+            logger.info("Removing interrupted V4 cache preparation: %s", staging)
+            shutil.rmtree(staging)
+
+        sizes = {"BF16": 2, "F32": 4, "I64": 8}
+        payload_bytes = sum(math.prod(v["shape"]) * sizes[v["dtype"]] for v in _expected_cache_inventory(source).values())
+        required_bytes = payload_bytes + max(16 * 1024**2, payload_bytes // 100)
+        free_bytes = shutil.disk_usage(output.parent).free
+        if free_bytes < required_bytes:
+            raise KTArtifactError(
+                f"Insufficient space for V4 non-expert cache at {output}: "
+                f"need at least {required_bytes} bytes, available {free_bytes} bytes"
+            )
+        staging.mkdir(mode=0o700)
+        _write_json_atomic(staging / _PREPARATION_NAME, owner)
+        logger.info("Preparing V4 non-expert cache at %s (%d tensor bytes)", output, payload_bytes)
+        try:
+            _convert_non_expert_cache(source, staging)
+            manifest = _validate_non_expert_cache(source, staging, verify_payload=verify_payload)
+            # rename replaces a pre-existing empty directory, never a non-empty cache.
+            os.replace(staging, output)
+            _fsync_directory(output.parent)
+        except Exception:
+            # We created this directory while holding the lock; no unrelated paths are removed.
+            if staging.exists() and not staging.is_symlink():
+                shutil.rmtree(staging)
+            raise
+        logger.info("V4 non-expert cache is ready: %s", output)
+        return manifest
+
+
+def prepare_non_expert_cache(source_path: str, output_path: str) -> dict:
+    """Atomically prepare or fully validate/reuse a native V4 non-expert cache."""
+    return _ensure_non_expert_cache(inspect_native_checkpoint(source_path), output_path)
+
+
 def resolve_native_load_plan(kt_config, source_path, explicit_quantization_config=None):
     if explicit_quantization_config is not None:
         raise KTArtifactError("native MXFP4 cannot use an explicit framework quantizer")
@@ -291,9 +420,6 @@ def resolve_native_load_plan(kt_config, source_path, explicit_quantization_confi
     error, signature, plan = None, None, None
     try:
         source = inspect_native_checkpoint(source_path)
-        root = _safe_root(
-            _config_value(kt_config, "kt_non_expert_weight_path"), "V4 non-expert cache"
-        )
         native_root = _safe_root(
             _config_value(kt_config, "kt_weight_path"), "native MXFP4 experts"
         )
@@ -301,61 +427,16 @@ def resolve_native_load_plan(kt_config, source_path, explicit_quantization_confi
             raise KTArtifactError(
                 "MXFP4 experts and non-expert cache must use the same native base"
             )
-        manifest_path = root / KT_NON_EXPERT_MANIFEST_NAME
-        manifest = _read_json(manifest_path, "V4 non-expert cache manifest")
-        if (manifest.get("kind"), manifest.get("version"), manifest.get("status")) != (
-            _KIND,
-            1,
-            "ready",
-        ):
-            raise KTArtifactError("invalid V4 cache ready manifest")
-        body = {key: value for key, value in manifest.items() if key != "fingerprint"}
-        if manifest.get("fingerprint") != _canonical_json_sha256(body):
-            raise KTArtifactError("V4 cache manifest fingerprint mismatch")
-        if manifest.get("source") != {
-            key: source[key]
-            for key in ("model_name_or_path", "fingerprint", "identity")
-        }:
-            raise KTArtifactError("native V4 checkpoint changed after cache conversion")
+        manifest = _ensure_non_expert_cache(
+            source, _config_value(kt_config, "kt_non_expert_weight_path"), verify_payload=rank == 0
+        )
+        root = _safe_root(
+            Path(_config_value(kt_config, "kt_non_expert_weight_path")).expanduser().absolute(),
+            "V4 non-expert cache",
+        )
         expected = _expected_cache_inventory(source)
-        if manifest.get("tensors") != expected:
-            raise KTArtifactError("V4 cache tensor inventory differs from its source")
-        index_path = root / KT_NON_EXPERT_INDEX_NAME
-        if manifest.get("index_sha256") != _sha256_file(index_path):
-            raise KTArtifactError("V4 cache index hash mismatch")
-        index = _read_json(index_path, "V4 cache index")["weight_map"]
-        observed, files = {}, []
-        for record in manifest["files"]:
-            name = record["name"]
-            if Path(name).name != name or name in files:
-                raise KTArtifactError("invalid V4 cache shard name")
-            path = root / name
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or path.stat().st_size != record["size"]
-            ):
-                raise KTArtifactError(f"invalid V4 cache shard: {path}")
-            if rank == 0 and _sha256_file(path) != record["sha256"]:
-                raise KTArtifactError(f"V4 cache payload hash mismatch: {path}")
-            with safe_open(path, framework="pt", device="cpu") as handle:
-                for key in handle.keys():
-                    tensor = handle.get_slice(key)
-                    if key in observed or index.get(key) != name:
-                        raise KTArtifactError(
-                            f"duplicate or unindexed cache tensor: {key}"
-                        )
-                    observed[key] = {
-                        "shape": tensor.get_shape(),
-                        "dtype": tensor.get_dtype(),
-                    }
-            files.append(name)
-        if (
-            observed != expected
-            or set(index) != set(expected)
-            or set(index.values()) != set(files)
-        ):
-            raise KTArtifactError("V4 cache payload inventory mismatch")
+        files = [record["name"] for record in manifest["files"]]
+        manifest_path = root / KT_NON_EXPERT_MANIFEST_NAME
         signature = (manifest["fingerprint"], str(root), str(native_root))
         plan = KTPretrainedLoadPlan(
             source_model_name_or_path=str(native_root),

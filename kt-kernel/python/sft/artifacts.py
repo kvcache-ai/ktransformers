@@ -792,6 +792,7 @@ def _config_expert_weight_format(config: Any) -> str:
         "amxfp8": "fp8",
         "rawint4": "rawint4",
         "amxint4_kgroup": "rawint4",
+        "mxfp4": "mxfp4",
     }.get(backend.strip().lower(), "")
 
 
@@ -841,10 +842,9 @@ def should_disable_kt_source_quantizer(
             raise KTArtifactError("native MXFP4 SFT currently requires DeepSeek V4")
         cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
         if not cache_path:
-            raise KTArtifactError("V4 MXFP4 SFT requires a validated BF16 non-expert cache")
-        manifest = _read_json(Path(cache_path) / KT_NON_EXPERT_MANIFEST_NAME, "V4 non-expert cache")
-        if manifest.get("kind") != "deepseek-v4-non-expert-bf16" or manifest.get("status") != "ready":
-            raise KTArtifactError("V4 non-expert cache is not ready")
+            raise KTArtifactError("Set kt_non_expert_weight_path for the automatic V4 BF16 non-expert cache")
+        # Config loading precedes the pretrained artifact resolver, which owns
+        # first-use preparation and full validation before any tensor is loaded.
         return True
     rawint4_requested = weight_format == "rawint4"
     skip_loading = bool(_config_value(kt_config, "kt_skip_expert_loading", True))
