@@ -37,19 +37,22 @@ _stub_module(
     get_moe_module=lambda layer, config: None,
     move_non_experts_to_gpu=lambda *args, **kwargs: None,
 )
-_stub_module("layer", KTMoELayerWrapper=object)
+_stub_module("layer", KTMoELayerWrapper=object, KTRoutedExpertsWrapper=object)
 _stub_module("lora", LoRAExperts=object)
 _stub_module("base", _supports_authoritative_optimizer_grads=lambda *args, **kwargs: False)
 _stub_module(
     "backend",
     FP8_BACKEND="FP8",
     INT8_BACKEND="INT8",
+    MXFP4_BACKEND="MXFP4",
+    MXFP4_SFT_METHOD="MXFP4_SFT",
     RAWINT4_BACKEND="RAWINT4",
     RAWINT4_GROUP_SIZE=32,
     RAWINT4_SFT_METHOD="RAWINT4_SFT",
     RAWINT4_WEIGHT_LAYOUT="compressed-tensors-rawint4-g32-v1",
     get_fp8_runtime=lambda: None,
     get_int8_runtime=lambda: None,
+    get_mxfp4_runtime=lambda: None,
     get_rawint4_checkpoint_contract=lambda config: None,
     get_rawint4_runtime=lambda: None,
 )
