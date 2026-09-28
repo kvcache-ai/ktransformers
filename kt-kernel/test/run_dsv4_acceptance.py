@@ -36,7 +36,7 @@ class AcceptanceAudit(TrainerCallback):
         output = Path(args.output_dir)
         output.mkdir(parents=True, exist_ok=True)
         with (output / f"audit-rank{args.process_index}.jsonl").open("a") as handle:
-            handle.write(json.dumps(event, allow_nan=False) + "\n")
+            handle.write(json.dumps({"time": time.time(), **event}, allow_nan=False) + "\n")
 
     def on_train_begin(
         self,
