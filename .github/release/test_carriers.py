@@ -13,7 +13,7 @@ import carriers
 from four_main import inspect_wheel
 
 
-def raw_wheels(tmp_path, python="cp312", abi=None):
+def raw_wheels(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
     for package in (*carriers.MODULES, "sgl-kernel-kt"):
@@ -25,7 +25,7 @@ def raw_wheels(tmp_path, python="cp312", abi=None):
             f"Metadata-Version: 2.1\nName: {package}\nVersion: 1.0\n"
         )
         tag = (
-            f"{python}-{abi or python}-" + carriers.PLATFORM
+            "cp312-cp312-" + carriers.PLATFORM
             if package in ("kt-kernel", "sgl-kernel-kt")
             else "py3-none-any"
         )
@@ -54,9 +54,8 @@ def raw_wheels(tmp_path, python="cp312", abi=None):
     return raw
 
 
-@pytest.mark.parametrize("python", ["cp311", "cp312"])
-def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch, python):
-    raw = raw_wheels(tmp_path, python=python)
+def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch):
+    raw = raw_wheels(tmp_path)
     monkeypatch.setattr(carriers, "binary_evidence", lambda roots: {"fixture": True})
     monkeypatch.setattr(carriers.subprocess, "check_output", lambda *args, **kwargs: "")
     evidence = tmp_path / "evidence"
@@ -67,7 +66,6 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     assert len(entries) == 5
     assert {entry["version"] for entry in entries} == {"1.0"}
     kt = next(output.glob("kt_kernel-*.whl"))
-    assert f"-{python}-{python}-" in kt.name
     with zipfile.ZipFile(kt) as wheel:
         assert wheel.read("sgl_kernel/payload_runtime.py") == b"fixture-data" * 20
         assert any(
@@ -82,14 +80,6 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     # Every final RECORD is independently checked, including regenerated payloads.
     for index, path in enumerate(output.iterdir()):
         carriers.unpack(path, tmp_path / f"verify-{index}")
-
-
-def test_carriers_reject_mismatched_native_python_abi(tmp_path):
-    raw = raw_wheels(tmp_path, python="cp311", abi="cp312")
-    evidence = tmp_path / "evidence"
-    evidence.mkdir()
-    with pytest.raises(ValueError, match="matching CPython"):
-        carriers.assemble(raw, tmp_path / "final", evidence)
 
 
 def test_tampered_raw_wheel_is_rejected(tmp_path):

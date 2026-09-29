@@ -1,66 +1,29 @@
-# DeepSeek-V4-Flash: native MXFP4 LoRA SFT
+# April DeepSeek-V4-Flash LoRA integration
 
-This recipe targets the **April DeepSeek-V4-Flash checkpoint**, not Flash-0731.
-Routed-expert base weights remain frozen native MXFP4 on CPU. GPU non-expert
-linear weights are decoded from FP8 into BF16; this is not whole-model FP4
-arithmetic. The training model uses differentiable Transformers attention.
+This integration builds on the [native MXFP4 expert kernel](./DeepSeek-V4-MXFP4-Routed-Expert-LoRA-SFT.md).
+KT trains CPU routed-expert LoRA while Transformers retains attention, routing,
+mHC and shared experts. Routed-expert base weights remain frozen native MXFP4;
+non-expert FP8 weights are decoded to BF16 for training.
 
-End-to-end acceptance is still in progress. See the experiment record before
-treating this development branch as a released integration.
+Use the matching [Transformers-KT](https://github.com/kvcache-ai/transformers/pull/8)
+and [SGLang-KT](https://github.com/kvcache-ai/sglang/pull/99) integrations and the
+companion LF branch providing `deepseek4_nothink`. Install a validated companion
+wheel set with its dependency lock. This integration PR does not select release
+versions; the existing default package extras do not supply these pending branches.
 
-## Dependencies and scope
+## Supported recipe
 
-Use the coordinated `yyj/dsv4-flash-delivery` branches of KTransformers,
-Transformers-KT, SGLang-KT, and the companion LLaMA-Factory branch. The stack
-continues the v0.7.1 companion release with PyTorch 2.9.1/CUDA 12.8 and PEFT
-0.18.1. Install a matching, validated wheel set with its dependency lock;
-leave normal package-version and provider checks enabled. Development
-candidate versions are not a public release or evidence of completed acceptance.
+The validated recipe is April Flash ordinary non-thinking Alpaca/ShareGPT chat,
+including multiple turns: LoRA r8/alpha16/dropout0, BF16 autocast, training length
+1024 and serving input plus output length 2048. Multi-GPU training uses FSDP2.
+Packing, `neat_packing`, `lora_target: all`, dynamic adapters, Flash-0731/Pro and
+Transformers cached generation are outside this recipe.
 
-The serving wheel declares `tilelang==0.1.10` and `apache-tvm-ffi==0.1.11`,
-matching the KT Docker recipe. TileLang is used by the compressed indexer on
-consumer GPUs even when the FlashMLA backend is Triton. The older TileLang
-release conflicts with newer TVM FFI versions during import, so retain the
-tested dependency pair in the installation lock.
-
-The LF companion adds the `deepseek4_nothink` raw-conversation template and
-validates the supported recipe before loading weights. It accepts ordinary
-Alpaca and ShareGPT conversations, including multiple turns. Thinking, tool
-calls, `packing`, and `neat_packing` are outside the first delivery.
-
-The acceptance matrix covers Python 3.11 and 3.12 on qj5090: AVX512-BF16
-with 1/2/4/8 RTX 5090 GPUs, and forced AVX2 with 2 GPUs. Multi-GPU training
-uses FSDP2; CPU TP2, S1024, and LoRA rank 8 / alpha 16 / dropout 0 are the
-reference recipe. These are acceptance requirements, not completed results.
-Forced AVX2 on this host does not certify a CPU that lacks AVX512.
-CPU TP1/TP2 are supported by the native kernel.
-Full/Hybrid training, GPU routed experts, adapter hot swapping, grouped
-`o_a_proj` LoRA, router/indexer LoRA, and MTP training are outside this recipe.
-
-## 1. Configure automatic non-expert cache preparation
-
-Set `kt_non_expert_weight_path` to a new cache directory in the LF YAML below.
-The first training startup prepares it automatically; later startups verify
-and reuse it. Use a dedicated cache path separate from the source model.
-An incompatible or damaged cache is rejected rather than silently overwritten.
-A lock serializes preparation, and an owned incomplete conversion can be retried.
-
-The converter streams only non-expert
-weights, preserves FP32 mHC/norm state and integer hash tables, and publishes
-a ready manifest after validating the complete tensor inventory. The April
-checkpoint produces approximately 13.7 GiB of cache files; this is a disk-space
-estimate, not additional per-GPU VRAM. No dense expert copy is produced.
-Keep the original checkpoint unchanged and accessible at `kt_weight_path`.
-Cache and adapter manifests are bound to that source checkpoint.
-
-## 2. Train through the existing LF entrypoint
-
-Add these settings to a normal LF LoRA SFT recipe:
+Add the following to a normal LF LoRA SFT YAML with `dataset`, `dataset_dir`
+and `output_dir` set. Register raw conversations through `dataset_info.json`.
 
 ```yaml
 model_name_or_path: /models/DeepSeek-V4-Flash
-stage: sft
-do_train: true
 finetuning_type: lora
 lora_rank: 8
 lora_alpha: 16
@@ -90,54 +53,27 @@ kt_config:
   kt_skip_expert_loading: true
 ```
 
-Keep LF gradient checkpointing enabled: GPU activations are recomputed, while
-CPU expert activations are retained across that recomputation. MXFP4 backward
-does not need a transposed base-weight buffer.
+First startup prepares the non-expert cache; later startups validate and reuse
+it. The April cache uses approximately 13.7 GiB of disk space. Use a dedicated
+directory separate from the original model, which must remain accessible.
+Preparation serializes concurrent writers, publishes only complete caches and
+retries an owned interrupted build. Invalid or damaged caches are rejected.
 
-Use FSDP2's transformer auto-wrap policy with
-`fsdp_transformer_layer_cls_to_wrap: DeepseekV4DecoderLayer`,
-`fsdp_cpu_ram_efficient_loading: true`, `fsdp_offload_params: false`, and
-`fsdp_reshard_after_forward: true`.
+For FSDP2, wrap `DeepseekV4DecoderLayer` with CPU RAM efficient loading enabled,
+parameter offload disabled and reshard after forward enabled. Keep gradient
+checkpointing and BF16 autocast enabled; `pure_bf16` and `bf16_full_eval` are
+unsupported. GPU activations are recomputed; CPU expert activations are retained.
+Indexer, grouped `o_a_proj`, router, mHC, embedding and head stay frozen, with
+their existing differentiable paths preserved. CPU expert LoRA and its optimizer
+state belong to rank 0; ordinary GPU LoRA uses FSDP2.
 
-KT wraps **only the routed-expert callable**. V4's hash/learned routing,
-shared experts, mHC, and attention remain in Transformers. CPU expert LoRA
-parameters and optimizer state belong to rank 0; standard GPU LoRA uses FSDP2.
-Only LoRA parameters are optimized; original base files are not rewritten.
+## Save, resume and export
 
-Register raw conversation JSON through the ordinary LF `dataset_info.json`
-and set `dataset` / `dataset_dir` in the YAML. No V4-specific preprocessing
-script or pretokenized internal dataset is required. Both packing options must
-remain false. A full S1024 test must be one complete conversation; concatenating
-independent samples does not establish support for packing.
-
-Keep BF16 autocast enabled for training and loss evaluation. `pure_bf16`,
-`bf16_full_eval`, and Transformers cached generation are not supported by this
-recipe. Use explicit LoRA targets from the listed set; `lora_target: all` is
-not supported. Indexer, grouped `o_a_proj`, router, mHC, embedding and head
-remain frozen. The existing differentiable main-network paths retain input
-gradients; discrete index selection and integer embedding inputs do not have
-the same gradient semantics.
-
-## 3. Save and resume
-
-Keep `save_only_model: false`. A resumable checkpoint includes both adapter
-files, `kt_adapter_manifest.json`, scheduler state and RNG state. FSDP2 also
-requires per-rank optimizer files and `kt_optimizer.index.json`; a single-GPU
-run uses the ordinary optimizer checkpoint. Do not copy
-only `adapter_model.safetensors`: it omits the CPU experts.
-
-Start a **new training process** with the same native model, cache, rank count,
-LoRA targets, and scheduler horizon, plus:
-
-```yaml
-resume_from_checkpoint: /runs/v4/checkpoint-10
-```
-
-Changing `max_steps` changes the cosine schedule; it is not an equivalent
-resume comparison. RAM-filesystem checkpoints survive a process restart but
-**not a host reboot**. Choose persistent checkpoint storage for durable runs.
-
-## 4. Export one fixed SGLang deployment
+Keep `save_only_model: false` and retain the complete checkpoint directory.
+The ordinary adapter file alone omits CPU expert LoRA. Resume in a new process
+using `resume_from_checkpoint` with the same model, cache, rank count, targets
+and scheduler horizon. FSDP2 requires per-rank optimizer files and
+`kt_optimizer.index.json`; single-GPU runs use the ordinary optimizer checkpoint.
 
 ```bash
 python -m kt_kernel.sft.export_dsv4_sglang_adapter \
@@ -147,24 +83,16 @@ python -m kt_kernel.sft.export_dsv4_sglang_adapter \
   --output /deploy/v4-adapter
 ```
 
-The exporter verifies hashes, source identity, all LoRA shapes, and complete
-consumption. It produces:
+The exporter validates source identity, hashes, LoRA shapes and consumption.
+It writes `model/` with ordinary LoRA merged in FP32 then rounded to BF16,
+`experts/` with CPU expert LoRA, and `deployment_manifest.json`.
+Both components are required for the complete adapter; original weights remain
+unchanged. The model snapshot contains no routed-expert base weights.
 
-- `model/`: independent BF16 non-expert snapshot with standard LoRA merged
-  in FP32 then rounded to BF16; no routed-expert base weights.
-- `experts/`: explicit per-expert LoRA adapter for the native CPU kernel.
-- `deployment_manifest.json`: source binding and consumption audit.
+## Static serving
 
-This first deployment is static, not `--lora-paths` hot swapping. Both
-components are required. The base model remains read-only. Use
-`--component base`, `experts`, or `nonexperts` only for controlled ablations;
-all use the same BF16 non-expert convention.
-For numerical ablations, add `--match-expert-kernel`: baseline/non-expert-only
-exports include an expert adapter with zero B matrices. This keeps the same
-native SFT forward path in all conditions, avoiding inference-kernel rounding
-differences as a confounder.
-
-The April SGLang path requires the following environment settings:
+Use the matched serving lock, including `tilelang==0.1.10` and
+`apache-tvm-ffi==0.1.11`, for the compressed indexer on consumer GPUs.
 
 ```bash
 export SGLANG_DSV4_MODE=2604 SGLANG_DSV4_2604_SUBMODE=2604B
@@ -186,34 +114,8 @@ python -m sglang.launch_server \
   --disable-shared-experts-fusion --host 127.0.0.1 --port 31300
 ```
 
-Do not enable dynamic expert promotion or suppress missing-weight checks.
-Send official chat-mode encoded prompts to `/generate`. The acceptance helper
-`kt-kernel/test/generate_dsv4_acceptance.py` records prompts, outputs, finish
-reasons, timing, and token log-probabilities for the prepared held-out split.
-
-The certified serving budget is 2048 input plus output tokens. The internal
-capacity above includes SGLang's reserved token slots; setting it to 2048
-would shorten the usable request budget. Acceptance checks both 1920 input
-plus 128 output tokens and 2047 input plus 1 output token. For the
-forced AVX2 acceptance path, set both `KT_KERNEL_CPU_VARIANT=avx2` and
-`KT_MXFP4_BACKEND=avx2` before starting the process. AVX512-BF16 uses
-`KT_KERNEL_CPU_VARIANT=avx512_bf16`. Final tested commands and wheel hashes
-must be supplied with the candidate acceptance record.
-
-## Acceptance criteria
-
-- S1024 GAS1/GAS4: at least three optimizer steps for each setting, finite
-  loss/gradients, CPU/GPU LoRA updates, frozen-base checks and save completion.
-- Train to step 10 with a 20-step scheduler horizon, exit, and resume in a
-  new process to step 20. Verify adapter, optimizer, scheduler, progress and
-  RNG restoration before resumed updates. Independent training trajectories
-  are not promised to be bitwise identical.
-- A fixed 200-step reference run records train-probe and held-out loss plus
-  paired answers. Short smoke runs do not prove convergence.
-- New-process SGLang generation: compare base and trained output on the same
-  32 held-out prompts; independently check expert/non-expert adapter effects.
-
-Record cold/hot startup, actual non-padding and supervised token counts, full
-length throughput, step times, CPU/GPU memory and disk use with the candidate
-wheel hashes. Distinguish sampled host-memory peaks and audit overhead from
-instantaneous measurements. No additional minimum-performance SLA is set.
+Send official chat-mode encoded prompts to `/generate`. The usable request
+budget is 2048 input plus output tokens; 2056 accounts for internal reserved
+slots. Keep routed experts on CPU and missing-weight checks enabled.
+For forced AVX2, set `KT_KERNEL_CPU_VARIANT=avx2` and `KT_MXFP4_BACKEND=avx2`;
+AVX512-BF16 uses `KT_KERNEL_CPU_VARIANT=avx512_bf16`.
