@@ -183,7 +183,7 @@ def chat(
             console.print(f"[dim]Loaded tokenizer from {selected_model}[/dim]")
             console.print()
         except Exception as e:
-            console.print(f"[dim yellow]Warning: Could not load tokenizer, token counts will be estimated[/dim]")
+            console.print(f"[dim yellow]Warning: Could not load tokenizer, token counts will be estimated[/dim yellow]")
             console.print()
 
     except Exception as e:
