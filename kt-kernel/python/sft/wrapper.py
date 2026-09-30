@@ -22,18 +22,21 @@ from .arch import (
     get_moe_arch_config,
     get_moe_module,
 )
-from .layer import KTMoELayerWrapper
+from .layer import KTMoELayerWrapper, KTRoutedExpertsWrapper
 from .lora import LoRAExperts
 from .base import _supports_authoritative_optimizer_grads
 from .backend import (
     FP8_BACKEND,
     INT8_BACKEND,
+    MXFP4_BACKEND,
+    MXFP4_SFT_METHOD,
     RAWINT4_BACKEND,
     RAWINT4_GROUP_SIZE,
     RAWINT4_SFT_METHOD,
     RAWINT4_WEIGHT_LAYOUT,
     get_fp8_runtime,
     get_int8_runtime,
+    get_mxfp4_runtime,
     get_rawint4_checkpoint_contract,
     get_rawint4_runtime,
 )
@@ -370,6 +373,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         INT8_BACKEND: "INT8_SFT",
         "AMXINT8": "INT8_SFT",
         RAWINT4_BACKEND: RAWINT4_SFT_METHOD,
+        MXFP4_BACKEND: MXFP4_SFT_METHOD,
         "AMXINT4_KGroup": RAWINT4_SFT_METHOD,
         "AMXINT4": "AMXINT4_SFT",
         "AMXBF16_SkipLoRA": "AMXBF16_SFT_SkipLoRA",
@@ -462,13 +466,14 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             "AMXFP8_SFT",
             "INT8_SFT",
             RAWINT4_SFT_METHOD,
+            MXFP4_SFT_METHOD,
         }
         or requested_num_gpu_experts != 0
         or use_lora_experts
     ):
         raise KTAMXConfigError(
             "activation_policy.cpu=retain requires CPU-only AMXBF16 Full/LoRA "
-            "or frozen-base INT8/FP8/RAWINT4 LoRA; Hybrid, GPU-expert, "
+            "or frozen-base INT8/FP8/RAWINT4/MXFP4 LoRA; Hybrid, GPU-expert, "
             "LoRA-expert, generic INT4, and SkipLoRA paths are not supported"
         )
     _validate_rawint4_activation_policy(expert_weight_format, activation_policy)
@@ -807,7 +812,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         _layer_experts = getattr(moe_module, moe_config.experts_attr, None)
         _layer_is_fused = _detect_fused(_layer_experts)
-        if expert_weight_format in {"int8", "fp8", "rawint4"} and not _layer_is_fused and not force_fused_expert_lora:
+        if expert_weight_format in {"int8", "fp8", "rawint4", "mxfp4"} and not _layer_is_fused and not force_fused_expert_lora:
             raise KTAMXConfigError(
                 f"{expert_weight_format.upper()} LoRA with non-fused runtime experts requires "
                 "kt_force_fused_expert_lora=true"
@@ -864,6 +869,10 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                         layer_idx=layer_idx,
                         expected_shapes=expected_shapes,
                     )
+                elif expert_weight_format == "mxfp4":
+                    get_mxfp4_runtime()
+                    if moe_config.router_type != "precomputed":
+                        raise KTAMXConfigError("MXFP4 SFT currently supports DeepSeek V4 routed experts only")
                 elif use_kt_weight_path:
                     logger.debug(f"Layer {layer_idx}: forward + backward from kt_weight_path (.kt files)")
                 elif expert_weight_format == "fp8":
@@ -943,8 +952,9 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                     max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
-                    group_size=RAWINT4_GROUP_SIZE if expert_weight_format == "rawint4" else 128,
-                    zero_point=False if expert_weight_format == "rawint4" else True,
+                    group_size=32 if expert_weight_format in {"rawint4", "mxfp4"} else 128,
+                    zero_point=expert_weight_format not in {"rawint4", "mxfp4"},
+                    swiglu_limit=float(getattr(_text_cfg, "swiglu_limit", 0.0)) if expert_weight_format == "mxfp4" else 0.0,
                     full_weight_grad=full_weight_grad,
                 )
             except BaseException as exc:
@@ -1067,7 +1077,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 dtype=torch.bfloat16,
             )
 
-        layer_wrapper = KTMoELayerWrapper(
+        layer_wrapper_cls = KTRoutedExpertsWrapper if moe_config.router_type == "precomputed" else KTMoELayerWrapper
+        layer_wrapper = layer_wrapper_cls(
             original_moe=moe_module,
             wrapper=wrapper,
             lora_params=None,
@@ -1098,7 +1109,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 "weight_layout": RAWINT4_WEIGHT_LAYOUT,
             }
 
-        setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
+        if moe_config.router_type != "precomputed":
+            setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
         # In full_weight_grad mode, the authoritative copies are gate_proj_buf etc.
         # Always release local references to save ~1 GB/layer.
@@ -1115,8 +1127,10 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             moe_module,
             moe_config,
             full_weight_grad=full_weight_grad,
-            empty_placeholders=expert_weight_format in {"int8", "fp8", "rawint4"},
+            empty_placeholders=expert_weight_format in {"int8", "fp8", "rawint4", "mxfp4"},
         )
+        if moe_config.router_type == "precomputed":
+            setattr(moe_module, moe_config.experts_attr, layer_wrapper)
 
     ephemeral_finish_error = None
     if ephemeral_store is not None:
@@ -1365,7 +1379,7 @@ def load_kt_model(
     expert_weight_format = getattr(cfg, "kt_expert_weight_format", None)
     native_fp8_experts = expert_weight_format == "fp8"
     native_rawint4_experts = expert_weight_format == "rawint4"
-    native_checkpoint_experts = native_fp8_experts or native_rawint4_experts
+    native_checkpoint_experts = native_fp8_experts or native_rawint4_experts or expert_weight_format == "mxfp4"
     if native_checkpoint_experts:
         # Native quantized kt_weight_path is raw-checkpoint provenance; KT owns
         # and loads the routed experts without materializing them in Transformers.

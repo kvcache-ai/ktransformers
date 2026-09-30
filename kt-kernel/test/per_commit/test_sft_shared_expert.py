@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from kt_kernel.sft.arch import MOEArchConfig, move_non_experts_to_gpu
-from kt_kernel.sft.layer import KTMoELayerWrapper
+from kt_kernel.sft.layer import KTMoELayerWrapper, KTRoutedExpertsWrapper
 
 
 class _FakeWrapper:
@@ -142,6 +142,39 @@ def test_plural_shared_expert_keeps_legacy_ungated_behavior():
 
     torch.testing.assert_close(actual, expected)
     assert "shared_experts.weight" in layer.state_dict()
+
+
+def test_precomputed_routing_preserves_model_router_and_shared_branch(monkeypatch):
+    original = _PluralSharedMoE(hidden_size=4, expert_num=2)
+    router, experts, shared = original.gate, original.experts, original.shared_experts
+    config = _moe_config(has_shared_experts=True)
+    config.router_type = "precomputed"
+    wrapper = KTRoutedExpertsWrapper(
+        original_moe=original, wrapper=_FakeWrapper(), lora_params=None,
+        moe_config=config, hidden_size=4, layer_idx=0,
+    )
+    original.experts = wrapper
+    assert original.gate is router and original.shared_experts is shared
+    assert wrapper.experts is experts
+    assert wrapper._shared_expert_attr is None and wrapper.gate is None
+
+    x = torch.randn(3, 4, requires_grad=True)
+    ids = torch.tensor([[0], [1], [0]])
+    weights = torch.ones(3, 1, requires_grad=True)
+
+    def fake_execute(self, hidden, routed_ids, routed_weights):
+        assert self is wrapper and routed_ids is ids and routed_weights is weights
+        assert hidden.shape == (1, 3, 4)
+        return hidden * routed_weights.unsqueeze(0)
+
+    monkeypatch.setattr(KTMoELayerWrapper, "_forward_routed", fake_execute)
+    output = wrapper(x, ids, weights)
+    torch.testing.assert_close(output, x)
+    output.sum().backward()
+    torch.testing.assert_close(x.grad, torch.ones_like(x))
+    torch.testing.assert_close(weights.grad, x.detach().sum(-1, keepdim=True))
+    with pytest.raises(ValueError, match="routing tensors"):
+        wrapper(x, ids[:1], weights)
 
 
 def test_huggingface_qwen35_shared_expert_contract():

@@ -24,6 +24,7 @@ RAWINT4_KERNEL = "amx-int4-kgroup-g32"
 RAWINT4_GROUP_SIZE = 32
 _RAWINT4_SFT_METHOD_ALIASES = frozenset({RAWINT4_SFT_METHOD, "AMXINT4_KGroup_SFT"})
 
+MXFP4_BACKEND = "MXFP4"
 
 def is_int8_sft_method(method: str) -> bool:
     return str(method) in _INT8_SFT_METHOD_ALIASES
@@ -58,6 +59,8 @@ def normalize_sft_backend(
             return FP8_BACKEND
         if expert_weight_format == "rawint4":
             return RAWINT4_BACKEND
+        if expert_weight_format == "mxfp4":
+            return MXFP4_BACKEND
         return "AMXBF16"
     if normalized == "int8":
         return INT8_BACKEND
@@ -80,6 +83,8 @@ def normalize_sft_backend(
         return FP8_BACKEND
     if normalized == "rawint4":
         return RAWINT4_BACKEND
+    if normalized == "mxfp4":
+        return MXFP4_BACKEND
     if normalized == "amxint4_kgroup":
         warnings.warn(
             "kt_backend='AMXINT4_KGroup' is deprecated; use " "kt_backend='auto' or kt_backend='RAWINT4'",
@@ -312,4 +317,61 @@ def get_rawint4_runtime() -> RAWINT4Runtime:
         cpu_variant=cpu_variant,
         kernel=kernel,
         weight_layout=layout,
+    )
+
+
+MXFP4_SFT_METHOD = "MXFP4_SFT"
+
+
+MXFP4_WEIGHT_LAYOUT = "mxfp4-e2m1-ue8m0-g32"
+
+
+MXFP4_KERNEL = "avx512-bf16-mxfp4-g32"
+
+
+MXFP4_AVX2_KERNEL = "avx2-mxfp4-g32"
+
+
+_MXFP4_SFT_METHOD_ALIASES = frozenset({MXFP4_SFT_METHOD})
+
+
+def is_mxfp4_sft_method(method: str) -> bool:
+    return str(method) in _MXFP4_SFT_METHOD_ALIASES
+
+
+@dataclass(frozen=True)
+class MXFP4Runtime:
+    cpu_variant: str
+    kernel: str
+    weight_layout: str
+
+
+def get_mxfp4_runtime() -> MXFP4Runtime:
+    """Validate and describe native group-32 MXFP4 routed-expert SFT."""
+
+    import kt_kernel
+
+    extension = kt_kernel.kt_kernel_ext
+    cpu_variant = str(getattr(extension, "__cpu_variant__", "")).lower()
+    # Two tiers ship MXFP4_SFT_MOE with the same Python contract: the AMX /
+    # AVX512-BF16 kernel and the AVX2 (FMA + F16C) kernel for Zen 2/3-class hosts.
+    if cpu_variant in {"amx", "avx512_bf16"}:
+        kernel = MXFP4_KERNEL
+    elif cpu_variant == "avx2":
+        kernel = MXFP4_AVX2_KERNEL
+    else:
+        raise RuntimeError(
+            "MXFP4 SFT requires an AVX512-BF16 or AVX2 extension; "
+            f"loaded cpu_variant={cpu_variant or 'unknown'!r}"
+        )
+    moe_extension = getattr(extension, "moe", None)
+    if moe_extension is None or not hasattr(moe_extension, "MXFP4_SFT_MOE"):
+        raise RuntimeError(
+            "The loaded kt-kernel extension does not provide MXFP4 SFT. "
+            "Install a wheel containing MXFP4_SFT_MOE."
+        )
+    return MXFP4Runtime(
+        cpu_variant=cpu_variant,
+        kernel=kernel,
+        weight_layout=MXFP4_WEIGHT_LAYOUT,
     )

@@ -13,15 +13,7 @@ from ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=5, suite="default")
 
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "convert_kt_to_sglang_adapter.py"
-)
-SPEC = importlib.util.spec_from_file_location("convert_kt_to_sglang_adapter", SCRIPT_PATH)
-converter = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(converter)
+from kt_kernel.sft import convert_kt_to_sglang_adapter as converter
 
 
 def _write_full_fused_checkpoint(path: Path, *, rank: int = 3) -> dict[str, torch.Tensor]:

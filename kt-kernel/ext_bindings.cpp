@@ -66,6 +66,10 @@ static const bool _is_plain_ = false;
 #include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #include "operators/avx2/gptq_int4_avxvnni_packed-moe.hpp"
 #include "operators/avx2/mxfp4-moe.hpp"
+#include "operators/avx2/sft_mxfp4-moe.hpp"
+#if !defined(USE_AMX_AVX_KERNEL)
+#include "operators/moe-sft-tp.hpp"
+#endif
 #include "operators/avx2/mxfp8-moe.hpp"
 #include "operators/avx2/rawint4-moe.hpp"
 #include "operators/avx2/rawint4_avxvnni-moe.hpp"
@@ -257,7 +261,7 @@ class MOEBindings {
   };
 };
 
-#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
+#if defined(__x86_64__)
 template <class T>
 class MOESFTBindings {
  public:
@@ -448,7 +452,7 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
         self.set_base_weight_pointers((void*)gate, (void*)up, (void*)down);
       });
 }
-#endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
+#endif  // defined(__x86_64__)
 
 template <typename MoeTP>
 void bind_moe_module(py::module_& moe_module, const char* name) {
@@ -967,6 +971,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   // SFT MoE with LoRA support (BF16, INT8, INT4, AWQ, K2)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "AMXBF16_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup, AMX_FP4_MOE_TP>>(
+      moe_module, "MXFP4_SFT_MOE");
 #if defined(__AVX512VBMI__)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224FP8, AMX_FP8_MOE_TP>>(moe_module, "AMXFP8_SFT_MOE");
 #endif
@@ -996,6 +1002,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AVX2_GPTQ_INT4_MOE_TP<avx2::GemmKernelAVX2GPTQInt4>>(moe_module, "AVX2GPTQInt4_MOE");
   bind_moe_module<AVX2_RAW_INT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module, "AVX2RawInt4_MOE");
   bind_moe_module<AVX2_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "AVX2MXFP4_MOE");
+#if !defined(USE_AMX_AVX_KERNEL)
+  // AVX2 tier of the MXFP4 routed-expert LoRA SFT (same Python name as the AMX build)
+  bind_moe_sft_module<avx2::AVX2_SFT_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "MXFP4_SFT_MOE");
+#endif
   bind_moe_module<AVX2_MXFP8_MOE_TP<avx2::GemmKernelAVX2MXFP8>>(moe_module, "AVX2MXFP8_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
                                                                                       "AVXVNNI256GPTQInt4_MOE");

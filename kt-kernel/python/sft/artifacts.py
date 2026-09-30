@@ -64,6 +64,7 @@ _RUNTIME_TENSOR_CONTRACTS = "_kt_routed_expert_runtime_tensor_contracts"
 _SUPPORTED_MOE_ARCHITECTURES = (
     "DeepseekV2",
     "DeepseekV3",
+    "DeepseekV4",
     "KimiK2",
     "Qwen2Moe",
     "Qwen3Moe",
@@ -71,7 +72,7 @@ _SUPPORTED_MOE_ARCHITECTURES = (
     "Glm4Moe",
     "Mixtral",
 )
-_EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8", "rawint4"})
+_EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8", "rawint4", "mxfp4"})
 _RAWINT4_BASE_IDENTITY_SCHEMA = "safetensors-sharded-sampled-v1"
 _RAWINT4_SAMPLE_BYTES = 64 * 1024
 _RAWINT4_SAMPLE_COUNT = 8
@@ -791,6 +792,7 @@ def _config_expert_weight_format(config: Any) -> str:
         "amxfp8": "fp8",
         "rawint4": "rawint4",
         "amxint4_kgroup": "rawint4",
+        "mxfp4": "mxfp4",
     }.get(backend.strip().lower(), "")
 
 
@@ -816,7 +818,7 @@ def is_kt_supported_moe_model(model: Any) -> bool:
         str(getattr(config, "model_type", "")),
         str(getattr(text_config, "model_type", "")),
     }
-    return bool(model_types.intersection({"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}))
+    return bool(model_types.intersection({"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6", "deepseek_v4"}))
 
 
 def should_disable_kt_source_quantizer(
@@ -832,7 +834,19 @@ def should_disable_kt_source_quantizer(
     nested checkpoint metadata remains available for KT's strict validation.
     """
 
-    rawint4_requested = _config_expert_weight_format(kt_config) == "rawint4"
+    weight_format = _config_expert_weight_format(kt_config)
+    if weight_format == "mxfp4":
+        if explicit_quantization_config is not None:
+            raise KTArtifactError("MXFP4 SFT cannot use an explicit framework quantizer")
+        if getattr(model_config, "model_type", None) != "deepseek_v4":
+            raise KTArtifactError("native MXFP4 SFT currently requires DeepSeek V4")
+        cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
+        if not cache_path:
+            raise KTArtifactError("Set kt_non_expert_weight_path for the automatic V4 BF16 non-expert cache")
+        # Config loading precedes the pretrained artifact resolver, which owns
+        # first-use preparation and full validation before any tensor is loaded.
+        return True
+    rawint4_requested = weight_format == "rawint4"
     skip_loading = bool(_config_value(kt_config, "kt_skip_expert_loading", True))
     if not rawint4_requested or not skip_loading:
         return False
@@ -898,7 +912,7 @@ def validate_kt_prequantized_loading_info(
 
     weight_format = _config_expert_weight_format(kt_config)
     skip_loading = _config_value(kt_config, "kt_skip_expert_loading", True)
-    if weight_format not in {"int8", "fp8", "rawint4"} or not bool(skip_loading):
+    if weight_format not in {"int8", "fp8", "rawint4", "mxfp4"} or not bool(skip_loading):
         return
     config = getattr(model, "config", None)
     text_config = getattr(config, "text_config", None)
@@ -961,6 +975,10 @@ def resolve_kt_pretrained_artifacts(
     ``disable_source_quantizer`` on the returned plan instead.
     """
 
+    if _config_expert_weight_format(kt_config) == "mxfp4":
+        from .deepseek_v4 import resolve_native_load_plan
+
+        return resolve_native_load_plan(kt_config, pretrained_model_name_or_path, quantization_config)
     cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
     if not cache_path:
         return None
@@ -1246,6 +1264,8 @@ def _enumerate_runtime_routed_modules(model: Any) -> tuple[tuple[str, Any], ...]
             raise KTArtifactError(f"missing routed-expert subtree {path!r}") from exc
         if registered is not experts:
             raise KTArtifactError(f"routed-expert subtree {path!r} does not preserve module identity")
+        if getattr(experts, "_is_kt_routed_experts_wrapper", False):
+            experts = getattr(experts, experts._experts_attr)
         if id(experts) in identities:
             raise KTArtifactError(f"routed-expert subtree {path!r} shares a module with another layer")
         identities.add(id(experts))
@@ -1838,9 +1858,9 @@ def _adapter_provenance(model: Any, plan: KTPretrainedLoadPlan | None) -> dict[s
             f"fused wrapper LoRA alpha {float(alpha)} does not match the pretrained plan alpha {plan.lora_alpha}"
         )
     expert_weight_format = _runtime_expert_weight_format(model, plan)
-    if plan is not None and expert_weight_format != "int8":
+    if plan is not None and expert_weight_format not in {"int8", "mxfp4"}:
         raise KTArtifactError(
-            "a KT non-expert load plan requires INT8 routed expert provenance"
+            "a KT non-expert load plan requires INT8 or MXFP4 routed expert provenance"
         )
     base_model_name = _base_model_name(model, plan)
     payload: dict[str, Any] = {
@@ -1868,7 +1888,8 @@ def _adapter_provenance(model: Any, plan: KTPretrainedLoadPlan | None) -> dict[s
             "path": plan.weight_path,
             "fingerprint": cache_fingerprint,
         }
-        payload["int8_experts"] = {
+        routed_field = "native_experts" if expert_weight_format == "mxfp4" else "int8_experts"
+        payload[routed_field] = {
             "path": plan.routed_weight_path,
             "manifest": routed_path.name,
             "manifest_sha256": _sha256_file(routed_path),
@@ -1976,7 +1997,7 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
         raise KTArtifactError(f"{manifest_path}: base does not match the runtime")
     if payload.get("lora") != expected_provenance["lora"]:
         raise KTArtifactError(f"{manifest_path}: lora does not match the runtime")
-    for field in ("non_expert_cache", "int8_experts", "expert_quantization"):
+    for field in ("non_expert_cache", "int8_experts", "native_experts", "expert_quantization"):
         if payload.get(field) != expected_provenance.get(field):
             raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
     artifacts = payload.get("artifacts")

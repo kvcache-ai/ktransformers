@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
-from .backend import is_fp8_sft_method, is_int8_sft_method, is_rawint4_sft_method
+from .backend import is_fp8_sft_method, is_int8_sft_method, is_rawint4_sft_method, is_mxfp4_sft_method
 
 
 def _supports_authoritative_optimizer_grads(
@@ -32,14 +32,14 @@ def _supports_authoritative_optimizer_grads(
     """Whether this SFT configuration can use C++-authoritative gradients.
 
     BF16 supports both base and LoRA authoritative gradients. Quantized base
-    weights are frozen, so INT8/FP8 support the same lifecycle only for pure LoRA.
+    weights are frozen, so INT8/FP8/MXFP4 support the lifecycle only for pure LoRA.
     """
     if int(num_gpu_experts) != 0:
         return False
     if method == "AMXBF16_SFT":
         return True
     return (
-        (is_int8_sft_method(method) or is_fp8_sft_method(method) or is_rawint4_sft_method(method))
+        (is_int8_sft_method(method) or is_fp8_sft_method(method) or is_rawint4_sft_method(method) or is_mxfp4_sft_method(method))
         and not bool(full_weight_grad)
         and int(lora_rank) > 0
     )
@@ -269,6 +269,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._checkpoint_output_cpu: Optional[torch.Tensor] = None
         self._checkpoint_output_qlen: int = 0
         self._backward_repack_pending: bool = False
+        self._inference_inflight: list[tuple[torch.cuda.Event, _SFTForwardBufferView]] = []
 
         self.moe = None
 
@@ -829,6 +830,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             return
 
         self._validate_forward_inputs(hidden_states, expert_ids, weights)
+        if hasattr(self, "_pending_inference_buffer"):
+            raise RuntimeError("An inference forward is already pending; call sync_forward_inference() first.")
+        if not torch.cuda.is_current_stream_capturing():
+            self._inference_inflight = [
+                (event, buffer) for event, buffer in self._inference_inflight if not event.query()
+            ]
         flat_hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         (
@@ -863,6 +870,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         )
 
         self._pending_inference_fallback = False
+        # The native task owns raw pointers, including a CPU-only batch-size scalar.
+        # Keep their tensors alive when another batch replaces the shared buffer.
+        self._pending_inference_buffer = buffer_view
         self._pending_inference_output_cpu = output_cpu[current_slot]
         self._pending_inference_output_gpu = output_gpu[current_slot]
 
@@ -897,8 +907,13 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self.cpu_infer.sync_with_cuda_stream(cuda_stream)
         with torch.cuda.stream(torch_stream):
             self._pending_inference_output_gpu.copy_(self._pending_inference_output_cpu, non_blocking=True)
+            self._pending_inference_output_gpu.record_stream(torch_stream)
+            completed = torch.cuda.Event()
+            completed.record(torch_stream)
+        self._inference_inflight.append((completed, self._pending_inference_buffer))
         output = self._pending_inference_output_gpu
 
+        del self._pending_inference_buffer
         del self._pending_inference_output_cpu
         del self._pending_inference_output_gpu
         return output

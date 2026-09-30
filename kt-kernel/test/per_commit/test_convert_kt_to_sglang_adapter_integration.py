@@ -23,15 +23,7 @@ KT_ALPHA_ENV = "KT_LORA_ALPHA"
 KT_LARGE_ADAPTER_ENV = "KT_LORA_LARGE_ADAPTER_DIR"
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "convert_kt_to_sglang_adapter.py"
-)
-SPEC = importlib.util.spec_from_file_location("convert_kt_to_sglang_adapter", SCRIPT_PATH)
-converter = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(converter)
+from kt_kernel.sft import convert_kt_to_sglang_adapter as converter
 
 SGLANG_EXPERT_KEY_RE = re.compile(
     r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\."
