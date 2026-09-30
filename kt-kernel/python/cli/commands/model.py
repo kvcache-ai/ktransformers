@@ -1550,8 +1550,8 @@ def edit_model(
         elif choice == "3":
             # Delete model
             console.print()
-            console.print(f"[bold yellow]{t('model_edit_delete_warning')}[/bold yellow]")
-            console.print(f"  {t('model_edit_delete_note')}")
+            console.print(f"[bold yellow]{t('model_edit_delete_warning', name=model.name)}[/bold yellow]")
+            console.print(f"  {t('model_edit_delete_note', path=model.path)}")
             console.print()
 
             if Confirm.ask(t("model_edit_delete_confirm", name=model.name), default=False):
@@ -1936,8 +1936,8 @@ def remove_model(
         raise typer.Exit(1)
 
     console.print()
-    console.print(f"[bold yellow]{t('model_remove_warning')}[/bold yellow]")
-    console.print(f"  {t('model_remove_note')}")
+    console.print(f"[bold yellow]{t('model_remove_warning', name=name)}[/bold yellow]")
+    console.print(f"  {t('model_remove_note', path=model.path)}")
     console.print(f"  [dim]Path: {model.path}[/dim]")
     console.print()
 
@@ -1983,7 +1983,7 @@ def remove_model(
         print_success(t("model_removed", name=name))
         console.print()
     else:
-        print_error(t("model_remove_failed", name=name))
+        print_error(t("model_remove_failed", error=name))
         raise typer.Exit(1)
 
 
