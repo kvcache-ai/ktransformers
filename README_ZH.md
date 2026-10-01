@@ -42,7 +42,7 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 * **2025 年 2 月 15 日**：更长上下文（24GB VRAM 从 4K 到 8K）& 速度稍快（+15%，最高 16 Tokens/s），更新[文档](./doc/en/DeepseekR1_V3_tutorial.md)和[在线手册](https://kvcache-ai.github.io/ktransformers/)
 * **2025 年 2 月 10 日**：支持 Deepseek-R1 和 V3 在单 GPU（24GB VRAM）/多 GPU 和 382GB DRAM 上运行，速度提升高达 3~28 倍。详细案例展示和复现教程请参见[这里](./doc/en/DeepseekR1_V3_tutorial.md)
 * **2024 年 8 月 28 日**：将 DeepseekV2 所需的 VRAM 从 21GB 降低到 11GB
-* **2024 年 8 月 15 日**：更新了关于注入和多 GPU 的详细[教程](doc/en/injection_tutorial.md)
+* **2024 年 8 月 15 日**：更新了关于注入和多 GPU 的详细[教程](doc/en/SFT/injection_tutorial.md)
 * **2024 年 8 月 14 日**：支持 llamfile 作为线性后端
 * **2024 年 8 月 12 日**：支持多 GPU；支持新模型：mixtral 8\*7B 和 8\*22B；支持 GPU 上的 q2k、q3k、q5k 去量化
 * **2024 年 8 月 9 日**：支持 Windows 原生环境
