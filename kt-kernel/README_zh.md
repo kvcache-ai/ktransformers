@@ -38,7 +38,7 @@
 - ✅ **带 AMX 的 Intel CPU**：已支持（基于转换为 INT4/INT8 格式的权重）
 - ✅ **通用 CPU（llamafile 后端）**：已支持（基于 GGUF 格式的权重）
 - ✅ **带 BLIS 的 AMD CPU**：已支持（int8 的 prefill 和 decode）
-- ✅ **Kimi-K2 原生 INT4（RAWINT4）**：支持 AVX512 CPU（CPU-GPU 共享 INT4 权重）- [使用指南](../doc/en/Kimi-K2-Thinking-Native.md)
+- ✅ **Kimi-K2 原生 INT4（RAWINT4）**：支持 AVX512 CPU（CPU-GPU 共享 INT4 权重）- [使用指南](../doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)
 
 ## 特性
 
@@ -321,7 +321,7 @@ python -m sglang.launch_server \
 - **`kt-method`**：根据 CPU 能力和权重格式选择：
   - `AMXINT4`：在 AMX CPU 上 INT4 量化时具有最佳性能（但可能对某些模型有较大精度影响，例如 Qwen3-30B-A3B）
   - `AMXINT8`：在 AMX CPU 上提供更高精度的 INT8 量化方案
-  - `RAWINT4`：CPU 和 GPU 共享原生 INT4 权重（仅限 AMX 后端，目前仅支持 Kimi-K2-Thinking 模型）。详见 [Kimi-K2-Thinking 原生推理教程](../doc/en/Kimi-K2-Thinking-Native.md)。
+  - `RAWINT4`：CPU 和 GPU 共享原生 INT4 权重（仅限 AMX 后端，目前仅支持 Kimi-K2-Thinking 模型）。详见 [Kimi-K2-Thinking 原生推理教程](../doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)。
   - `LLAMAFILE`：基于 AVX2/AVX512 的通用 CPU 后端，性能较 AMX 略低，但适用范围更广
 
 - **`kt-cpuinfer`**：设置为 **物理核数**（不是线程数）。

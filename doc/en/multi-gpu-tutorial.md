@@ -1,7 +1,7 @@
 
 # Muti-GPU
 
-Assume you have read the [Injection Tutorial](./injection_tutorial.md) and have a basic understanding of how to inject a model. In this tutorial, we will show you how to use KTransformers to run a model on multiple GPUs.
+Assume you have read the [Injection Tutorial](./SFT/injection_tutorial.md) and have a basic understanding of how to inject a model. In this tutorial, we will show you how to use KTransformers to run a model on multiple GPUs.
 
 If you have multiple GPUs, you can set the device for each module to different GPUs. 
 DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml).
