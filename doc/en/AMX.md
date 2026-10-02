@@ -11,6 +11,11 @@ Note: Because the PC's memory has a low frequency, large capacity, and multiple 
 
 The results are as follows:
 
+> **Note:** In the benchmark figures below, `N-way` means `N` concurrent requests served by
+> the `balance_serve` backend. For example, `4-way` means four requests are running at the
+> same time, so those numbers report multi-concurrency throughput rather than a single
+> standalone request.
+
 https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
 
 
