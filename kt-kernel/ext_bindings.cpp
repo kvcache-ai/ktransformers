@@ -66,6 +66,7 @@ static const bool _is_plain_ = false;
 #include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #include "operators/avx2/gptq_int4_avxvnni_packed-moe.hpp"
 #include "operators/avx2/mxfp4-moe.hpp"
+#include "operators/dense/bind-dense-head.cpp"
 #include "operators/avx2/sft_mxfp4-moe.hpp"
 #if !defined(USE_AMX_AVX_KERNEL)
 #include "operators/moe-sft-tp.hpp"
@@ -664,6 +665,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       ;
 
   auto linear_module = m.def_submodule("linear");
+  install_dense_nvfp4_head(linear_module);
   py::class_<LinearConfig>(linear_module, "LinearConfig")
       .def(py::init([](int hidden_size, int intermediate_size, int stride, int group_max_len, intptr_t proj,
                        int proj_type, int hidden_type) {
