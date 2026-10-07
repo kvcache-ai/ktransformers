@@ -151,6 +151,7 @@ class SafeTensorLoader:
         self.__load_tensor_file_map(file_path)
 
     def __load_tensor_file_map(self, file_path: str):
+        file_path = os.path.abspath(file_path)
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Path not found: {file_path}")
         if os.path.isfile(file_path):
@@ -169,20 +170,20 @@ class SafeTensorLoader:
                 if file.endswith(".safetensors"):
                     found_safetensor = True
                     file_path = os.path.join(root, file)
-                    if file not in self.file_handle_map:
+                    if file_path not in self.file_handle_map:
                         try:
                             handle = safe_open(file_path, framework="pt")
-                            self.file_handle_map[file] = handle
+                            self.file_handle_map[file_path] = handle
                         except Exception as e:
                             print(f"Error opening Safetensor file {file_path}: {e}")
                             continue
 
-                    f = self.file_handle_map.get(file)
+                    f = self.file_handle_map.get(file_path)
                     if f is None:
                         continue
                     try:
                         for key in f.keys():
-                            self.tensor_file_map[key] = file
+                            self.tensor_file_map[key] = file_path
                     except Exception as e:
                         print(f"Error reading Safetensor file {file_path}: {e}")
 
@@ -192,23 +193,24 @@ class SafeTensorLoader:
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
             raise KeyError(f"Key {key} not found in Safetensor files")
-        file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
+        file_path = self.tensor_file_map[key]
+        f = self.file_handle_map.get(file_path)
         if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+            f = safe_open(file_path, framework="pt")
+            self.file_handle_map[file_path] = f
         tensor = f.get_tensor(key)
+        if device == "cpu":
+            return tensor
         return tensor.to(device)
 
     def close_all_handles(self):
-        """Close all file handles and clear the handle map.
+        """Release open shard handles while retaining the tensor index.
 
-        Note: safetensors.safe_open doesn't expose a close() method. Releasing
-        the mmap relies on reference counting: once file_handle_map is cleared
-        and no tensor holds a reference to the underlying mmap region, the OS
-        will reclaim the page cache. gc.collect() is called here to trigger
-        immediate reclamation rather than waiting for the next GC cycle.
+        Tensor views keep their mapped storage alive until the last view is released.
+        Subsequent loads reopen the required shards on demand.
         """
         import gc
+
         self.file_handle_map.clear()
         gc.collect()
 
@@ -464,18 +466,6 @@ class FP8SafeTensorLoader(SafeTensorLoader):
         _, gate, up, down = self.MOE_FORMATS[self._detected_format]
         return gate, up, down
 
-    def load_tensor(self, key: str, device: str = "cpu"):
-        if key not in self.tensor_file_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
-        tensor = f.get_tensor(key)
-        if device == "cpu":
-            return tensor
-        return tensor.to(device)
-
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load FP8 expert weights and their scale tensors.
 
@@ -615,18 +605,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         """Get projection names (gate, up, down) based on detected format."""
         _, gate, up, down = self.MOE_FORMATS[self._detected_format]
         return gate, up, down
-
-    def load_tensor(self, key: str, device: str = "cpu"):
-        if key not in self.tensor_file_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
-        tensor = f.get_tensor(key)
-        if device == "cpu":
-            return tensor
-        return tensor.to(device)
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load BF16 expert weights (no scales needed)."""
@@ -1144,8 +1122,10 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
                     raise NotImplementedError(
                         "GPTQ sym=false (asymmetric) is not supported. Only sym=true models are supported."
                     )
-                print(f"[GPTQSafeTensorLoader] Verified: sym={qc.get('sym')}, desc_act={qc.get('desc_act')}, "
-                      f"bits={qc.get('bits')}, group_size={qc.get('group_size')}")
+                print(
+                    f"[GPTQSafeTensorLoader] Verified: sym={qc.get('sym')}, desc_act={qc.get('desc_act')}, "
+                    f"bits={qc.get('bits')}, group_size={qc.get('group_size')}"
+                )
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load GPTQ expert qweight and scales.
@@ -1176,13 +1156,23 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
         down_scales = [None] * expert_count
 
         for exp_id in range(expert_count):
-            gate_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device).contiguous()
+            gate_weights[exp_id] = self.load_tensor(
+                f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device
+            ).contiguous()
             up_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.qweight", device).contiguous()
-            down_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.qweight", device).contiguous()
+            down_weights[exp_id] = self.load_tensor(
+                f"{experts_prefix}.{exp_id}.{down_name}.qweight", device
+            ).contiguous()
 
-            gate_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
-            up_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
-            down_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
+            gate_scales[exp_id] = (
+                self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
+            )
+            up_scales[exp_id] = (
+                self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
+            )
+            down_scales[exp_id] = (
+                self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
+            )
 
         print(f"[GPTQSafeTensorLoader] Loaded {expert_count} experts from {experts_prefix}")
         return {
@@ -1220,25 +1210,19 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
         return list(dict.fromkeys(candidates))
 
     @staticmethod
-    def _ue8m0_to_bf16(
-        scale_t: torch.Tensor, *, reject_non_finite: bool = False
-    ) -> torch.Tensor:
+    def _ue8m0_to_bf16(scale_t: torch.Tensor, *, reject_non_finite: bool = False) -> torch.Tensor:
         if reject_non_finite:
             valid_dtypes = {torch.uint8}
             native_ue8m0 = getattr(torch, "float8_e8m0fnu", None)
             if native_ue8m0 is not None:
                 valid_dtypes.add(native_ue8m0)
             if scale_t.dtype not in valid_dtypes:
-                raise TypeError(
-                    "MXFP4 SFT requires raw uint8/float8_e8m0fnu scales, "
-                    f"got {scale_t.dtype}"
-                )
+                raise TypeError("MXFP4 SFT requires raw uint8/float8_e8m0fnu scales, " f"got {scale_t.dtype}")
         if scale_t.dtype != torch.uint8:
             scale_t = scale_t.view(torch.uint8)
         if reject_non_finite and torch.any(scale_t == 0xFF).item():
             raise ValueError(
-                "MXFP4 SFT rejects reserved UE8M0 scale 0xff because it "
-                "would decode to a non-finite BF16 value"
+                "MXFP4 SFT rejects reserved UE8M0 scale 0xff because it " "would decode to a non-finite BF16 value"
             )
         # BF16 normal exponent bits reproduce UE8M0 codes 1..254 exactly.
         # UE8M0 code 0 is 2^-127, represented by BF16 subnormal bits 0x0040.
@@ -1266,9 +1250,7 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
                 prefix = cand
                 break
         if prefix is None:
-            raise ValueError(
-                f"No MXFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}"
-            )
+            raise ValueError(f"No MXFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}")
 
         gate_weights = [None] * expert_count
         up_weights = [None] * expert_count
@@ -1294,9 +1276,7 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
                 (down_name, down_scales),
             ):
                 s = self.load_tensor(f"{prefix}.{exp_id}.{proj}.scale", device)
-                dst[exp_id] = self._ue8m0_to_bf16(
-                    s, reject_non_finite=reject_non_finite_scales
-                )
+                dst[exp_id] = self._ue8m0_to_bf16(s, reject_non_finite=reject_non_finite_scales)
 
         print(f"[MXFP4SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
         return {
@@ -1338,13 +1318,13 @@ class NVFP4SafeTensorLoader(SafeTensorLoader):
         candidates = [self.EXPERTS_PATH_TPL.format(base=base_key)]
         for strip in ("model.language_model.", "language_model.model.", "language_model.", "model."):
             if base_key.startswith(strip):
-                candidates.append(self.EXPERTS_PATH_TPL.format(base=base_key[len(strip):]))
+                candidates.append(self.EXPERTS_PATH_TPL.format(base=base_key[len(strip) :]))
         # ModelOpt checkpoints for multimodal Qwen3.5-MoE nest under
         # model.language_model.layers.{L}; callers may pass either form.
         if not base_key.startswith("model.language_model."):
             for pre in ("model.language_model.", "language_model.model."):
                 if base_key.startswith("model."):
-                    candidates.append(self.EXPERTS_PATH_TPL.format(base=pre + base_key[len("model."):]))
+                    candidates.append(self.EXPERTS_PATH_TPL.format(base=pre + base_key[len("model.") :]))
         return list(dict.fromkeys(candidates))
 
     @staticmethod
@@ -1365,9 +1345,7 @@ class NVFP4SafeTensorLoader(SafeTensorLoader):
                 prefix = cand
                 break
         if prefix is None:
-            raise ValueError(
-                f"No NVFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}"
-            )
+            raise ValueError(f"No NVFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}")
 
         gate_weights = [None] * expert_count
         up_weights = [None] * expert_count
@@ -1423,7 +1401,7 @@ class MXFP8SafeTensorLoader(SafeTensorLoader):
         candidates = [self.EXPERTS_PATH_TPL.format(base=base_key)]
         for strip in ("language_model.model.", "language_model.", "model."):
             if base_key.startswith(strip):
-                candidates.append(self.EXPERTS_PATH_TPL.format(base=base_key[len(strip):]))
+                candidates.append(self.EXPERTS_PATH_TPL.format(base=base_key[len(strip) :]))
         return list(dict.fromkeys(candidates))
 
     def load_experts(self, base_key: str, device: str = "cpu"):
@@ -1438,9 +1416,7 @@ class MXFP8SafeTensorLoader(SafeTensorLoader):
                 prefix = cand
                 break
         if prefix is None:
-            raise ValueError(
-                f"No MXFP8 experts found under any of: {self._experts_prefix_candidates(base_key)}"
-            )
+            raise ValueError(f"No MXFP8 experts found under any of: {self._experts_prefix_candidates(base_key)}")
 
         gate_weights = [None] * expert_count
         up_weights = [None] * expert_count
