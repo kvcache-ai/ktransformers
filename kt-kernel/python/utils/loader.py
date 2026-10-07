@@ -209,10 +209,7 @@ class SafeTensorLoader:
         Tensor views keep their mapped storage alive until the last view is released.
         Subsequent loads reopen the required shards on demand.
         """
-        import gc
-
         self.file_handle_map.clear()
-        gc.collect()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """
