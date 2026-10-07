@@ -24,6 +24,24 @@
 
 thread_local int WorkerPool::thread_local_id = -1;
 
+namespace {
+
+// Per-physical-NUMA-node worker counters used to compute the starting thread
+// index handed to each subpool. The counters are indexed by the *physical*
+// NUMA ID, but the subpool map may target a node whose ID is larger than the
+// number of subpools (e.g. a single subpool mapped to NUMA node 1). Sizing the
+// vector by the subpool count therefore reads/writes out of bounds and offsets
+// every worker's core binding. Size it to cover every NUMA ID in the map.
+std::vector<int> make_numa_thread_counters(const std::vector<int>& numa_ids) {
+  int max_numa_id = -1;
+  for (int id : numa_ids) {
+    max_numa_id = std::max(max_numa_id, id);
+  }
+  return std::vector<int>(static_cast<size_t>(max_numa_id) + 1, 0);
+}
+
+}  // namespace
+
 InNumaPool::InNumaPool(int max_thread_num) {
   printf("In Numa Worker Pool at NUMA %d, %d threads\n", numa_node_of_cpu(sched_getcpu()), max_thread_num);
   total_worker_count = max_thread_num;
@@ -282,7 +300,7 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
   }
 
   workers.resize(numa_count);
-  std::vector<int> numa_threads_count(numa_count, 0);
+  std::vector<int> numa_threads_count = make_numa_thread_counters(numa_ids);
   for (int i = 0; i < numa_count; i++) {
     workers[i] = std::thread(&NumaJobDistributor::worker_thread, this, i);
     auto this_numa = numa_ids[i];
@@ -421,7 +439,7 @@ void WorkerPool::init(WorkerPoolConfig config) {
   for (int i = 0; i < config.subpool_count; i++) {
     numa_worker_pools.push_back(nullptr);
   }
-  std::vector<int> numa_threads_count(config.subpool_count, 0);
+  std::vector<int> numa_threads_count = make_numa_thread_counters(config.subpool_numa_map);
   for (int i = 0; i < config.subpool_count; i++) {
     auto this_numa = config.subpool_numa_map[i];
     auto this_thread_count = config.subpool_thread_count[i];
