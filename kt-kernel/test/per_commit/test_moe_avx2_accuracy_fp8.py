@@ -23,6 +23,23 @@ max_len = 128
 group_size = 128
 validation_iter = 3
 CPUINFER_PARAM = 60
+SINGLE_SUBPOOL_THREADS = 8
+
+
+def make_cpu_infer(threads=CPUINFER_PARAM):
+    """CPUInfer backed by a single NUMA subpool.
+
+    The CPU MoE maps one TP part to each NUMA subpool, so the number of TP parts
+    (and the resulting per-TP shape) depends on the host NUMA topology. These
+    accuracy tests use small block-quantized shapes that must stay aligned to the
+    quantization group_size, so pin the pool to a single subpool (TP=1) to keep
+    the test independent of the host NUMA count.
+    """
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 1
+    cfg.subpool_numa_map = [0]
+    cfg.subpool_thread_count = [min(threads, SINGLE_SUBPOOL_THREADS)]
+    return kt_kernel_ext.CPUInfer(cfg)
 
 
 def fp8_e4m3_quantize(tensor_bf16):
@@ -161,7 +178,7 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
 @pytest.mark.parametrize("qlen,label", [(1, "Decode"), (16, "Prefill")])
 def test_avx2_fp8_accuracy(qlen, label):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
-    CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
+    CPUInfer = make_cpu_infer()
 
     with torch.inference_mode():
         # Generate BF16 weights, quantize to FP8
@@ -239,6 +256,35 @@ def test_avx2_fp8_accuracy(qlen, label):
             assert diff < 0.1, "FP8 accuracy test failed: diff=%.6f >= 0.1" % diff.item()
 
     print("  PASSED")
+
+
+@pytest.mark.cpu
+def test_avx2_fp8_rejects_unaligned_tp_split():
+    """A TP split that breaks the FP8 block grid must fail loudly.
+
+    With 8 subpools the CPU MoE uses 8 TP parts, so intermediate_size=512
+    becomes 64 per TP -- smaller than the 128-wide quantization block and a
+    hostile layout for the block-wise scales. The kernel used to silently
+    return garbage; it must now raise instead.
+    """
+    if not hasattr(kt_kernel_ext.moe, "AVX2FP8_MOE"):
+        pytest.skip("AVX2FP8_MOE is not available")
+
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 8
+    cfg.subpool_numa_map = [0] * 8
+    cfg.subpool_thread_count = [2] * 8
+    cpu_infer = kt_kernel_ext.CPUInfer(cfg)
+
+    config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+    config.max_len = max_len
+    config.quant_config.bits = 8
+    config.quant_config.group_size = group_size
+    config.quant_config.zero_point = False
+    config.pool = cpu_infer.backend_
+
+    with pytest.raises(RuntimeError, match="group_size"):
+        kt_kernel_ext.moe.AVX2FP8_MOE(config)
 
 
 if __name__ == "__main__":
