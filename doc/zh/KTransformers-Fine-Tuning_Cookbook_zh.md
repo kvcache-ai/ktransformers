@@ -1,5 +1,7 @@
 # KTransformers × LlamaFactory MoE 微调 Cookbook
 
+**研究论文：** [KTransformers-FineTune（KT-FT）](https://github.com/kvcache-ai/ktransformers/blob/main/papers/kt-ft/README_ZH.md) · [PDF](https://github.com/kvcache-ai/ktransformers/blob/main/papers/kt-ft/ktransformers-finetune.pdf)。
+
 从  Qwen3.5 到 DeepSeek-V4、Kimi-K3、GLM-5.2，每一次超大模型的开源都带来性能与规模上的巨大跃升。然而，多数研究者与开发者受限于昂贵的显卡，难以在资源受限条件下微调超大模型。面对这种差距，我们提出了一种更具可行性的方案：通过 KTransformers 与 LlamaFactory 的结合，仅需1~4张RTX 4090与较高内存CPU，便可微调 DeepSeek-V3&V4系列/Kimi-K2.5/GLM-5.2等1T规模的 MoE（Mixture of Experts，混合专家）模型。
 
 为给大家提供便捷高效的使用方式，KTransformers 与 LlamaFactory 合作，保持您的工作流不受影响，最大化支持矩阵。如下图所示，LlamaFactory 是整个微调流程的统一调度与配置框架，负责数据处理、训练调度、LoRA 插入与推理接口管理；GPU 运行 Attention、Shared Expert 等模块，KTransformers 接管位于 CPU 与大内存中的 Routed Experts，实现 GPU+CPU 异构协同。
