@@ -1,5 +1,7 @@
 # KTransformers × LlamaFactory MoE Fine-Tuning Cookbook
 
+**Research paper:** [KTransformers-FineTune (KT-FT)](https://github.com/kvcache-ai/ktransformers/tree/main/papers/kt-ft) · [PDF](https://github.com/kvcache-ai/ktransformers/blob/main/papers/kt-ft/ktransformers-finetune.pdf).
+
 From Qwen3.5 to DeepSeek-V4, Kimi-K3, and GLM-5.2, each new ultra-large open model brings a major leap in capability and scale. However, the cost of high-end GPUs still prevents many researchers and developers from fine-tuning these models under constrained resources. KTransformers and LlamaFactory provide a practical alternative: with 1–4 RTX 4090 GPUs and a CPU platform with sufficient memory, users can fine-tune trillion-parameter MoE (Mixture of Experts) models such as the DeepSeek-V3/V4 family, Kimi-K2.5, and GLM-5.2.
 
 KTransformers integrates with LlamaFactory while preserving its familiar training workflow. LlamaFactory remains the unified configuration and orchestration layer for data processing, training, LoRA injection, and inference integration. The GPU runs Attention and Shared Expert modules, while KTransformers manages Routed Experts in CPU memory for heterogeneous GPU–CPU execution.
