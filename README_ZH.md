@@ -17,6 +17,7 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 
 ## 🔥 更新
 
+* **2026 年 10 月 8 日**：公开 **KTransformers-FineTune（KT-FT）** 作者预印本，介绍通过布局优化与动态调度实现高效 MoE 异构协同微调的方法。[论文与引用](./papers/kt-ft/README_ZH.md) · [PDF](./papers/kt-ft/ktransformers-finetune.pdf)。
 * **2026 年 8 月 25 日**：上传了全新的易用版 [KTransformers × LlamaFactory MoE 微调 Cookbook](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md)，覆盖硬件检查、环境安装、BF16/FP8/INT8 配置、LoRA 与全量微调、资源规划及故障排查。
 * **2026 年 8 月 17 日**：LoRA 微调支持兼容 AVX512 的 x86 CPU，包括 AMD 服务器，无需依赖 AMX。（[v0.7.0 Release Notes](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0)）
 * **2026 年 8 月 5 日**：新增原生 block-FP8 LoRA 微调，可直接加载 checkpoint 中的 FP8 Routed Expert 权重，无需生成完整的 BF16 权重副本。（[PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141)）
@@ -86,6 +87,8 @@ pip install .
 
 ### 🎓 [SFT](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md) - LlamaFactory 微调
 
+**研究论文：** [KTransformers-FineTune（KT-FT）](./papers/kt-ft/README_ZH.md) · [PDF](./papers/kt-ft/ktransformers-finetune.pdf)。
+
 KTransformers × LlamaFactory 集成，面向超大 MoE 模型微调。新的 Cookbook 提供从硬件检查、环境安装到 BF16/FP8/INT8 配置、LoRA/全量训练、资源规划和故障排查的易用流程。
 
 **支持 Kimi K2.5 / K2.6 LoRA 微调**，保留 routed experts 的原生 RAWINT4 权重。参见 [PyPI 安装、训练、续训与 SGLang 推理教程](./.github/release/examples/kimi-k25/README.md)。端到端实机验证使用 Kimi K2.5；K2.6 沿用相同模型架构路径。
@@ -125,7 +128,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 
 ## 🔥 引用
 
-如果您在研究中使用了 KTransformers，请引用我们的论文：
+如果您在研究中使用了 KTransformers，请引用相应的论文。
+
+### 推理论文
 
 ```bibtex
 @inproceedings{10.1145/3731569.3764843,
@@ -133,6 +138,21 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
   booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
   year = {2025}
+}
+```
+
+### 微调论文
+
+[KTransformers-FineTune（KT-FT）](./papers/kt-ft/README_ZH.md) · [完整 BibTeX](./papers/kt-ft/CITATION.bib)
+
+```bibtex
+@misc{li2026ktft,
+  title = {{KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning}},
+  author = {Li, Peilin and Hao, Xingxing and Chen, Hongtao and Xie, Weiyu and Zheng, Yaowei and Wu, Bowen and Yang, Yujie and Shen, Huanming and Ou, Qingliang and Zhang, Boxin and Tang, Jingqi and Yuan, Ziwei and Dong, Jianwei and Kuang, Dongdong and Feng, Zhangchi and Dai, Jiaheng and Yang, Qianrui and Chen, Shaoyuan and Wang, Jiahao and Han, Yaochen and Zhu, Yuening and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+  year = {2026},
+  note = {Author preprint, version paper-ktft-v1},
+  howpublished = {Author preprint, GitHub},
+  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1/papers/kt-ft}
 }
 ```
 
