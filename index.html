@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-82b0cd38.js";
+            window.path_to_searchindex_js = "searchindex-ba101fc9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78d73750.js"></script>
@@ -198,6 +198,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="./kt-kernel/README.html">Inference</a> and <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Oct 8, 2026</strong>: We release the author preprint of <strong>KTransformers-FineTune (KT-FT)</strong>, presenting layout-aware and schedule-optimized CPU-GPU co-computation for MoE fine-tuning. <a href="./papers/kt-ft/">Paper and citation</a> · <a href="./papers/kt-ft/ktransformers-finetune.pdf">PDF</a>.</li>
 <li><strong>Sep 13, 2026</strong>: <strong>Kimi K2.5 / K2.6 LoRA fine-tuning</strong> is supported with native RAWINT4 routed experts.</li>
 <li><strong>Aug 26, 2026</strong>: Added native support for <strong>GLM-5.3-flash</strong>, bringing 1M-token context and multimodal input to consumer GPUs. (<a href="./doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
@@ -278,6 +279,7 @@ pip install .
 <p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
 <h3 id="-sft---fine-tuning-with-llamafactory"><a class="header" href="#-sft---fine-tuning-with-llamafactory">🎓 <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a> - Fine-Tuning with LlamaFactory</a></h3>
+<p><strong>Research paper:</strong> <a href="./papers/kt-ft/">KTransformers-FineTune (KT-FT)</a> · <a href="./papers/kt-ft/ktransformers-finetune.pdf">PDF</a>.</p>
 <p>KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.</p>
 <p><strong>Kimi K2.5 / K2.6 LoRA fine-tuning</strong> is supported with native RAWINT4 routed experts. Follow the <a href="./.github/release/examples/kimi-k25/README.html">PyPI installation, training, resume and SGLang serving guide (中文)</a>. End-to-end validation uses Kimi K2.5; K2.6 follows the same model-architecture path.</p>
 <p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="./doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"><span class="img-wrapper"><img src="./doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"></span></label></p>
@@ -316,12 +318,24 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
-<p>If you use KTransformers in your research, please cite our paper:</p>
+<p>If you use KTransformers in your research, please cite the relevant paper.</p>
+<h3 id="inference-paper"><a class="header" href="#inference-paper">Inference paper</a></h3>
 <pre><code class="language-bibtex">@inproceedings{10.1145/3731569.3764843,
   title = {KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models},
   author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
   booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
   year = {2025}
+}
+</code></pre>
+<h3 id="fine-tuning-paper"><a class="header" href="#fine-tuning-paper">Fine-tuning paper</a></h3>
+<p><a href="./papers/kt-ft/">KTransformers-FineTune (KT-FT)</a> · <a href="./papers/kt-ft/CITATION.bib">Full BibTeX</a></p>
+<pre><code class="language-bibtex">@misc{li2026ktft,
+  title = {{KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning}},
+  author = {Li, Peilin and Hao, Xingxing and Chen, Hongtao and Xie, Weiyu and Zheng, Yaowei and Wu, Bowen and Yang, Yujie and Shen, Huanming and Ou, Qingliang and Zhang, Boxin and Tang, Jingqi and Yuan, Ziwei and Dong, Jianwei and Kuang, Dongdong and Feng, Zhangchi and Dai, Jiaheng and Yang, Qianrui and Chen, Shaoyuan and Wang, Jiahao and Han, Yaochen and Zhu, Yuening and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+  year = {2026},
+  note = {Author preprint, version paper-ktft-v1},
+  howpublished = {Author preprint, GitHub},
+  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1/papers/kt-ft}
 }
 </code></pre>
 <h2 id="-contributors--team"><a class="header" href="#-contributors--team">👥 Contributors &amp; Team</a></h2>
