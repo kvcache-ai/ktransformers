@@ -448,6 +448,10 @@ class BaseMoEWrapper(_MoEBase, ABC):
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
+        # Optional directory for file-backed per-expert BufferB weight blocks
+        # (--kt-mmap-experts-dir). Overwritten by KTMoEWrapper.__new__ when set;
+        # each backend's load_weights() copies it into MOEConfig.mmap_weights_dir.
+        self.mmap_experts_dir = ""
         # V4-Flash 2604B SwiGLU clamp limit; 0.0 = disabled. NativeMoEWrapper
         # (MXFP4 path) reads this in load_weights() and writes it into
         # MOEConfig.swiglu_limit. Other backends ignore it (C++ act_fn skips

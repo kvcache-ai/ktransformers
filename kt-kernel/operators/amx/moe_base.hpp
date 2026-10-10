@@ -79,6 +79,13 @@ class AMX_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
+  // Optional file backing for the per-expert BufferB blocks below; a no-op
+  // unless config_.mmap_weights_dir is set (--kt-mmap-experts-dir). Its
+  // destructor munmaps every slice, so these BufferB blocks -- which this
+  // class otherwise never frees -- are released on teardown when file-backed.
+  // See operators/kt_weight_arena.hpp.
+  KtWeightArena bb_arena_;
+
   AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
     derived()->derived_init();
@@ -124,6 +131,13 @@ class AMX_MOE_BASE {
     m_local_up_output_ptr_.resize(config_.expert_num);
     m_local_down_output_ptr_.resize(config_.expert_num);
 
+    // Optionally back the per-expert BufferB blocks with a file instead of
+    // anonymous heap (--kt-mmap-experts-dir). No-op when the dir is unset.
+    const size_t bb_block_max = std::max(buffer_b_required_size(config_.intermediate_size, config_.hidden_size),
+                                         buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+    bb_arena_.open(config_.mmap_weights_dir, config_.layer_idx, tp_part_idx,
+                   static_cast<size_t>(config_.expert_num) * 3, bb_block_max);
+
     for (size_t i = 0; i < config_.expert_num; i++) {
       gate_up_ba_.push_back(make_buffer_a(config_.max_len, config_.hidden_size, nullptr));
       gate_bc_.push_back(make_buffer_c(config_.max_len, config_.intermediate_size, nullptr));
@@ -131,15 +145,20 @@ class AMX_MOE_BASE {
       down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
+      // file_backed unused: this class never frees BufferB itself (non-owning
+      // views). When file-backed, bb_arena_'s destructor munmaps; otherwise the
+      // anonymous block leaks as before (server lifetime).
+      bool file_backed;
       void* gate_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+          bb_arena_.alloc(buffer_b_required_size(config_.intermediate_size, config_.hidden_size), &file_backed);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* up_bb_ptr =
+          bb_arena_.alloc(buffer_b_required_size(config_.intermediate_size, config_.hidden_size), &file_backed);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
       void* down_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+          bb_arena_.alloc(buffer_b_required_size(config_.hidden_size, config_.intermediate_size), &file_backed);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
     // TODO: need update to all *.hpp
