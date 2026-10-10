@@ -1,10 +1,10 @@
 # KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning
 
-[English](README.md) · [阅读 PDF](ktransformers-finetune.pdf) · [下载 PDF](https://raw.githubusercontent.com/kvcache-ai/ktransformers/paper-ktft-v1/papers/kt-ft/ktransformers-finetune.pdf) · [微调 Cookbook](https://github.com/kvcache-ai/ktransformers/blob/main/doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md) · [引用](#引用)
+[English](README.md) · [阅读 PDF](ktransformers-finetune.pdf) · [下载 PDF](https://raw.githubusercontent.com/kvcache-ai/ktransformers/paper-ktft-v1.1/papers/kt-ft/ktransformers-finetune.pdf) · [微调 Cookbook](https://github.com/kvcache-ai/ktransformers/blob/main/doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md) · [引用](#引用)
 
 Peilin Li, Xingxing Hao, Hongtao Chen, Weiyu Xie, Yaowei Zheng, Bowen Wu, Yujie Yang, Huanming Shen, Qingliang Ou, Boxin Zhang, Jingqi Tang, Ziwei Yuan, Jianwei Dong, Dongdong Kuang, Zhangchi Feng, Jiaheng Dai, Qianrui Yang, Shaoyuan Chen, Jiahao Wang, Yaochen Han, Yuening Zhu, Jiaqi Liao, Xianglin Chen, Zhiyuan Ai, Yongwei Wu, Mingxing Zhang。
 
-作者预印本 · GitHub 发布日期：2026 年 10 月 8 日 · 版本：`paper-ktft-v1`。
+作者预印本 · GitHub 发布日期：2026 年 10 月 8 日 · 更新日期：2026 年 10 月 10 日 · 版本：`paper-ktft-v1.1`。
 
 公开 arXiv 链接可用后将补充。通讯作者：Mingxing Zhang。
 
@@ -33,9 +33,9 @@ LoRA Experts 将剩余显存用于共享的模型适配路径，通过系统-算
   title = {{KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning}},
   author = {Li, Peilin and Hao, Xingxing and Chen, Hongtao and Xie, Weiyu and Zheng, Yaowei and Wu, Bowen and Yang, Yujie and Shen, Huanming and Ou, Qingliang and Zhang, Boxin and Tang, Jingqi and Yuan, Ziwei and Dong, Jianwei and Kuang, Dongdong and Feng, Zhangchi and Dai, Jiaheng and Yang, Qianrui and Chen, Shaoyuan and Wang, Jiahao and Han, Yaochen and Zhu, Yuening and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
   year = {2026},
-  note = {Author preprint, version paper-ktft-v1},
+  note = {Author preprint, version paper-ktft-v1.1},
   howpublished = {Author preprint, GitHub},
-  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1/papers/kt-ft}
+  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1.1/papers/kt-ft}
 }
 ```
 

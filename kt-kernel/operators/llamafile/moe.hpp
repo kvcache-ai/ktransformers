@@ -646,35 +646,35 @@ class LLAMA_MOE_TP {
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
       }
     }
+    // Row sizes of the quantized inputs, computed once per call. Only the experts that receive tokens get buffer
+    // pointers: the others are never read, and the used experts' offsets are the same as before.
+    const ggml_type gate_vec_dot_type = kt_effective_vec_dot_type((ggml_type)config_.gate_type);
+    const ggml_type up_vec_dot_type = kt_effective_vec_dot_type((ggml_type)config_.up_type);
+    const ggml_type down_vec_dot_type = kt_effective_vec_dot_type((ggml_type)config_.down_type);
+    const uint64_t gate_input_row_size =
+        (uint64_t)config_.hidden_size * ggml_type_size(gate_vec_dot_type) / ggml_blck_size(gate_vec_dot_type);
+    const uint64_t up_input_row_size =
+        (uint64_t)config_.hidden_size * ggml_type_size(up_vec_dot_type) / ggml_blck_size(up_vec_dot_type);
+    const uint64_t down_input_row_size =
+        (uint64_t)config_.intermediate_size * ggml_type_size(down_vec_dot_type) / ggml_blck_size(down_vec_dot_type);
     uint64_t offset = 0;
     for (int i = 0; i < config_.expert_num; i++) {
-      m_local_gate_input_ptr_[i] =
-          m_local_gate_input_ +
-          offset * config_.hidden_size *
-              ggml_type_size(kt_effective_vec_dot_type((ggml_type)config_.gate_type)) /
-              ggml_blck_size(kt_effective_vec_dot_type((ggml_type)config_.gate_type));
-      m_local_up_input_ptr_[i] =
-          m_local_up_input_ +
-          offset * config_.hidden_size *
-              ggml_type_size(kt_effective_vec_dot_type((ggml_type)config_.up_type)) /
-              ggml_blck_size(kt_effective_vec_dot_type((ggml_type)config_.up_type));
+      if (m_local_num_[i] == 0) {
+        continue;
+      }
+      m_local_gate_input_ptr_[i] = m_local_gate_input_ + offset * gate_input_row_size;
+      m_local_up_input_ptr_[i] = m_local_up_input_ + offset * up_input_row_size;
       m_local_gate_output_ptr_[i] = m_local_gate_output_ + offset * config_.intermediate_size;
       m_local_up_output_ptr_[i] = m_local_up_output_ + offset * config_.intermediate_size;
       m_local_intermediate_fp32_ptr_[i] = m_local_intermediate_fp32_ + offset * config_.intermediate_size;
-      m_local_down_input_ptr_[i] =
-          m_local_down_input_ +
-          offset * config_.intermediate_size *
-              ggml_type_size(kt_effective_vec_dot_type((ggml_type)config_.down_type)) /
-              ggml_blck_size(kt_effective_vec_dot_type((ggml_type)config_.down_type));
+      m_local_down_input_ptr_[i] = m_local_down_input_ + offset * down_input_row_size;
       m_local_down_output_ptr_[i] = m_local_down_output_ + offset * config_.hidden_size;
       offset += m_local_num_[i];
-      if (m_local_num_[i] > 0) {
 #ifdef FORWARD_TIME_PROFILE
-        max_local_num = std::max(max_local_num, m_local_num_[i]);
+      max_local_num = std::max(max_local_num, m_local_num_[i]);
 #endif
-        m_expert_id_map_[activated_expert] = i;
-        activated_expert++;
-      }
+      m_expert_id_map_[activated_expert] = i;
+      activated_expert++;
     }
 
 #ifdef FORWARD_TIME_PROFILE

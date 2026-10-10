@@ -888,6 +888,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         # For gate/up projection: in_features = hidden_size
         # So: group_size = hidden_size / scale.shape[1]
 
+        retain_source_weights = False
         if self.method == "RAWINT4":
             group_size = self.hidden_size // self.gate_scales[0].shape[1]
             moe_config.quant_config.bits = 4
@@ -901,6 +902,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                     f"AVX-VNNI-256 supports positive multiples of 32 up to "
                     f"{_AVXVNNI256_RAW_INT4_MAX_GROUP_SIZE}; AVX2 (AVX2RawInt4_MOE) is used as the final fallback."
                 )
+            retain_source_weights = backend_cls is AVX2RawInt4_MOE
             self.moe = backend_cls(moe_config)
         elif self.method == "MXFP4":
             # MXFP4: E2M1 nibble-packed weights, ue8m0/bf16 per-32 group scale
@@ -1012,9 +1014,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.cpu_infer.sync()
         t5 = time.time()
 
-        del self.gate_weights
-        del self.up_weights
-        del self.down_weights
+        # AVX2 RAWINT4 borrows the per-expert mmap pointers instead of copying
+        # weights. Keep their tensor owners alive for the lifetime of this wrapper.
+        if not retain_source_weights:
+            del self.gate_weights
+            del self.up_weights
+            del self.down_weights
         if self.gate_scales is not None:
             del self.gate_scales
             del self.up_scales
