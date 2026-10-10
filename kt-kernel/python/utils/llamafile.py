@@ -87,46 +87,14 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             LlamafileMoEWrapper._gguf_loaders_by_path[cache_key] = GGUFLoader(weight_path)
         self.gguf_loader = LlamafileMoEWrapper._gguf_loaders_by_path[cache_key]
 
-        # Validate TP configuration with QK_K alignment
-        QK_K = 256
-
-        # Check if intermediate_size is divisible by QK_K
-        if moe_intermediate_size % QK_K != 0:
+        # The TP split of the intermediate dimension happens in C++ (TP_MOE_Common): on QK_K (256)
+        # when the size is a multiple of it, otherwise on whole blocks of the down projection's
+        # type (at least 32). The kernels tile rows in multiples of 32.
+        if moe_intermediate_size % 32 != 0 or hidden_size % 32 != 0:
             raise ValueError(
-                f"intermediate_size ({moe_intermediate_size}) must be divisible by QK_K ({QK_K}) "
-                f"for Llamafile backend"
+                f"intermediate_size ({moe_intermediate_size}) and hidden_size ({hidden_size}) "
+                f"must be multiples of 32 for the Llamafile backend"
             )
-
-        # Calculate TP splits with QK_K alignment
-        num_blocks = moe_intermediate_size // QK_K
-        base_blocks = num_blocks // threadpool_count
-        extra_blocks = num_blocks % threadpool_count
-
-        # Validate that we have enough blocks
-        if base_blocks == 0:
-            valid_tp_counts = list(range(1, num_blocks + 1))
-            raise ValueError(
-                f"intermediate_size ({moe_intermediate_size}) is too small for threadpool_count ({threadpool_count}).\n"
-                f"Total blocks: {num_blocks} (intermediate_size / QK_K)\n"
-                f"Cannot distribute to {threadpool_count} TPs (each TP needs at least 1 block).\n"
-                f"Valid threadpool_count values: {valid_tp_counts}"
-            )
-
-        # Log TP split information
-        print(f"[LlamafileMoEWrapper] Layer {layer_idx} TP configuration:")
-        print(f"  intermediate_size: {moe_intermediate_size}")
-        print(f"  threadpool_count: {threadpool_count}")
-        print(f"  QK_K: {QK_K}")
-        print(f"  Total blocks: {num_blocks}")
-        print(f"  Base blocks per TP: {base_blocks}")
-        print(f"  Extra blocks (distributed to first TPs): {extra_blocks}")
-
-        current_offset = 0
-        for tp_id in range(threadpool_count):
-            tp_blocks = base_blocks + (1 if tp_id < extra_blocks else 0)
-            tp_size = tp_blocks * QK_K
-            print(f"  TP {tp_id}: size={tp_size}, offset={current_offset}, blocks={tp_blocks}")
-            current_offset += tp_size
 
         self._swiglu_alpha = float(swiglu_alpha)
 
