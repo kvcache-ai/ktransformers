@@ -1,10 +1,10 @@
 # KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning
 
-[中文](README_ZH.md) · [Read PDF](ktransformers-finetune.pdf) · [Download PDF](https://raw.githubusercontent.com/kvcache-ai/ktransformers/paper-ktft-v1/papers/kt-ft/ktransformers-finetune.pdf) · [Fine-tuning cookbook](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md) · [Citation](#citation)
+[中文](README_ZH.md) · [Read PDF](ktransformers-finetune.pdf) · [Download PDF](https://raw.githubusercontent.com/kvcache-ai/ktransformers/paper-ktft-v1.1/papers/kt-ft/ktransformers-finetune.pdf) · [Fine-tuning cookbook](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md) · [Citation](#citation)
 
 Peilin Li, Xingxing Hao, Hongtao Chen, Weiyu Xie, Yaowei Zheng, Bowen Wu, Yujie Yang, Huanming Shen, Qingliang Ou, Boxin Zhang, Jingqi Tang, Ziwei Yuan, Jianwei Dong, Dongdong Kuang, Zhangchi Feng, Jiaheng Dai, Qianrui Yang, Shaoyuan Chen, Jiahao Wang, Yaochen Han, Yuening Zhu, Jiaqi Liao, Xianglin Chen, Zhiyuan Ai, Yongwei Wu, and Mingxing Zhang.
 
-Author preprint · Published on GitHub: October 8, 2026 · Version: `paper-ktft-v1`.
+Author preprint · Published on GitHub: October 8, 2026 · Updated: October 10, 2026 · Version: `paper-ktft-v1.1`.
 
 The arXiv link will be added when available. Corresponding author: Mingxing Zhang.
 
@@ -33,9 +33,9 @@ See [CITATION.bib](CITATION.bib) for the full 26-author BibTeX entry.
   title = {{KTransformers-FineTune: Beyond Offload with Layout-Aware and Schedule-Optimized Heterogeneous MoE Fine-Tuning}},
   author = {Li, Peilin and Hao, Xingxing and Chen, Hongtao and Xie, Weiyu and Zheng, Yaowei and Wu, Bowen and Yang, Yujie and Shen, Huanming and Ou, Qingliang and Zhang, Boxin and Tang, Jingqi and Yuan, Ziwei and Dong, Jianwei and Kuang, Dongdong and Feng, Zhangchi and Dai, Jiaheng and Yang, Qianrui and Chen, Shaoyuan and Wang, Jiahao and Han, Yaochen and Zhu, Yuening and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
   year = {2026},
-  note = {Author preprint, version paper-ktft-v1},
+  note = {Author preprint, version paper-ktft-v1.1},
   howpublished = {Author preprint, GitHub},
-  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1/papers/kt-ft}
+  url = {https://github.com/kvcache-ai/ktransformers/tree/paper-ktft-v1.1/papers/kt-ft}
 }
 ```
 
