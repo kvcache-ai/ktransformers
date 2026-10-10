@@ -705,6 +705,9 @@ message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
 
+# Gradient clipping must propagate NaN/Inf even though the other KT kernels use fast-math.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/bf16_sumsq.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
+
 file(GLOB_RECURSE FMT_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"

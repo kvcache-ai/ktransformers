@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "bf16_sumsq.h"
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
 #if defined(KTRANSFORMERS_USE_ASCEND_NPU)
@@ -546,6 +547,8 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
+  m.def("_bf16_sumsq_ptr", &bf16_sumsq_ptr, py::arg("data_ptr"), py::arg("numel"),
+        py::call_guard<py::gil_scoped_release>());
 #if defined(HAVE_AMX)
   m.attr("__cpu_variant__") = "amx";
   m.attr("__int8_kernel__") = "amx-int8";
