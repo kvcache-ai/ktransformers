@@ -10,6 +10,8 @@
 #ifndef CPUINFER_OPERATOR_AVX2_RAW_INT4_MOE_H
 #define CPUINFER_OPERATOR_AVX2_RAW_INT4_MOE_H
 
+#include <string>
+
 #include "avx2_bf16_gemm.hpp"
 #include "avx2_bf16_utils.hpp"
 #include "gptq_int4_dequant.hpp"
@@ -80,7 +82,11 @@ struct GemmKernelAVX2RawInt4 {
     BufferB(int n_, int k_, int k_group_size_, void* ptr)
         : b((uint8_t*)ptr), n(n_), k(k_), k_group_size(k_group_size_) {
       if (k_group_size <= 0 || k % k_group_size != 0 || k % 8 != 0) {
-        throw std::runtime_error("RAWINT4 requires k aligned to group_size and 8");
+        throw std::runtime_error(
+            "AVX2 RAWINT4 MoE requires the per-TP k dimension to be aligned to the quantization group_size and "
+            "to 8; got k=" +
+            std::to_string(k) + ", group_size=" + std::to_string(k_group_size) +
+            ". Reduce the CPU thread-pool / NUMA subpool count so the TP split stays aligned.");
       }
       k_group_count = k / k_group_size;
       d = (float*)((uint8_t*)ptr + ((size_t)n * k / 2));
@@ -91,7 +97,11 @@ struct GemmKernelAVX2RawInt4 {
     BufferB(int n_, int k_, int k_group_size_, void* scale_ptr, std::nullptr_t /*scale_only*/)
         : b(nullptr), n(n_), k(k_), k_group_size(k_group_size_) {
       if (k_group_size <= 0 || k % k_group_size != 0 || k % 8 != 0) {
-        throw std::runtime_error("RAWINT4 requires k aligned to group_size and 8");
+        throw std::runtime_error(
+            "AVX2 RAWINT4 MoE requires the per-TP k dimension to be aligned to the quantization group_size and "
+            "to 8; got k=" +
+            std::to_string(k) + ", group_size=" + std::to_string(k_group_size) +
+            ". Reduce the CPU thread-pool / NUMA subpool count so the TP split stays aligned.");
       }
       k_group_count = k / k_group_size;
       d = (float*)scale_ptr;

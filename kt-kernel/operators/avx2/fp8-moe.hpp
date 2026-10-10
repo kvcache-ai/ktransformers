@@ -12,6 +12,8 @@
 #ifndef CPUINFER_OPERATOR_AVX2_FP8_MOE_H
 #define CPUINFER_OPERATOR_AVX2_FP8_MOE_H
 
+#include <string>
+
 #include "avx2_bf16_gemm.hpp"
 #include "avx2_bf16_utils.hpp"
 #include "fp8_dequant.hpp"
@@ -246,6 +248,20 @@ class AVX2_FP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_FP8_MOE_TP<T>> {
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("AVX2 FP8 MoE only supports block-wise FP8 (group_size > 0, no zero_point)");
+    }
+    // Block-wise FP8 quantizes both weight dimensions on a group_size grid, and
+    // the CPU MoE splits the weights across one TP part per NUMA subpool. When
+    // that split does not land on the grid (e.g. intermediate_size / tp_count <
+    // group_size), the per-block scales are mis-indexed and the GEMM silently
+    // returns garbage instead of failing. Reject such layouts up front.
+    const int group_size = quant_config.group_size;
+    if (config_.hidden_size % group_size != 0 || config_.intermediate_size % group_size != 0) {
+      throw std::runtime_error(
+          "AVX2 FP8 MoE requires per-TP hidden_size and intermediate_size to be multiples of the quantization "
+          "group_size; got hidden_size=" +
+          std::to_string(config_.hidden_size) + ", intermediate_size=" + std::to_string(config_.intermediate_size) +
+          ", group_size=" + std::to_string(group_size) +
+          ". Reduce the CPU thread-pool / NUMA subpool count so the TP split stays block-aligned.");
     }
     printf("Created AVX2_FP8_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
   }
