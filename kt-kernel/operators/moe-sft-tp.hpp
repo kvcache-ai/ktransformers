@@ -721,6 +721,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
     if constexpr (uses_rawint4_kgroup_weights()) {
+      if (weights_loaded) {
+        throw std::logic_error("RAWINT4 SFT weights are immutable and already loaded");
+      }
       load_rawint4_weights_with_tp_staging();
       weights_loaded = true;
       return;
@@ -1108,6 +1111,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if constexpr (T::kIsMXFP4Backend) {
       if (grad_gate_proj != nullptr || grad_up_proj != nullptr || grad_down_proj != nullptr) {
         throw std::invalid_argument("MXFP4 SFT does not accept routed-expert base-gradient outputs");
+      }
+    }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      if (grad_gate_proj != nullptr || grad_up_proj != nullptr || grad_down_proj != nullptr) {
+        throw std::invalid_argument("RAWINT4 SFT does not accept routed-expert base-gradient outputs");
       }
     }
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
@@ -1807,6 +1815,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if constexpr (T::kIsMXFP4Backend) {
       throw std::logic_error("MXFP4 SFT backward reads native packed forward weights and has no BF16 backward copy");
     }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      throw std::logic_error("RAWINT4 SFT backward reads packed forward weights and has no BF16 backward copy");
+    }
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -1926,6 +1937,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void set_base_weight_pointers(void* gate, void* up, void* down) {
     if constexpr (T::kIsMXFP4Backend) {
       throw std::logic_error("MXFP4 SFT base weights are frozen packed tensors with separate scale pointers");
+    }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      throw std::logic_error("RAWINT4 SFT base weights are frozen packed tensors with separate scale pointers");
     }
     config.gate_proj = gate;
     config.up_proj = up;

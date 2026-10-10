@@ -21,6 +21,7 @@ RAWINT4_BACKEND = "RAWINT4"
 RAWINT4_SFT_METHOD = "RAWINT4_SFT"
 RAWINT4_WEIGHT_LAYOUT = "compressed-tensors-rawint4-g32-v1"
 RAWINT4_KERNEL = "amx-int4-kgroup-g32"
+RAWINT4_AVX2_KERNEL = "avx2-int4-kgroup-g32"
 RAWINT4_GROUP_SIZE = 32
 _RAWINT4_SFT_METHOD_ALIASES = frozenset({RAWINT4_SFT_METHOD, "AMXINT4_KGroup_SFT"})
 
@@ -303,9 +304,18 @@ def get_rawint4_runtime() -> RAWINT4Runtime:
 
     cpu_variant = str(extension.__cpu_variant__).lower()
     kernel = str(extension.__rawint4_kernel__).lower()
-    if kernel != RAWINT4_KERNEL:
+    # Two tiers ship AMXInt4_KGroup_SFT_MOE with the same Python contract:
+    # wheels built with USE_AMX_AVX_KERNEL (the "amx" hardware wheel and the
+    # "avx512_bf16" wheel tier, which runs the same code on AVX512-BF16
+    # vector fallbacks) report the AMX KGroup kernel; every other non-AMX
+    # x86_64 wheel binds the AVX2 (FMA + F16C) tier instead.
+    if cpu_variant in {"amx", "avx512_bf16"}:
+        expected_kernel = RAWINT4_KERNEL
+    else:
+        expected_kernel = RAWINT4_AVX2_KERNEL
+    if kernel != expected_kernel:
         raise RuntimeError(
-            "RAWINT4 SFT requires the signed group-32 AMX KGroup kernel; "
+            "RAWINT4 SFT requires the signed group-32 AMX KGroup or AVX2 kernel; "
             f"loaded cpu_variant={cpu_variant!r}, effective_kernel={kernel!r}"
         )
     layout = str(extension.__rawint4_weight_layout__)
