@@ -266,6 +266,8 @@ class LLAMA_MOE_TP {
 
   ~LLAMA_MOE_TP() { shared_mem_buffer_numa.dealloc(tp_part_idx, this); }
 
+  void set_physical_to_logical_map(void* map) { config_.physical_to_logical_map = map; }
+
   void load_weights(int complete_intermediate_size, int offset) {
     auto& config = config_;
     // printf("gate load weights:");
@@ -295,6 +297,18 @@ class LLAMA_MOE_TP {
     uint8_t* down_proj = (uint8_t*)config.down_proj + offset * ggml_type_size((ggml_type)config.down_type) /
                                                           ggml_blck_size((ggml_type)config.down_type);
 
+    // Slot i (the physical expert id the router produces) holds GGUF expert map[i]; without a
+    // map, or with the identity map, the two numberings coincide.
+    const uint64_t* p2l = (const uint64_t*)config.physical_to_logical_map;
+    bool identity_map = true;
+    for (int i = 0; i < config.expert_num; ++i) {
+      const uint64_t lid = p2l ? p2l[i] : (uint64_t)i;
+      if (lid >= (uint64_t)config.expert_num) {
+        throw std::runtime_error("llamafile MoE: physical_to_logical_map entry out of range");
+      }
+      identity_map = identity_map && lid == (uint64_t)i;
+    }
+
     // Single-NUMA fast path (tp_count==1 => offset==0 && intermediate==complete): the per-expert
     // reshuffle below degenerates to an IDENTITY copy (dst layout == src layout). Instead of
     // duplicating the whole expert set into anonymous RAM, ALIAS the source (GGUF mmap) directly:
@@ -302,7 +316,8 @@ class LLAMA_MOE_TP {
     //   * the mmap becomes the SINGLE shared copy (CPU MoE compute + streaming-prefill dedup share
     //     one page cache) => streaming-prefill stops re-reading cold GGUF from disk.
     // Multi-NUMA (tp_count>1) has strided per-node slices and cannot alias -> falls through to copy.
-    if (offset == 0 && complete_intermediate_size == config.intermediate_size) {
+    // A non-identity expert map cannot alias either (the slots are a permutation of the source).
+    if (offset == 0 && complete_intermediate_size == config.intermediate_size && identity_map) {
       delete[] m_local_gate_proj_;
       delete[] m_local_up_proj_;
       delete[] m_local_down_proj_;
@@ -366,10 +381,11 @@ class LLAMA_MOE_TP {
     // write non-overlapping destination regions and read disjoint source spans,
     // so this is embarrassingly parallel across i.
     auto copy_expert = [&](int i) {
-      memcpy(local_gate_base + (size_t)i * gate_dst_stride, gate_proj + (size_t)i * gate_src_stride, gate_dst_stride);
-      memcpy(local_up_base + (size_t)i * up_dst_stride, up_proj + (size_t)i * up_src_stride, up_dst_stride);
+      const size_t lid = p2l ? (size_t)p2l[i] : (size_t)i;
+      memcpy(local_gate_base + (size_t)i * gate_dst_stride, gate_proj + lid * gate_src_stride, gate_dst_stride);
+      memcpy(local_up_base + (size_t)i * up_dst_stride, up_proj + lid * up_src_stride, up_dst_stride);
       uint8_t* ld = local_down_base + (size_t)i * down_dst_stride;
-      uint8_t* sd = down_proj + (size_t)i * down_src_stride;
+      uint8_t* sd = down_proj + lid * down_src_stride;
       for (int j = 0; j < config.hidden_size; ++j) {
         memcpy(ld, sd, down_dst_row);
         ld += down_dst_row;
@@ -946,6 +962,7 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
     }
 
     pool->dispense_backend()->do_numa_job([this, pool, tp_offsets](int tp_id) {
+      this->tps[tp_id]->set_physical_to_logical_map(this->config.physical_to_logical_map);
       this->tps[tp_id]->load_weights(this->config.intermediate_size, tp_offsets[tp_id]);
     });
     this->weights_loaded = true;
