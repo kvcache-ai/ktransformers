@@ -1,12 +1,9 @@
-import gc
 import glob
-import logging
 import os
+import weakref
 import torch
 import ctypes
 from typing import List, Optional
-
-logger = logging.getLogger(__name__)
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -584,7 +581,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
 class NativeMoEWrapper(BaseMoEWrapper):
     """Wrapper for native CPU/SYCL experts stored in compressed SafeTensor format."""
 
-    _native_loader_instance = None
+    # Pending layer wrappers own the index; the cache must not extend its lifetime.
+    _native_loader_cache = None
 
     def __init__(
         self,
@@ -663,9 +661,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "CPUINFER_USE_SYCL=1 using a SYCL compiler such as icpx."
             )
         if method == "NVFP4" and not _HAS_AVX2_MXFP4_SUPPORT:
-            raise RuntimeError(
-                "NVFP4 needs the AVX2 FP4 backend (AVX2MXFP4_MOE), which is not compiled in."
-            )
+            raise RuntimeError("NVFP4 needs the AVX2 FP4 backend (AVX2MXFP4_MOE), which is not compiled in.")
         if method == "MXFP4" and not (_HAS_MXFP4_SUPPORT or _HAS_AVX2_MXFP4_SUPPORT):
             raise RuntimeError(
                 "MXFP4 backend not available. Required ISA (any one of):\n"
@@ -681,6 +677,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "Please recompile kt_kernel_ext with one of the above enabled."
             )
 
+        weight_path = os.path.abspath(weight_path)
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -699,9 +696,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             swiglu_limit=swiglu_limit,
         )
 
-        if NativeMoEWrapper._native_loader_instance is None:
-            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(method, weight_path)
-        self.loader = NativeMoEWrapper._native_loader_instance
+        loader_key = (method, weight_path)
+        cached_loader = NativeMoEWrapper._native_loader_cache
+        loader = cached_loader[1]() if cached_loader is not None and cached_loader[0] == loader_key else None
+        if loader is None:
+            loader = NativeMoEWrapper._create_loader(method, weight_path)
+            NativeMoEWrapper._native_loader_cache = (loader_key, weakref.ref(loader))
+        self.loader = loader
 
         self.gate_weights = None
         self.up_weights = None
@@ -732,21 +733,14 @@ class NativeMoEWrapper(BaseMoEWrapper):
             raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
 
     @staticmethod
-    def _release_loader(layer_idx: int = -1):
-        if NativeMoEWrapper._native_loader_instance is not None:
-            NativeMoEWrapper._native_loader_instance.close_all_handles()
-            NativeMoEWrapper._native_loader_instance = None
-            if layer_idx >= 0:
-                logger.info(
-                    "[KT] Released NativeMoEWrapper loader after layer %d: " "safetensors mmap handles freed.",
-                    layer_idx,
-                )
-            else:
-                logger.info("[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed.")
-
-    @staticmethod
     def force_release_loader():
-        NativeMoEWrapper._release_loader()
+        """Close cached shard handles; pending layers retain their checkpoint index."""
+        cached_loader = NativeMoEWrapper._native_loader_cache
+        NativeMoEWrapper._native_loader_cache = None
+        if cached_loader is not None:
+            loader = cached_loader[1]()
+            if loader is not None:
+                loader.close_all_handles()
 
     def load_weights_from_tensors(
         self,
@@ -760,18 +754,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         import time
 
-        if NativeMoEWrapper._native_loader_instance is None:
-            t_recreate_start = time.time()
-            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(self.method, self.weight_path)
-            self.loader = NativeMoEWrapper._native_loader_instance
-            t_recreate_elapsed = (time.time() - t_recreate_start) * 1000
-            logger.info(
-                "[KT] Recreated NativeMoEWrapper loader for layer %d (took %.1fms)",
-                self.layer_idx,
-                t_recreate_elapsed,
-            )
-        else:
-            self.loader = NativeMoEWrapper._native_loader_instance
+        loader = self.loader
+        if loader is None:
+            loader = NativeMoEWrapper._create_loader(self.method, self.weight_path)
 
         t0 = time.time()
         _candidates = [
@@ -779,15 +764,23 @@ class NativeMoEWrapper(BaseMoEWrapper):
             f"language_model.model.layers.{self.layer_idx}",
             f"model.language_model.layers.{self.layer_idx}",
         ]
-        weights = None
-        for base_key in _candidates:
-            try:
-                weights = self.loader.load_experts(base_key)
-                break
-            except (ValueError, KeyError):
-                continue
-        if weights is None:
-            raise ValueError(f"No experts found for layer {self.layer_idx} under any prefix: {_candidates}")
+        try:
+            weights = None
+            for base_key in _candidates:
+                try:
+                    weights = loader.load_experts(base_key)
+                    break
+                except (ValueError, KeyError):
+                    continue
+            if weights is None:
+                raise ValueError(f"No experts found for layer {self.layer_idx} under any prefix: {_candidates}")
+        finally:
+            # Returned tensors own their storage through the native load and sync below.
+            self.loader = None
+            cached_loader = NativeMoEWrapper._native_loader_cache
+            if cached_loader is not None and cached_loader[1]() is loader:
+                NativeMoEWrapper._native_loader_cache = None
+            loader.close_all_handles()
         t1 = time.time()
 
         # Keep individual tensors instead of stacking - avoid expensive memory copy
@@ -1032,7 +1025,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
             del self.up_scales
             del self.down_scales
 
-        NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
         t6 = time.time()
 
         print(
@@ -1102,15 +1094,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
         each rank's local H2D copy of expert ``e``.
         """
         if self.method != "FP8":
-            raise RuntimeError(
-                "run_layerwise_fp8_batch is only valid for the block-FP8 NativeMoEWrapper backend"
-            )
+            raise RuntimeError("run_layerwise_fp8_batch is only valid for the block-FP8 NativeMoEWrapper backend")
         if self.moe is None:
             raise RuntimeError("MoE instance not initialized; cannot run FP8 layerwise transport.")
         if not hasattr(self.moe, "run_layerwise_fp8_batch"):
-            raise NotImplementedError(
-                "The installed kt-kernel extension does not expose run_layerwise_fp8_batch."
-            )
+            raise NotImplementedError("The installed kt-kernel extension does not expose run_layerwise_fp8_batch.")
         # The native batch calls the shared NUMA distributor directly.  Drain
         # CPUInfer first so it cannot race a previously queued task against the
         # non-reentrant distributor state.
