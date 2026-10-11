@@ -143,8 +143,9 @@ def rawint4_swiglu(gate_raw: torch.Tensor, up_raw: torch.Tensor, limit: float = 
     gate = gate_raw
     up = up_raw
     if limit > 0:
-        gate = torch.clamp(gate, max=limit)
-        up = torch.clamp(up, min=-limit, max=limit)
+        # Keep the boundary-inclusive subgradient explicit across PyTorch versions.
+        gate = torch.where(gate <= limit, gate, limit)
+        up = torch.where(up < -limit, -limit, torch.where(up > limit, limit, up))
     return F.silu(gate) * up
 
 

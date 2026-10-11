@@ -174,7 +174,7 @@ def _make_batch(active_pair: tuple[int, int], seed: int) -> Batch:
     return Batch(inputs, expert_ids, route_weights, grad_output)
 
 
-def _reference(experts, lora, batch):
+def _reference(experts, lora, batch, swiglu_limit=0.0):
     return run_routed_reference(
         batch.inputs,
         batch.expert_ids,
@@ -183,12 +183,12 @@ def _reference(experts, lora, batch):
         lora,
         batch.grad_output,
         lora_scaling=ALPHA / RANK,
-        swiglu_limit=0.0,
+        swiglu_limit=swiglu_limit,
         transpose_free_backward=False,
     )
 
 
-def _make_backend(base, lora, tp_count, physical_to_logical_map=None):
+def _make_backend(base, lora, tp_count, physical_to_logical_map=None, *, swiglu_limit=0.0, share_backward_bb=False):
     cpu_infer = _make_cpu_infer(tp_count)
     if physical_to_logical_map is None:
         physical_to_logical_map = torch.arange(EXPERTS, dtype=torch.int64).contiguous()
@@ -201,7 +201,7 @@ def _make_backend(base, lora, tp_count, physical_to_logical_map=None):
     config.lora_dropout = 0.0
     config.full_weight_grad = False
     config.authoritative_optimizer_grads = True
-    config.share_backward_bb = False
+    config.share_backward_bb = share_backward_bb
     config.share_cache_pool = False
     config.physical_to_logical_map = physical_to_logical_map.data_ptr()
     config.gate_proj = base["gate"].data_ptr()
@@ -219,7 +219,7 @@ def _make_backend(base, lora, tp_count, physical_to_logical_map=None):
     config.quant_config.bits = 4
     config.quant_config.group_size = 32
     config.quant_config.zero_point = False
-    config.swiglu_limit = 0.0
+    config.swiglu_limit = swiglu_limit
     config.swiglu_alpha = 0.0
     config.pool = cpu_infer.backend_
 
@@ -346,7 +346,7 @@ def _assert_window(stage, grad_buffers, expected, active_experts):
             f"{stage}.{name}",
             actual,
             expected[name],
-            relative_l2_limit=0.05,
+            relative_l2_limit=0.015,
             cosine_limit=0.995,
         )
         for expert in range(EXPERTS):
@@ -361,15 +361,15 @@ def _assert_window(stage, grad_buffers, expected, active_experts):
     return summary
 
 
-def _run_sft_contract(tp_count):
+def _run_sft_contract(tp_count, swiglu_limit=0.0):
     base, lora, experts = _make_weights()
     base_hash_before = base_storage_hash(experts)
-    moe, keepalive = _make_backend(base, lora, tp_count)
+    moe, keepalive = _make_backend(base, lora, tp_count, swiglu_limit=swiglu_limit)
     grad_buffers = _make_grad_buffers()
     grad_scale = 0.5
     active_pairs = ((0, 1), (1, 2), (2, 3), (0, 3)) * 2
     batches = [_make_batch(pair, 3000 + index) for index, pair in enumerate(active_pairs)]
-    references = [_reference(experts, lora, batch) for batch in batches]
+    references = [_reference(experts, lora, batch, swiglu_limit) for batch in batches]
 
     output, grad_input, grad_weights = _forward_backward(
         moe,
@@ -439,7 +439,7 @@ def _run_sft_contract(tp_count):
     # A new optimizer window with only experts 2/3 must overwrite those rows
     # and lazily clear stale rows 0/1 from the previous window.
     new_window = _make_batch((2, 3), 4001)
-    new_reference = _reference(experts, lora, new_window)
+    new_reference = _reference(experts, lora, new_window, swiglu_limit)
     _forward_backward(
         moe,
         grad_buffers,
@@ -460,8 +460,8 @@ def _run_sft_contract(tp_count):
     # again as a normal forward/backward pair.
     first = _make_batch((0, 1), 5001)
     second = _make_batch((1, 3), 5002)
-    first_ref = _reference(experts, lora, first)
-    second_ref = _reference(experts, lora, second)
+    first_ref = _reference(experts, lora, first, swiglu_limit)
+    second_ref = _reference(experts, lora, second, swiglu_limit)
     _forward(moe, first)
     _forward(moe, second)
     second_dx, second_droute = _backward(moe, grad_buffers, second, accumulate=False, grad_scale=grad_scale)
@@ -602,6 +602,143 @@ def _require_extension(*, allow_source_only_skip):
         raise AssertionError(
             "built extension is missing a RAWINT4 inference MoE (AMXInt4_KGroup_MOE / AVX2RawInt4_MOE)"
         )
+    from kt_kernel.sft.backend import get_rawint4_runtime
+
+    runtime = get_rawint4_runtime()
+    assert runtime.cpu_variant == kt_kernel_ext.__cpu_variant__
+    assert runtime.kernel == kt_kernel_ext.__rawint4_kernel__
+
+
+@pytest.mark.cpu
+def test_rawint4_rejects_shared_backward_pool_at_construction():
+    _require_extension(allow_source_only_skip=True)
+    base, lora, _ = _make_weights()
+    with pytest.raises(ValueError, match="share_backward_bb must be false"):
+        _make_backend(base, lora, 1, share_backward_bb=True)
+
+
+@pytest.mark.cpu
+def test_rawint4_production_wrapper_tasks():
+    _require_extension(allow_source_only_skip=True)
+    from kt_kernel.sft.amx import AMXSFTMoEWrapper
+    from kt_kernel.sft.base import KExpertsSFTBuffer
+    from kt_kernel.sft.weights import RAWINT4ExpertWeights
+
+    base, lora, experts = _make_weights()
+    grads = _make_grad_buffers()
+    wrapper = AMXSFTMoEWrapper(
+        layer_idx=0,
+        num_experts=EXPERTS,
+        num_experts_per_tok=TOP_K,
+        hidden_size=HIDDEN,
+        moe_intermediate_size=INTERMEDIATE,
+        num_gpu_experts=0,
+        cpuinfer_threads=4,
+        threadpool_count=1,
+        weight_path="",
+        chunked_prefill_size=MAX_QLEN,
+        lora_rank=RANK,
+        lora_alpha=ALPHA,
+        method="RAWINT4_SFT",
+    )
+    wrapper.init_lora_weights(*(lora[name] for name in LORA_NAMES), *(grads[name] for name in LORA_NAMES))
+    wrapper.load_rawint4_weights(
+        RAWINT4ExpertWeights(
+            gate_proj=base["gate"],
+            gate_scale=base["gate_scale"],
+            up_proj=base["up"],
+            up_scale=base["up_scale"],
+            down_proj=base["down"],
+            down_scale=base["down_scale"],
+        ),
+        torch.arange(EXPERTS, dtype=torch.int64),
+    )
+    batch = _make_batch((0, 1), 8001)
+    reference = _reference(experts, lora, batch)
+    buffer = KExpertsSFTBuffer(QLEN, HIDDEN, INTERMEDIATE, EXPERTS, TOP_K, RANK)
+    buffer.input_cpu.copy_(batch.inputs)
+    buffer.expert_ids_cpu.copy_(batch.expert_ids)
+    buffer.weights_cpu.copy_(batch.route_weights)
+    buffer.grad_output_cpu.copy_(batch.grad_output)
+    wrapper.cpu_infer.submit(wrapper._make_forward_task(buffer, True))
+    wrapper.cpu_infer.sync()
+    wrapper.cpu_infer.submit(wrapper._make_backward_task(buffer))
+    wrapper.cpu_infer.sync()
+    for name, actual, expected in (
+        ("forward", buffer.output_cpu, reference[0]),
+        ("dX", buffer.grad_input_cpu, reference[1]),
+        ("dRoute", buffer.grad_weights, reference[2]),
+    ):
+        _assert_close(f"wrapper.{name}", actual.float(), expected, relative_l2_limit=0.03, cosine_limit=0.995)
+    _assert_window("wrapper", grads, reference[3], batch.active_experts)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("swiglu_limit", [0.0, 2.0])
+def test_rawint4_rectangular_multiblock_contract(swiglu_limit):
+    _require_extension(allow_source_only_skip=True)
+    if swiglu_limit > 0 and kt_kernel_ext.__rawint4_kernel__ != "avx2-int4-kgroup-g32":
+        pytest.skip("the AMX K2 part does not implement the optional AVX2 SwiGLU clamp")
+    # Every active expert receives 17 rows (two complete dX blocks and a tail); unequal widths exercise down's reversed dimensions.
+    with pytest.MonkeyPatch.context() as patch:
+        module = sys.modules[__name__]
+        patch.setattr(module, "INTERMEDIATE", 384)
+        patch.setattr(module, "QLEN", 17)
+        patch.setattr(
+            module,
+            "GRAD_SHAPES",
+            {
+                "gate_lora_a": (EXPERTS, RANK, HIDDEN),
+                "gate_lora_b": (EXPERTS, INTERMEDIATE, RANK),
+                "up_lora_a": (EXPERTS, RANK, HIDDEN),
+                "up_lora_b": (EXPERTS, INTERMEDIATE, RANK),
+                "down_lora_a": (EXPERTS, RANK, INTERMEDIATE),
+                "down_lora_b": (EXPERTS, HIDDEN, RANK),
+            },
+        )
+        for tp_count in (1, 2):
+            _run_sft_contract(tp_count, swiglu_limit)
+
+
+@pytest.mark.cpu
+def test_rawint4_clamp_boundaries():
+    _require_extension(allow_source_only_skip=True)
+    if kt_kernel_ext.__rawint4_kernel__ != "avx2-int4-kgroup-g32":
+        pytest.skip("the AMX K2 part does not implement the optional AVX2 SwiGLU clamp")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sys.modules[__name__], "QLEN", 9)
+        base, lora, experts = _make_weights()
+        # One-hot inputs and exact BF16 scales place gate/up below, on, and above both clamp bounds without LoRA shifting them.
+        base["gate"].fill_(0x99)
+        base["up"].fill_(0x99)
+        base["up"][:, 1::2].fill_(0x77)
+        base["gate_scale"].fill_(0.5)
+        base["up_scale"].fill_(0.5)
+        for name in ("gate_lora_b", "up_lora_b", "down_lora_b"):
+            lora[name].zero_()
+        batch = _make_batch((0, 1), 8101)
+        batch.inputs.zero_()
+        batch.inputs[:, 0] = torch.tensor([-4.125, -4.0, -3.875, 0.0, 3.875, 4.0, 4.125, 4.0, -4.0])
+        # These two FP32 projections lie outside the bounds but round onto them in a BF16 cache.
+        batch.inputs[7, 1] = 1.0 / 256
+        batch.inputs[8, 1] = -1.0 / 256
+        reference = _reference(experts, lora, batch, 2.0)
+        for tp_count in (1, 2):
+            moe, keepalive = _make_backend(base, lora, tp_count, swiglu_limit=2.0)
+            grads = _make_grad_buffers()
+            results = _forward_backward(moe, grads, batch, accumulate=False, grad_scale=1.0)
+            for name, actual, expected in zip(("forward", "dX", "dRoute"), results, reference[:3]):
+                _assert_close(f"clamp.{name}", actual, expected, relative_l2_limit=0.03, cosine_limit=0.995)
+            for name in LORA_NAMES:
+                expected = reference[3][name]
+                if torch.count_nonzero(expected):
+                    _assert_close(
+                        f"clamp.{name}", grads[name].float(), expected, relative_l2_limit=0.015, cosine_limit=0.995
+                    )
+                else:
+                    assert torch.count_nonzero(grads[name]) == 0, f"clamp.{name}: expected zero gradient"
+            del moe
+            del keepalive
 
 
 @pytest.mark.cpu
@@ -656,4 +793,10 @@ def test_rawint4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression():
 
 if __name__ == "__main__":
     _require_extension(allow_source_only_skip=False)
+    test_rawint4_rejects_shared_backward_pool_at_construction()
+    test_rawint4_production_wrapper_tasks()
+    test_rawint4_rectangular_multiblock_contract(0.0)
+    if kt_kernel_ext.__rawint4_kernel__ == "avx2-int4-kgroup-g32":
+        test_rawint4_clamp_boundaries()
+        test_rawint4_rectangular_multiblock_contract(2.0)
     test_rawint4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression()

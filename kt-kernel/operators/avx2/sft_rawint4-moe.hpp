@@ -279,8 +279,6 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
   static constexpr bool kUsesKGroupPackedBaseWeights = true;
   static constexpr bool kHasInt4PackedBackward = true;
 
-  MOESFTConfig sft_config_;
-
   // Sanity-check the frozen-base contract before the base class is built: the
   // SFT part only ever loads through the flat staged pointers, so per-expert
   // weight/scaler vectors must not steer the base loader into scale-only mode
@@ -303,7 +301,7 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
   }
 
   AVX2_SFT_RAWINT4_MOE_TP(MOESFTConfig config, int tp_part_idx_ = 0)
-      : Base(validated_base_config(config), tp_part_idx_), sft_config_(config) {
+      : Base(validated_base_config(config), tp_part_idx_) {
     if (config.hidden_size % 32 != 0 || config.intermediate_size % 32 != 0)
       throw std::invalid_argument("RAWINT4 SFT (AVX2) requires 32-aligned hidden and intermediate sizes");
     if (config.swiglu_alpha != 0.0f)
@@ -502,6 +500,7 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
       std::memcpy(cache->input.data(), input, sizeof(ggml_bf16_t) * (size_t)qlen * K);
       cache->gate_out.resize((size_t)tokens_total * N);
       cache->up_out.resize((size_t)tokens_total * N);
+      if (config_.swiglu_limit > 0.f) cache->clamp_grad_mask.resize((size_t)tokens_total * N);
       cache->inter.resize((size_t)tokens_total * N);
       cache->down_out.resize((size_t)tokens_total * K);
       cache->u_down.assign((size_t)tokens_total * std::max(r, 1), 0.f);
@@ -512,6 +511,14 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
             const int m = m_local_num_[e];
             fp32_to_bf16(cache->gate_out.data() + (size_t)row_offset_[e] * N, gate_bc_[e]->data, (size_t)m * N);
             fp32_to_bf16(cache->up_out.data() + (size_t)row_offset_[e] * N, up_bc_[e]->data, (size_t)m * N);
+            if (config_.swiglu_limit > 0.f) {
+              const float limit = config_.swiglu_limit;
+              uint8_t* mask = cache->clamp_grad_mask.data() + (size_t)row_offset_[e] * N;
+              for (size_t i = 0; i < (size_t)m * N; ++i) {
+                const float gate = gate_bc_[e]->data[i], up = up_bc_[e]->data[i];
+                mask[i] = (gate <= limit ? 1 : 0) | (up >= -limit && up <= limit ? 2 : 0);
+              }
+            }
           },
           nullptr);
     }
@@ -786,8 +793,10 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
               const float sig = sigmoid_scalar(gv);
               const float silu = gv * sig;
               const float dsilu = sig * (1.f + gv * (1.f - sig));
-              gg[i] = (!use_limit || graw <= L) ? gh[i] * uv * dsilu : 0.f;
-              gu[i] = (!use_limit || (uraw >= -L && uraw <= L)) ? gh[i] * silu : 0.f;
+              // Use the FP32 forward comparisons: BF16 rounding can move an out-of-range value onto the clamp boundary.
+              const uint8_t mask = use_limit ? cache.clamp_grad_mask[base + i] : 3;
+              gg[i] = (mask & 1) ? gh[i] * uv * dsilu : 0.f;
+              gu[i] = (mask & 2) ? gh[i] * silu : 0.f;
             }
           },
           nullptr);
@@ -923,6 +932,7 @@ class AVX2_SFT_RAWINT4_MOE_TP : public AVX2_RAW_INT4_MOE_TP<T> {
     std::vector<int> expert_id_map;
     std::vector<int> row_offset;
     std::vector<ggml_bf16_t> input, gate_out, up_out, inter, down_out;
+    std::vector<uint8_t> clamp_grad_mask;
     std::vector<float> u_down;
   };
 
