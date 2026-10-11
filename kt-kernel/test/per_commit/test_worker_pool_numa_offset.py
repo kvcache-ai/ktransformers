@@ -132,3 +132,53 @@ def test_subpool_thread_offsets_on_high_numa_node(capfd):
     )
 
     del cpuinfer
+
+
+@pytest.mark.cpu
+def test_single_subpool_on_nonzero_numa_node(capfd):
+    """#2221 also reproduces with a single subpool on a nonzero NUMA node.
+
+    The two-subpool test above only indexes out of bounds when the selected
+    NUMA ID is >= the subpool count (hosts with three or more NUMA nodes). A
+    single subpool targeting node 1 reads index 1 of a size-1 counter, which
+    reproduces the original bug on any dual-socket host.
+    """
+    if not HAS_KT_KERNEL:
+        pytest.skip("kt_kernel_ext not built or available")
+    if not hasattr(kt_kernel_ext, "WorkerPoolConfig"):
+        pytest.skip("WorkerPoolConfig binding not available in this build")
+
+    nonzero_nodes = [(nid, cores) for nid, cores in _online_numa_nodes() if nid != 0 and cores >= 2]
+    if not nonzero_nodes:
+        pytest.skip("test requires a NUMA node with a nonzero ID and at least 2 cores")
+    node_id, cores = nonzero_nodes[0]
+    threads = min(cores, 8)
+
+    capfd.readouterr()  # drain output produced during import
+
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 1
+    cfg.subpool_numa_map = [node_id]
+    cfg.subpool_thread_count = [threads]
+    cpuinfer = kt_kernel_ext.CPUInfer(cfg)  # noqa: F841  (kept alive on purpose)
+
+    out, err = capfd.readouterr()
+    not_found = [
+        line
+        for line in (out + err).splitlines()
+        if "not found" in line and f"NUMA node {node_id}" in line
+    ]
+    assert not not_found, f"worker threads mis-bound on NUMA node {node_id}: {not_found}"
+
+    # A single subpool starts at offset 0, so its workers are named
+    # numa_<node>_t_1 .. numa_<node>_t_(threads-1). A nonzero starting offset
+    # (the out-of-bounds read) shifts this set and loses t_1.
+    suffixes = _worker_suffixes(_thread_names(), node_id)
+    expected = set(range(1, threads))
+    assert suffixes == expected, (
+        f"unexpected worker thread offsets on NUMA node {node_id}: "
+        f"got {sorted(suffixes)}, expected {sorted(expected)}. "
+        "WorkerPool computed the single-subpool start offset out of bounds."
+    )
+
+    del cpuinfer
