@@ -226,6 +226,7 @@ static inline void gemm_rawint4(int m, int n, int k, GemmKernelAVX2RawInt4::Buff
 
 template <class T = avx2::GemmKernelAVX2RawInt4>
 class AVX2_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_RAW_INT4_MOE_TP<T>> {
+ protected:  // re-exported for the SFT subclass (operators/avx2/sft_rawint4-moe.hpp)
   using Base = AVX2_MOE_BASE<T, AVX2_RAW_INT4_MOE_TP<T>>;
   using Base::config_;
   using Base::down_ba_;

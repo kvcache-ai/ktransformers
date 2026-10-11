@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -26,8 +27,6 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-
-#include <filesystem>
 #if defined(__AVX512F__)
 #include "amx/fp8_tp_staging.hpp"
 #include "amx/la/amx.hpp"
@@ -188,6 +187,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
   static typename Base::PartFactory make_sft_part_factory(const MOESFTConfig& full_config) {
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      if (full_config.share_backward_bb) {
+        throw std::invalid_argument(
+            "RAWINT4 SFT reads packed forward weights directly; share_backward_bb must be false");
+      }
+    }
     return [full_config](const GeneralMOEConfig& tp_config, int tp_index) -> std::unique_ptr<T> {
       return std::make_unique<T>(make_tp_sft_config(full_config, tp_config), tp_index);
     };
@@ -311,20 +316,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
             [&](int physical_expert) {
               const size_t logical_expert = expert_map(physical_to_logical_map, physical_expert);
               const uint8_t* gate_source =
-                  per_expert
-                      ? static_cast<const uint8_t*>(config.gate_projs[0][logical_expert])
-                      : static_cast<const uint8_t*>(config.gate_proj) +
-                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+                  per_expert ? static_cast<const uint8_t*>(config.gate_projs[0][logical_expert])
+                             : static_cast<const uint8_t*>(config.gate_proj) +
+                                   logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
               const uint8_t* up_source =
-                  per_expert
-                      ? static_cast<const uint8_t*>(config.up_projs[0][logical_expert])
-                      : static_cast<const uint8_t*>(config.up_proj) +
-                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+                  per_expert ? static_cast<const uint8_t*>(config.up_projs[0][logical_expert])
+                             : static_cast<const uint8_t*>(config.up_proj) +
+                                   logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
               const uint8_t* down_source =
-                  per_expert
-                      ? static_cast<const uint8_t*>(config.down_projs[0][logical_expert])
-                      : static_cast<const uint8_t*>(config.down_proj) +
-                            logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
+                  per_expert ? static_cast<const uint8_t*>(config.down_projs[0][logical_expert])
+                             : static_cast<const uint8_t*>(config.down_proj) +
+                                   logical_expert * static_cast<size_t>(config.intermediate_size) * hidden / 2;
               const auto* gate_scale_source =
                   per_expert
                       ? static_cast<const ggml_bf16_t*>(config.gate_scales[0][logical_expert])
@@ -345,8 +347,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
               const size_t dst_scale_offset = logical_expert * local_scale_elements;
               const size_t gate_up_weight_offset = static_cast<size_t>(i_offset) * hidden / 2;
               const size_t gate_up_scale_offset = static_cast<size_t>(i_offset) * (hidden / group_size);
-              std::memcpy(dst.gate.get() + dst_weight_offset, gate_source + gate_up_weight_offset,
-                          local_weight_bytes);
+              std::memcpy(dst.gate.get() + dst_weight_offset, gate_source + gate_up_weight_offset, local_weight_bytes);
               std::memcpy(dst.up.get() + dst_weight_offset, up_source + gate_up_weight_offset, local_weight_bytes);
               std::memcpy(dst.gate_scale.get() + dst_scale_offset, gate_scale_source + gate_up_scale_offset,
                           local_scale_elements * sizeof(ggml_bf16_t));
@@ -415,24 +416,22 @@ class TP_MOE_SFT : public TP_MOE<T> {
         config.pool->get_subpool(numa_id)->do_work_stealing_job(
             tp_config.expert_num, nullptr,
             [&](int physical_expert) {
-              const int logical_expert =
-                  static_cast<int>(expert_map(physical_to_logical_map, physical_expert));
+              const int logical_expert = static_cast<int>(expert_map(physical_to_logical_map, physical_expert));
               amx::stage_block_fp8_tp_expert(config, tp_config.intermediate_size, intermediate_offsets[numa_id],
                                              logical_expert, tp_staging);
             },
             nullptr);
-        tps[numa_id]->set_staged_weight_pointers(
-            tp_staging.gate.get(), tp_staging.up.get(), tp_staging.down.get(), tp_staging.gate_scale.get(),
-            tp_staging.up_scale.get(), tp_staging.down_scale.get());
+        tps[numa_id]->set_staged_weight_pointers(tp_staging.gate.get(), tp_staging.up.get(), tp_staging.down.get(),
+                                                 tp_staging.gate_scale.get(), tp_staging.up_scale.get(),
+                                                 tp_staging.down_scale.get());
       });
-      run_numa_job_checked("native FP8 TP forward weight load",
-                           [this](int numa_id) { tps[numa_id]->load_weights(); });
+      run_numa_job_checked("native FP8 TP forward weight load", [this](int numa_id) { tps[numa_id]->load_weights(); });
     } catch (...) {
       for (auto& tp : tps) tp->clear_staged_weight_pointers();
       throw;
     }
     for (auto& tp : tps) tp->clear_staged_weight_pointers();
-  #endif
+#endif
   }
 
   static constexpr bool uses_rawint4_kgroup_weights() {
@@ -556,12 +555,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
             const size_t dst_weight = logical_expert * local_weight_elems / 2;
             const size_t dst_scale = logical_expert * local_scale_elems;
             const size_t gate_row_bytes = static_cast<size_t>(local.intermediate_size) * config.hidden_size / 2;
-            const size_t gate_row_scales = static_cast<size_t>(local.intermediate_size) *
-                                           (config.hidden_size / group_size);
+            const size_t gate_row_scales =
+                static_cast<size_t>(local.intermediate_size) * (config.hidden_size / group_size);
             std::memcpy(stage.gate.data() + dst_weight,
                         gate_src + static_cast<size_t>(row_offset) * config.hidden_size / 2, gate_row_bytes);
-            std::memcpy(stage.up.data() + dst_weight,
-                        up_src + static_cast<size_t>(row_offset) * config.hidden_size / 2, gate_row_bytes);
+            std::memcpy(stage.up.data() + dst_weight, up_src + static_cast<size_t>(row_offset) * config.hidden_size / 2,
+                        gate_row_bytes);
             std::memcpy(stage.gate_scale.data() + dst_scale,
                         gate_scale_src + static_cast<size_t>(row_offset) * (config.hidden_size / group_size),
                         gate_row_scales * sizeof(ggml_bf16_t));
@@ -574,20 +573,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
               const size_t src_row = (static_cast<size_t>(hidden_row) * config.intermediate_size + row_offset) / 2;
               std::memcpy(stage.down.data() + dst_row, down_src + src_row,
                           static_cast<size_t>(local.intermediate_size) / 2);
-              const size_t dst_scale_row = dst_scale + static_cast<size_t>(hidden_row) *
-                                                         (local.intermediate_size / group_size);
-              const size_t src_scale_row = static_cast<size_t>(hidden_row) *
-                                               (config.intermediate_size / group_size) +
-                                           row_offset / group_size;
+              const size_t dst_scale_row =
+                  dst_scale + static_cast<size_t>(hidden_row) * (local.intermediate_size / group_size);
+              const size_t src_scale_row =
+                  static_cast<size_t>(hidden_row) * (config.intermediate_size / group_size) + row_offset / group_size;
               std::memcpy(stage.down_scale.data() + dst_scale_row, down_scale_src + src_scale_row,
                           static_cast<size_t>(local.intermediate_size / group_size) * sizeof(ggml_bf16_t));
             }
           },
           nullptr);
 
-      tps[numa_id]->set_k2_packed_weight_scale_pointers(
-          stage.gate.data(), stage.up.data(), stage.down.data(), stage.gate_scale.data(), stage.up_scale.data(),
-          stage.down_scale.data());
+      tps[numa_id]->set_k2_packed_weight_scale_pointers(stage.gate.data(), stage.up.data(), stage.down.data(),
+                                                        stage.gate_scale.data(), stage.up_scale.data(),
+                                                        stage.down_scale.data());
     });
     run_numa_job_checked("RAWINT4 forward weight load", [this](int numa_id) { tps[numa_id]->load_weights(); });
   }
@@ -687,7 +685,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
         update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
                             config.down_lora_a, config.down_lora_b);
       }
-
     }
   }
 
@@ -721,6 +718,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
     if constexpr (uses_rawint4_kgroup_weights()) {
+      if (weights_loaded) {
+        throw std::logic_error("RAWINT4 SFT weights are immutable and already loaded");
+      }
       load_rawint4_weights_with_tp_staging();
       weights_loaded = true;
       return;
@@ -984,7 +984,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
         __m256 acc = _mm256_loadu_ps(merge_to + e);
         if (incremental) acc = _mm256_add_ps(acc, avx2::load_bf16_to_fp32(out_row + e));
         for (int i = 1; i < tp_count_ref; i++)
-          acc = _mm256_add_ps(acc, _mm256_loadu_ps(local_output_numa_ref[i] + (size_t)token_nth * tp_configs_ref[i].hidden_size + e));
+          acc = _mm256_add_ps(
+              acc, _mm256_loadu_ps(local_output_numa_ref[i] + (size_t)token_nth * tp_configs_ref[i].hidden_size + e));
         _mm256_storeu_ps(merge_to + e, acc);
         avx2::store_fp32_to_bf16(out_row + e, acc);
       }
@@ -1108,6 +1109,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if constexpr (T::kIsMXFP4Backend) {
       if (grad_gate_proj != nullptr || grad_up_proj != nullptr || grad_down_proj != nullptr) {
         throw std::invalid_argument("MXFP4 SFT does not accept routed-expert base-gradient outputs");
+      }
+    }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      if (grad_gate_proj != nullptr || grad_up_proj != nullptr || grad_down_proj != nullptr) {
+        throw std::invalid_argument("RAWINT4 SFT does not accept routed-expert base-gradient outputs");
       }
     }
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
@@ -1398,17 +1404,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
     stage_start = profiler_.start();
     run_numa_job_checked("SFT backward", [&](int numa_id) {
       if constexpr (requires(T& t) {
-                      t.backward_with_workspace(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                                nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, size_t{0},
-                                                false, 1.0f);
+                      t.backward_with_workspace(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                nullptr, 0, nullptr, nullptr, nullptr, nullptr, size_t{0}, false, 1.0f);
                     }) {
         if (use_external_workspace) {
           tps[numa_id]->backward_with_workspace(
-              grad_output, part_grad_input_[numa_id], nullptr, tp_gate_b_ptr[numa_id], nullptr,
-              tp_up_b_ptr[numa_id], tp_down_a_ptr[numa_id], nullptr, part_grad_weights_[numa_id],
-              full_intermediate_size, tp_fp32_down_b[numa_id], tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id],
-              part_kernel_workspace_[numa_id], part_kernel_workspace_bytes_[numa_id],
-              effective_accumulate_optimizer_grads, optimizer_grad_scale);
+              grad_output, part_grad_input_[numa_id], nullptr, tp_gate_b_ptr[numa_id], nullptr, tp_up_b_ptr[numa_id],
+              tp_down_a_ptr[numa_id], nullptr, part_grad_weights_[numa_id], full_intermediate_size,
+              tp_fp32_down_b[numa_id], tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id], part_kernel_workspace_[numa_id],
+              part_kernel_workspace_bytes_[numa_id], effective_accumulate_optimizer_grads, optimizer_grad_scale);
           return;
         }
       }
@@ -1807,6 +1811,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if constexpr (T::kIsMXFP4Backend) {
       throw std::logic_error("MXFP4 SFT backward reads native packed forward weights and has no BF16 backward copy");
     }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      throw std::logic_error("RAWINT4 SFT backward reads packed forward weights and has no BF16 backward copy");
+    }
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -1926,6 +1933,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void set_base_weight_pointers(void* gate, void* up, void* down) {
     if constexpr (T::kIsMXFP4Backend) {
       throw std::logic_error("MXFP4 SFT base weights are frozen packed tensors with separate scale pointers");
+    }
+    if constexpr (uses_rawint4_kgroup_weights()) {
+      throw std::logic_error("RAWINT4 SFT base weights are frozen packed tensors with separate scale pointers");
     }
     config.gate_proj = gate;
     config.up_proj = up;

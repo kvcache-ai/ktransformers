@@ -68,6 +68,7 @@ static const bool _is_plain_ = false;
 #include "operators/avx2/gptq_int4_avxvnni_packed-moe.hpp"
 #include "operators/avx2/mxfp4-moe.hpp"
 #include "operators/avx2/sft_mxfp4-moe.hpp"
+#include "operators/avx2/sft_rawint4-moe.hpp"
 #if !defined(USE_AMX_AVX_KERNEL)
 #include "operators/moe-sft-tp.hpp"
 #endif
@@ -571,6 +572,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__int8_weight_layout__") = "kt-int8-n32-k64-vnni-v1";
 #if defined(USE_AMX_AVX_KERNEL) && defined(__AVX512BF16__)
   m.attr("__rawint4_kernel__") = "amx-int4-kgroup-g32";
+#elif defined(__x86_64__) && !defined(USE_AMX_AVX_KERNEL)
+  m.attr("__rawint4_kernel__") = "avx2-int4-kgroup-g32";
 #else
   m.attr("__rawint4_kernel__") = "unsupported";
 #endif
@@ -1008,6 +1011,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if !defined(USE_AMX_AVX_KERNEL)
   // AVX2 tier of the MXFP4 routed-expert LoRA SFT (same Python name as the AMX build)
   bind_moe_sft_module<avx2::AVX2_SFT_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "MXFP4_SFT_MOE");
+  // AVX2 tier of the RAWINT4 routed-expert LoRA SFT (same Python name as the AMX build)
+  bind_moe_sft_module<avx2::AVX2_SFT_RAWINT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module,
+                                                                                  "AMXInt4_KGroup_SFT_MOE");
 #endif
   bind_moe_module<AVX2_MXFP8_MOE_TP<avx2::GemmKernelAVX2MXFP8>>(moe_module, "AVX2MXFP8_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
