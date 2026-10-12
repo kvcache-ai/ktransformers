@@ -30,7 +30,19 @@ huggingface-cli download --resume-download Qwen/Qwen3-Next-80B-A3B-Instruct
 
 ### 3. Install ktransformers
 
-To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
+Before proceeding, ensure you meet the prerequisites listed in the [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
+
+Qwen3-Next uses the `balance_serve` backend in the launch command below, so build KTransformers with the balance-serve extension enabled:
+
+```bash
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+USE_BALANCE_SERVE=1 bash ./install.sh
+cd ..
+```
+
+If startup fails with `ModuleNotFoundError: No module named 'sched_ext'`, the `balance_serve` scheduler extension was not built in the active environment. Re-run the install command above in a clean environment, then start the server again.
 
 ### 4. Run Qwen3-Next Inference Server
 
