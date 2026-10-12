@@ -954,7 +954,9 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                     max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
                     group_size=32 if expert_weight_format in {"rawint4", "mxfp4"} else 128,
                     zero_point=expert_weight_format not in {"rawint4", "mxfp4"},
-                    swiglu_limit=float(getattr(_text_cfg, "swiglu_limit", 0.0)) if expert_weight_format == "mxfp4" else 0.0,
+                    swiglu_limit=float(getattr(_text_cfg, "swiglu_limit", 0.0))
+                    if expert_weight_format in {"mxfp4", "rawint4"}
+                    else 0.0,
                     full_weight_grad=full_weight_grad,
                 )
             except BaseException as exc:

@@ -25,6 +25,9 @@ def main():
     parser.add_argument("--tensors", help="Optional output/gradient snapshot for A/B numerical comparison")
     parser.add_argument("--window-check", action="store_true", help="Change routing across three-microbatch windows")
     parser.add_argument("--skew", action="store_true", help="Place hot experts at the end of the ID order")
+    parser.add_argument(
+        "--swiglu-limit", type=float, default=0.0, help="SwiGLU clamp limit (0 disables); requires the AVX2 kernel"
+    )
     args = parser.parse_args()
     assert 0 < args.top_k <= args.experts
     assert args.hidden % 256 == 0 and args.intermediate % (256 * args.tp) == 0
@@ -49,6 +52,7 @@ def main():
     config.authoritative_optimizer_grads = True
     mapping = torch.arange(args.experts, dtype=torch.int64)
     config.physical_to_logical_map = mapping.data_ptr()
+    config.swiglu_limit = args.swiglu_limit
     weights, lora, grads = {}, {}, {}
     for name, rows, cols in (
         ("gate", args.intermediate, args.hidden),
