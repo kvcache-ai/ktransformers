@@ -2963,7 +2963,7 @@ struct DequantizerIQ2XS final : public BaseDequantizer<block_iq2_xs> {
 
     union index_t {
         __m256i vec;
-        uint16_t val[8];
+        uint16_t val[16];
     };
 
     inline static void make4(const __m256i& data, const __m256i& mask, __m256i * values) {
