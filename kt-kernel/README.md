@@ -738,6 +738,24 @@ pip install .
 
 ## Error Troubleshooting
 
+### Missing submodule CMakeLists.txt
+
+If CMake reports that `third_party/pybind11` or `third_party/llama.cpp` does not contain a
+`CMakeLists.txt`, the checkout is missing git submodules. Reinitialize them from the repository
+root, then rebuild:
+
+```bash
+git submodule update --init --recursive
+cd kt-kernel
+./install.sh build
+```
+
+When cloning a fresh copy, prefer:
+
+```bash
+git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+```
+
 ### CUDA Not Found
 
 ```
