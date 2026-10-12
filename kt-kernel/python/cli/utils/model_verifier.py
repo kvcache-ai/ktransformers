@@ -371,10 +371,14 @@ def _fetch_from_huggingface(
 
         result = {}
         for file_info in paths_info:
-            if hasattr(file_info, "lfs") and file_info.lfs is not None:
-                sha256 = file_info.lfs.sha256
-            else:
-                sha256 = getattr(file_info, "blob_id", None)
+            lfs = getattr(file_info, "lfs", None)
+            sha256 = getattr(lfs, "sha256", None) if lfs is not None else None
+            if not sha256:
+                # Only LFS-tracked files expose a SHA256 on the Hub. For a plain
+                # git blob the API returns `blob_id`, which is the git SHA1 of the
+                # object, so comparing it against a local SHA256 can never match.
+                # Omit those files rather than reporting a guaranteed mismatch.
+                continue
             result[file_info.path] = sha256
 
         return result
