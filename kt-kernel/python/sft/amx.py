@@ -159,8 +159,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.zero_point = zero_point
         self.swiglu_limit = float(swiglu_limit)
 
-        if not is_mxfp4_sft_method(method) and self.swiglu_limit != 0.0:
-            raise ValueError(f"swiglu_limit is only supported by MXFP4_SFT, got {method!r}")
+        if not (is_mxfp4_sft_method(method) or is_rawint4_sft_method(method)) and self.swiglu_limit != 0.0:
+            raise ValueError(f"swiglu_limit is only supported by MXFP4_SFT/RAWINT4_SFT, got {method!r}")
         if is_mxfp4_sft_method(method):
             if self._full_weight_grad or self.lora_rank <= 0:
                 raise ValueError("MXFP4_SFT supports frozen-base LoRA only")
@@ -213,6 +213,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 or (self.moe_intermediate_size // self.threadpool_count) % 32
             ):
                 raise ValueError("RAWINT4 SFT requires every TP intermediate slice divisible by 32")
+            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit < 0.0:
+                raise ValueError("RAWINT4 SFT requires a finite non-negative swiglu_limit")
             self.group_size = 32
             self.zero_point = False
 

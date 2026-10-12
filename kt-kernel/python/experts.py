@@ -235,13 +235,14 @@ class KTMoEWrapper:
                 swiglu_alpha=swiglu_alpha,
             )
         else:  # mode == "sft"
-            if swiglu_limit != 0.0 and method != "MXFP4_SFT":
+            _swiglu_clamp_methods = ("MXFP4_SFT", "RAWINT4_SFT", "AMXINT4_KGroup_SFT")
+            if swiglu_limit != 0.0 and method not in _swiglu_clamp_methods:
                 raise ValueError(
                     f"swiglu_limit={swiglu_limit} is only supported by "
-                    f"method='MXFP4_SFT' in SFT mode, got {method!r}"
+                    f"MXFP4_SFT/RAWINT4_SFT in SFT mode, got {method!r}"
                 )
-            if method == "MXFP4_SFT" and swiglu_alpha != 0.0:
-                raise ValueError("MXFP4_SFT requires swiglu_alpha=0")
+            if swiglu_alpha != 0.0 and method in _swiglu_clamp_methods:
+                raise ValueError("MXFP4_SFT/RAWINT4_SFT requires swiglu_alpha=0")
             return _create_sft_wrapper(
                 layer_idx=layer_idx,
                 num_experts=num_experts,

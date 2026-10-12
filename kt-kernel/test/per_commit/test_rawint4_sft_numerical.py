@@ -17,6 +17,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -618,8 +619,11 @@ def test_rawint4_rejects_shared_backward_pool_at_construction():
 
 
 @pytest.mark.cpu
-def test_rawint4_production_wrapper_tasks():
+@pytest.mark.parametrize("swiglu_limit", [0.0, 2.0])
+def test_rawint4_production_wrapper_tasks(swiglu_limit):
     _require_extension(allow_source_only_skip=True)
+    if swiglu_limit > 0 and kt_kernel_ext.__rawint4_kernel__ != "avx2-int4-kgroup-g32":
+        pytest.skip("the AMX K2 part does not implement the swiglu clamp")
     from kt_kernel.sft.amx import AMXSFTMoEWrapper
     from kt_kernel.sft.base import KExpertsSFTBuffer
     from kt_kernel.sft.weights import RAWINT4ExpertWeights
@@ -640,6 +644,7 @@ def test_rawint4_production_wrapper_tasks():
         lora_rank=RANK,
         lora_alpha=ALPHA,
         method="RAWINT4_SFT",
+        swiglu_limit=swiglu_limit,
     )
     wrapper.init_lora_weights(*(lora[name] for name in LORA_NAMES), *(grads[name] for name in LORA_NAMES))
     wrapper.load_rawint4_weights(
@@ -654,7 +659,7 @@ def test_rawint4_production_wrapper_tasks():
         torch.arange(EXPERTS, dtype=torch.int64),
     )
     batch = _make_batch((0, 1), 8001)
-    reference = _reference(experts, lora, batch)
+    reference = _reference(experts, lora, batch, swiglu_limit)
     buffer = KExpertsSFTBuffer(QLEN, HIDDEN, INTERMEDIATE, EXPERTS, TOP_K, RANK)
     buffer.input_cpu.copy_(batch.inputs)
     buffer.expert_ids_cpu.copy_(batch.expert_ids)
@@ -671,6 +676,109 @@ def test_rawint4_production_wrapper_tasks():
     ):
         _assert_close(f"wrapper.{name}", actual.float(), expected, relative_l2_limit=0.03, cosine_limit=0.995)
     _assert_window("wrapper", grads, reference[3], batch.active_experts)
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("nested_text_config", [False, True])
+@pytest.mark.parametrize("swiglu_limit", [None, 0.0, 2.0])
+def test_rawint4_model_config_reaches_backend(nested_text_config, swiglu_limit):
+    _require_extension(allow_source_only_skip=True)
+    if swiglu_limit and kt_kernel_ext.__rawint4_kernel__ != "avx2-int4-kgroup-g32":
+        pytest.skip("the AMX K2 part does not implement the swiglu clamp")
+    from kt_kernel.sft.config import KTConfig
+    from kt_kernel.sft.weights import RAWINT4ExpertWeights
+    import kt_kernel.sft.config as config_module
+    import kt_kernel.sft.wrapper as wrapper_module
+
+    base, _, _ = _make_weights()
+    weights = RAWINT4ExpertWeights(
+        gate_proj=base["gate"],
+        gate_scale=base["gate_scale"],
+        up_proj=base["up"],
+        up_scale=base["up_scale"],
+        down_proj=base["down"],
+        down_scale=base["down_scale"],
+    )
+    text_config = SimpleNamespace(
+        architectures=["DeepseekV3ForCausalLM"],
+        model_type="kimi_k2",
+        hidden_size=HIDDEN,
+        n_routed_experts=EXPERTS,
+        n_shared_experts=0,
+        moe_intermediate_size=INTERMEDIATE,
+        num_experts_per_tok=TOP_K,
+        max_position_embeddings=MAX_QLEN,
+        quantization_config={
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "quantization_status": "compressed",
+            "config_groups": {
+                "group_0": {
+                    "weights": {
+                        "type": "int",
+                        "num_bits": 4,
+                        "strategy": "group",
+                        "group_size": 32,
+                        "dynamic": False,
+                        "symmetric": True,
+                        "actorder": None,
+                        "block_structure": None,
+                    },
+                }
+            },
+        },
+    )
+    if swiglu_limit is not None:
+        text_config.swiglu_limit = swiglu_limit
+    model = torch.nn.Module()
+    container = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.gate = torch.nn.Linear(HIDDEN, EXPERTS, bias=False)
+    layer.mlp.experts = torch.nn.ModuleList()
+    for _ in range(EXPERTS):
+        expert = torch.nn.Module()
+        expert.gate_proj = torch.nn.Linear(HIDDEN, INTERMEDIATE, bias=False)
+        expert.up_proj = torch.nn.Linear(HIDDEN, INTERMEDIATE, bias=False)
+        expert.down_proj = torch.nn.Linear(INTERMEDIATE, HIDDEN, bias=False)
+        layer.mlp.experts.append(expert)
+    container.layers = torch.nn.ModuleList([layer])
+    if nested_text_config:
+        model.config = SimpleNamespace(
+            architectures=["KimiK25ForConditionalGeneration"],
+            model_type="kimi_k25",
+            text_config=text_config,
+            swiglu_limit=99.0,
+        )
+        model.language_model = torch.nn.Module()
+        model.language_model.model = container
+    else:
+        model.config = text_config
+        model.model = container
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("RANK", "0")
+        patch.setenv("WORLD_SIZE", "1")
+        patch.setattr(config_module, "configure_omp_threads", lambda *_args, **_kwargs: 1)
+        config = KTConfig(
+            kt_backend="RAWINT4",
+            kt_expert_weight_format="rawint4",
+            kt_train_mode="lora",
+            kt_lora_rank=RANK,
+            kt_lora_alpha=ALPHA,
+            kt_num_gpu_experts=0,
+            kt_num_threads=4,
+            kt_share_backward_bb=False,
+            kt_weight_lifecycle="persistent",
+            kt_force_fused_expert_lora=True,
+            kt_activation_policy={"cpu": "retain", "gpu": "retain"},
+        )
+        config.kt_checkpoint_files = ["fixture.safetensors"]
+        patch.setattr(wrapper_module, "load_rawint4_experts_from_checkpoint_files", lambda **_kwargs: weights)
+        wrapped = wrapper_module.wrap_moe_layers_with_kt_wrapper(model, config)
+        assert len(wrapped) == 1
+        assert wrapped[0].wrapper.swiglu_limit == (swiglu_limit or 0.0)
+        assert wrapped[0].wrapper._weights_loaded
 
 
 @pytest.mark.cpu
@@ -794,9 +902,15 @@ def test_rawint4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression():
 if __name__ == "__main__":
     _require_extension(allow_source_only_skip=False)
     test_rawint4_rejects_shared_backward_pool_at_construction()
-    test_rawint4_production_wrapper_tasks()
+    test_rawint4_production_wrapper_tasks(0.0)
+    for nested in (False, True):
+        for limit in (None, 0.0):
+            test_rawint4_model_config_reaches_backend(nested, limit)
     test_rawint4_rectangular_multiblock_contract(0.0)
     if kt_kernel_ext.__rawint4_kernel__ == "avx2-int4-kgroup-g32":
+        test_rawint4_production_wrapper_tasks(2.0)
+        for nested in (False, True):
+            test_rawint4_model_config_reaches_backend(nested, 2.0)
         test_rawint4_clamp_boundaries()
         test_rawint4_rectangular_multiblock_contract(2.0)
     test_rawint4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression()
