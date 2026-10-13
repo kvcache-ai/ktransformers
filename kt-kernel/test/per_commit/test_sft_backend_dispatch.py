@@ -239,6 +239,86 @@ def test_rawint4_runtime_rejects_missing_symbol(monkeypatch):
         backend.get_rawint4_runtime()
 
 
+def test_rawint4_runtime_reports_avx2_kernel(monkeypatch):
+    _install_fake_runtime(
+        monkeypatch,
+        variant="avx2",
+        kernel="unsupported",
+        has_rawint4_sft=True,
+        rawint4_kernel=backend.RAWINT4_AVX2_KERNEL,
+    )
+
+    runtime = backend.get_rawint4_runtime()
+
+    assert runtime.cpu_variant == "avx2"
+    assert runtime.kernel == backend.RAWINT4_AVX2_KERNEL
+    assert runtime.weight_layout == backend.RAWINT4_WEIGHT_LAYOUT
+
+
+def test_rawint4_runtime_reports_amx_kernel_on_avx512_bf16(monkeypatch):
+    # The avx512_bf16 wheel tier is built with USE_AMX_AVX_KERNEL (without
+    # AMX intrinsics) and binds the AMX KGroup part on vector fallbacks, so
+    # it reports the AMX kernel tier rather than the AVX2 tier.
+    _install_fake_runtime(
+        monkeypatch,
+        variant="avx512_bf16",
+        kernel="unsupported",
+        has_rawint4_sft=True,
+        rawint4_kernel=backend.RAWINT4_KERNEL,
+    )
+
+    runtime = backend.get_rawint4_runtime()
+
+    assert runtime.cpu_variant == "avx512_bf16"
+    assert runtime.kernel == backend.RAWINT4_KERNEL
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["avx2", "avx512_base", "avx512_vnni", "avx512_vbmi"],
+)
+def test_rawint4_runtime_uses_avx2_kernel_on_non_amx_variants(monkeypatch, variant):
+    # Every non-AMX x86_64 wheel without USE_AMX_AVX_KERNEL binds the same
+    # AVX2 SFT kernel under the AMXInt4_KGroup_SFT_MOE symbol, so any such
+    # variant whose extension reports the AVX2 kernel tier is accepted.
+    _install_fake_runtime(
+        monkeypatch,
+        variant=variant,
+        kernel="unsupported",
+        has_rawint4_sft=True,
+        rawint4_kernel=backend.RAWINT4_AVX2_KERNEL,
+    )
+
+    runtime = backend.get_rawint4_runtime()
+
+    assert runtime.cpu_variant == variant
+    assert runtime.kernel == backend.RAWINT4_AVX2_KERNEL
+
+
+def test_rawint4_runtime_rejects_kernel_tier_mismatch(monkeypatch):
+    _install_fake_runtime(
+        monkeypatch,
+        variant="avx2",
+        kernel="unsupported",
+        has_rawint4_sft=True,
+        rawint4_kernel=backend.RAWINT4_KERNEL,
+    )
+    with pytest.raises(RuntimeError, match="AMX KGroup or AVX2 kernel"):
+        backend.get_rawint4_runtime()
+
+
+def test_rawint4_runtime_rejects_unsupported_kernel_tier(monkeypatch):
+    _install_fake_runtime(
+        monkeypatch,
+        variant="avx2",
+        kernel="unsupported",
+        has_rawint4_sft=True,
+        rawint4_kernel="unsupported",
+    )
+    with pytest.raises(RuntimeError, match="AMX KGroup or AVX2 kernel"):
+        backend.get_rawint4_runtime()
+
+
 def _sap4_rawint4_quantization_config():
     return {
         "quant_method": "compressed-tensors",
