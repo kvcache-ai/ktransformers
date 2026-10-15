@@ -17,7 +17,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 ## 🔥 Updates
 
-* **Oct 15, 2026**: **DeepSeek-V4-Flash LoRA fine-tuning** supports native MXFP4 routed experts. [Two-GPU quickstart](./doc/en/SFT/DeepSeek-V4-Flash-LoRA-Quickstart.md).
+* **Oct 15, 2026**: **DeepSeek-V4-Flash LoRA fine-tuning** supports native MXFP4 routed experts. [quickstart](./doc/en/SFT/DeepSeek-V4-Flash-LoRA-Quickstart.md).
 * **Oct 8, 2026**: We release the author preprint of **KTransformers-FineTune (KT-FT)**, presenting layout-aware and schedule-optimized CPU-GPU co-computation for MoE fine-tuning. [Paper and citation](./papers/kt-ft/) · [PDF](./papers/kt-ft/ktransformers-finetune.pdf).
 * **Sep 13, 2026**: **Kimi K2.5 / K2.6 LoRA fine-tuning** is supported with native RAWINT4 routed experts.
 * **Aug 26, 2026**: Added native support for **GLM-5.3-flash**, bringing 1M-token context and multimodal input to consumer GPUs. ([Tutorial](./doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md))
