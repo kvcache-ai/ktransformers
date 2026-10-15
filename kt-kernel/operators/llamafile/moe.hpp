@@ -102,6 +102,16 @@ static inline ggml_type kt_effective_vec_dot_type(ggml_type weight_type) {
   return ggml_internal_get_type_traits(weight_type).vec_dot_type;
 }
 
+// Rows per work item in forward_many: the widest of 256/128/64/32 that divides the row count, so
+// a part whose intermediate size is not a multiple of 256 (e.g. 640 split in two = 320) is covered
+// completely instead of truncated to a multiple of 256.
+inline int llamafile_row_block(int rows) {
+  for (int b = 256; b > 32; b /= 2) {
+    if (rows % b == 0) return b;
+  }
+  return 32;
+}
+
 class LLAMA_MOE_TP {
  private:
   GeneralMOEConfig config_;
@@ -285,6 +295,9 @@ class LLAMA_MOE_TP {
       printf("intermediate_size: %d, gate_type blck size: %d\n", config.intermediate_size,
              ggml_blck_size((ggml_type)config.gate_type));
       throw std::runtime_error("intermediate_size * hidden_size must be a multiple of gate_type blck size");
+    }
+    if (config.intermediate_size % 32 != 0 || config.hidden_size % 32 != 0) {
+      throw std::runtime_error("llamafile MoE: intermediate_size and hidden_size must be multiples of 32");
     }
     uint8_t* gate_proj = (uint8_t*)config.gate_proj + offset * config.hidden_size *
                                                           ggml_type_size((ggml_type)config.gate_type) /
@@ -761,7 +774,7 @@ class LLAMA_MOE_TP {
     }
 #endif
 
-    int m_block = QK_K;
+    int m_block = llamafile_row_block(config_.intermediate_size);
     int nth = config_.intermediate_size / m_block;
     // printf("nth: %d, m_block: %d, activated_expert: %d\n", nth, m_block, activated_expert);
     // printf("config_.hidden_size: %d, config_.intermediate_size: %d\n", config_.hidden_size,
@@ -836,7 +849,7 @@ class LLAMA_MOE_TP {
     }
 #endif
 
-    m_block = QK_K;
+    m_block = llamafile_row_block(config_.hidden_size);
     nth = config_.hidden_size / m_block;
     pool->do_work_stealing_job(
         nth * activated_expert, nullptr,
