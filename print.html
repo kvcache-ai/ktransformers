@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a6b97773.js";
+            window.path_to_searchindex_js = "searchindex-3537cc5a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78d73750.js"></script>
@@ -197,6 +197,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="kt-kernel/README.html">Inference</a> and <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Oct 15, 2026</strong>: <strong>DeepSeek-V4-Flash LoRA fine-tuning</strong> supports native MXFP4 routed experts. <a href="doc/en/SFT/DeepSeek-V4-Flash-LoRA-Quickstart.html">quickstart</a>.</li>
 <li><strong>Oct 8, 2026</strong>: We release the author preprint of <strong>KTransformers-FineTune (KT-FT)</strong>, presenting layout-aware and schedule-optimized CPU-GPU co-computation for MoE fine-tuning. <a href="papers/kt-ft">Paper and citation</a> · <a href="papers/kt-ft/ktransformers-finetune.pdf">PDF</a>.</li>
 <li><strong>Sep 13, 2026</strong>: <strong>Kimi K2.5 / K2.6 LoRA fine-tuning</strong> is supported with native RAWINT4 routed experts.</li>
 <li><strong>Aug 26, 2026</strong>: Added native support for <strong>GLM-5.3-flash</strong>, bringing 1M-token context and multimodal input to consumer GPUs. (<a href="doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.html">Tutorial</a>)</li>
@@ -1377,6 +1378,7 @@ chunk_size: 8192
 <li><a href="en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">v0.6.1 Quick Start</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">Fine-Tuning User Guide</a></li>
 <li><a href="#qwen35-moe-kt-lora-serving-with-sglang-kt">KT-FT Fine-Tuning and Inference Loop</a></li>
+<li><a href="en/SFT/DeepSeek-V4-Flash-LoRA-Quickstart.html">DeepSeek-V4-Flash LoRA quickstart</a></li>
 <li><a href="en/SFT/DeepSeek-V4-Flash-LoRA-E2E.html">DeepSeek-V4-Flash MXFP4 LoRA training and static deployment</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--developer-technical-notes">Developer Technical Notes</a></li>
 <li><a href="#dpo-training-with-llama-factory">DPO Tutorial</a></li>
