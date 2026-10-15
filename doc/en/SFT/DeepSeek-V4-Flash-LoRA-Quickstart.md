@@ -1,25 +1,38 @@
 # DeepSeek-V4-Flash LoRA SFT
 
-KTransformers fine-tunes the April DeepSeek-V4-Flash checkpoint while keeping routed-expert weights in native MXFP4 on CPU. This example trains on two GPUs and loads the saved LoRA adapter for inference.
+KTransformers fine-tunes the DeepSeek-V4-Flash checkpoint while keeping routed-expert weights in native MXFP4 on CPU. This example trains on two GPUs and loads the saved LoRA adapter for inference.
 
-## 1. Prepare the environment and data
+## 1. Prepare the environment
+
+Use Python 3.11 or 3.12, with `python` pointing to that interpreter.
 
 ```bash
-python3.11 -m venv .venv-sft
+python -m venv .venv-sft
 source .venv-sft/bin/activate
-python -m pip install 'ktransformers[sft]==0.7.2'
+python -m pip install 'ktransformers[sft]==0.7.2' 'torchaudio==2.9.1'
 python -m pip check
 ```
 
-Save Alpaca-format examples in `data/train.json` and register them in `data/dataset_info.json`:
+Keep the complete DeepSeek-V4-Flash checkpoint at `/models/DeepSeek-V4-Flash`. Replace this path with the location on your machine.
+
+## 2. Prepare the data
+
+Save Alpaca-format examples as `data/train.json` (replace the example with your data):
+
+```json
+[
+  {"instruction": "Translate into English.", "input": "设备正常。", "output": "The device is operating normally."},
+  {"instruction": "Translate into English.", "input": "请检查连接。", "output": "Please check the connection."}
+]
+```
+
+Register the dataset in `data/dataset_info.json`:
 
 ```json
 {"v4_demo": {"file_name": "train.json"}}
 ```
 
-Keep the complete April model checkpoint at `/models/DeepSeek-V4-Flash`. Change the paths below to match your machine.
-
-## 2. Train
+## 3. Train
 
 Save as `train.yaml`:
 
@@ -97,9 +110,7 @@ CUDA_VISIBLE_DEVICES=0,1 accelerate launch --config_file fsdp2.yaml \
   -m llamafactory.launcher train.yaml
 ```
 
-To resume, set `resume_from_checkpoint` in `train.yaml` to the saved checkpoint directory and keep the same model, LoRA targets, rank count, and scheduler horizon.
-
-## 3. Load the adapter
+## 4. Load the adapter
 
 Use a separate serving environment:
 
@@ -114,7 +125,9 @@ Replace `outputs/dsv4-flash-2gpu/checkpoint-20` with your actual saved checkpoin
 
 ```bash
 export SGLANG_DSV4_MODE=2604 SGLANG_DSV4_2604_SUBMODE=2604B
-export SGLANG_APPLY_CONFIG_BACKUP=none
+export SGLANG_APPLY_CONFIG_BACKUP=none SGLANG_DSV4_FP4_EXPERTS=1
+export SGLANG_OPT_FP8_WO_A_GEMM=0 SGLANG_OPT_FUSE_WQA_WKV=0
+export SGLANG_V4_USE_TRITON_KERNELS=1
 export SGLANG_FLASHMLA_BACKEND_OVERRIDE=triton
 CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server \
   --model-path /models/DeepSeek-V4-Flash --kt-weight-path /models/DeepSeek-V4-Flash \
@@ -128,26 +141,23 @@ CUDA_VISIBLE_DEVICES=0,1 python -m sglang.launch_server \
   --served-model-name dsv4-flash --host 127.0.0.1 --port 31300
 ```
 
-The V4 mode flags select the April checkpoint loader; the remaining overrides follow the tested RTX 5090 path. Adjust CPU threads and GPU memory settings for your hardware.
+The V4 mode flags select the DeepSeek-V4-Flash checkpoint loader; the remaining overrides follow the tested RTX 5090 path. Adjust CPU threads and GPU memory settings for your hardware.
 
-Send a request to the named adapter:
+Send a smoke-test request to the named adapter. The `input_ids` below are an encoded DeepSeek-V4-Flash prompt asking for the capital of China:
 
 ```python
 import json
 from urllib.request import Request, urlopen
 
 body = {
-    "model": "dsv4-flash",
+    "input_ids": [0, 128803, 17607, 2793, 3139, 12108, 1148, 2788, 102475, 9090, 320, 128804, 128822],
+    "sampling_params": {"temperature": 0, "max_new_tokens": 16},
     "lora_path": "trained",
-    "reasoning_effort": "none",
-    "messages": [{"role": "user", "content": "Translate into English: 设备正常。"}],
-    "temperature": 0,
-    "max_tokens": 128,
 }
 request = Request(
-    "http://127.0.0.1:31300/v1/chat/completions",
+    "http://127.0.0.1:31300/generate",
     data=json.dumps(body).encode(),
     headers={"Content-Type": "application/json"},
 )
-print(json.load(urlopen(request))["choices"][0]["message"]["content"])
+print(json.load(urlopen(request))["text"])
 ```
