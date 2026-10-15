@@ -112,7 +112,7 @@ class LLAMA_MOE_TP {
   uint8_t* m_local_down_proj_;  // [expert_num * hidden_size * intermediate_size ( /32 if quantized)]
   // Single-NUMA (tp_count==1): the three proj pointers ALIAS the source GGUF mmap instead of
   // owning a memcpy'd copy (see load_weights identity short-circuit). When true, the ctor's
-  // lazy new[] reservations were freed and these must NOT be delete[]'d (they point into mmap).
+  // reservations were freed and these must NOT be freed again (they point into mmap).
   bool m_weights_aliased_ = false;
 
   float* s_input_fp32_;    // [hidden_size]
@@ -256,15 +256,36 @@ class LLAMA_MOE_TP {
 
     auto size = 1ll * config.expert_num * config.intermediate_size * config.hidden_size;
     m_local_up_proj_ =
-        new uint8_t[size * ggml_type_size((ggml_type)config.up_type) / ggml_blck_size((ggml_type)config.up_type)];
-
+        alloc_weights(size * ggml_type_size((ggml_type)config.up_type) / ggml_blck_size((ggml_type)config.up_type));
     m_local_gate_proj_ =
-        new uint8_t[size * ggml_type_size((ggml_type)config.gate_type) / ggml_blck_size((ggml_type)config.gate_type)];
+        alloc_weights(size * ggml_type_size((ggml_type)config.gate_type) / ggml_blck_size((ggml_type)config.gate_type));
     m_local_down_proj_ =
-        new uint8_t[size * ggml_type_size((ggml_type)config.down_type) / ggml_blck_size((ggml_type)config.down_type)];
+        alloc_weights(size * ggml_type_size((ggml_type)config.down_type) / ggml_blck_size((ggml_type)config.down_type));
   }
 
-  ~LLAMA_MOE_TP() { shared_mem_buffer_numa.dealloc(tp_part_idx, this); }
+  ~LLAMA_MOE_TP() {
+    if (!m_weights_aliased_) {
+      free(m_local_gate_proj_);
+      free(m_local_up_proj_);
+      free(m_local_down_proj_);
+    }
+    shared_mem_buffer_numa.dealloc(tp_part_idx, this);
+  }
+
+  // The expert weights of one TP part (tens of GB, read by every decode token): 2 MB-aligned and
+  // advised for transparent huge pages, so under transparent_hugepage=madvise they get 2 MB pages
+  // instead of the 4K pages a plain new[] gives (fewer TLB misses). The pages are first touched in
+  // load_weights, on the part's NUMA-bound threads. Released with free().
+  static uint8_t* alloc_weights(size_t bytes) {
+    const size_t align = size_t(2) << 20;
+    const size_t sz = (bytes + align - 1) & ~(align - 1);
+    void* p = nullptr;
+    if (posix_memalign(&p, align, sz) != 0 || p == nullptr) {
+      throw std::bad_alloc();
+    }
+    madvise(p, sz, MADV_HUGEPAGE);
+    return (uint8_t*)p;
+  }
 
   void load_weights(int complete_intermediate_size, int offset) {
     auto& config = config_;
@@ -303,9 +324,9 @@ class LLAMA_MOE_TP {
     //     one page cache) => streaming-prefill stops re-reading cold GGUF from disk.
     // Multi-NUMA (tp_count>1) has strided per-node slices and cannot alias -> falls through to copy.
     if (offset == 0 && complete_intermediate_size == config.intermediate_size) {
-      delete[] m_local_gate_proj_;
-      delete[] m_local_up_proj_;
-      delete[] m_local_down_proj_;
+      free(m_local_gate_proj_);
+      free(m_local_up_proj_);
+      free(m_local_down_proj_);
       m_local_gate_proj_ = gate_proj;  // == (uint8_t*)config.gate_proj (offset==0)
       m_local_up_proj_ = up_proj;
       m_local_down_proj_ = down_proj;
