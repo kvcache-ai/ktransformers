@@ -4,6 +4,9 @@
 
 这是一个异构推理方案：Intel iGPU 负责未放在 CUDA GPU 上的 GPTQ INT4 experts；Attention、Embedding、LM Head 以及通过 `--kt-num-gpu-experts` 保留的 experts 仍由 CUDA GPU 执行。因此，当前实现不能替代 NVIDIA GPU，也不是纯 Intel GPU 推理后端。
 
+Panther Lake XMX 的最终使用说明见 [Intel iGPU XMX 后端](Intel-iGPU_zh.md)，
+源码构建步骤见 [环境安装](Intel-iGPU-Installation_zh.md)。
+
 ## 目录
 
 - [支持范围](#支持范围)

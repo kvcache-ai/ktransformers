@@ -225,6 +225,11 @@ class KExpertsCPUBuffer:
     temp_bs: int = 0
     temp_buffer: tuple = tuple()
     buffer_depth: int = 2
+    # Native tasks/captured host callbacks store raw pointers to these CPU-only
+    # scalars. Unlike DMA buffers, they are not covered by the pinned allocator's
+    # stream events. Keep one immutable set per shape for the process lifetime;
+    # replacing temp_buffer must never invalidate a queued task's qlen pointer.
+    _qlen_cache: Dict[Tuple[int, int], List[torch.Tensor]] = {}
 
     @classmethod
     def get_buffer(cls, hidden_states: torch.Tensor, num_experts_per_tok):
@@ -258,10 +263,14 @@ class KExpertsCPUBuffer:
             torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
-        bsz_tensor_cpu = [
-            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=pin_memory)
-            for _ in range(cls.buffer_depth)
-        ]
+        qlen_key = (batch_size, cls.buffer_depth)
+        if qlen_key not in cls._qlen_cache:
+            cls._qlen_cache[qlen_key] = [
+                torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=pin_memory)
+                for _ in range(cls.buffer_depth)
+            ]
+        # These lengths describe allocated shapes, not mutable request metadata.
+        bsz_tensor_cpu = cls._qlen_cache[qlen_key]
         output_gpu = [
             torch.zeros((batch_size, hidden_size), device=hidden_states.device, dtype=hidden_states.dtype)
             for _ in range(cls.buffer_depth)
@@ -937,4 +946,3 @@ class BaseMoEWrapper(_MoEBase, ABC):
         KExpertsCPUBuffer.capture_buffers.clear()
         KExpertsCPUBuffer.temp_bs = 0
         KExpertsCPUBuffer.temp_buffer = tuple()
-

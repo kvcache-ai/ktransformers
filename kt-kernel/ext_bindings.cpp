@@ -78,6 +78,7 @@ static const bool _is_plain_ = false;
 #endif
 #if defined(USE_SYCL)
 #include "operators/sycl/gptq_int4_sycl-moe.hpp"
+#include "operators/sycl/gptq_int4_xmx-moe.hpp"
 #endif
 
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
@@ -482,6 +483,17 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding);
 
+  if constexpr (requires(MoeClass& instance) {
+                  instance.profile_snapshot();
+                  instance.reset_profile();
+                }) {
+    moe_cls.def("profile_snapshot", &MoeClass::profile_snapshot).def("reset_profile", &MoeClass::reset_profile);
+  }
+
+  if constexpr (requires { MoeClass::implementation_revision(); }) {
+    moe_cls.def_static("implementation_revision", &MoeClass::implementation_revision);
+  }
+
   // Bind write_weight_scale_to_buffer_task for MoE types that support it
   // Uses SFINAE to detect if MoeClass has write_weight_scale_to_buffer method
   if constexpr (requires { &MoeClass::write_weight_scale_to_buffer; }) {
@@ -532,15 +544,14 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
            std::uint64_t epoch, std::int64_t layer_id, int expert_count) {
           if (!transport) throw std::invalid_argument("FP8 layerwise transport is null");
           const int tp_size = transport->tp_size();
-          transport->run_producer(
-              epoch, layer_id, expert_count,
-              [moe, tp_size](int expert_id, const std::vector<std::uintptr_t>& w13_weight_ptrs,
-                             const std::vector<std::uintptr_t>& w13_scale_ptrs,
-                             const std::vector<std::uintptr_t>& w2_weight_ptrs,
-                             const std::vector<std::uintptr_t>& w2_scale_ptrs) {
-                moe->write_weight_scale_to_buffer(tp_size, expert_id, w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs,
-                                                  w2_scale_ptrs);
-              });
+          transport->run_producer(epoch, layer_id, expert_count,
+                                  [moe, tp_size](int expert_id, const std::vector<std::uintptr_t>& w13_weight_ptrs,
+                                                 const std::vector<std::uintptr_t>& w13_scale_ptrs,
+                                                 const std::vector<std::uintptr_t>& w2_weight_ptrs,
+                                                 const std::vector<std::uintptr_t>& w2_scale_ptrs) {
+                                    moe->write_weight_scale_to_buffer(tp_size, expert_id, w13_weight_ptrs,
+                                                                      w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs);
+                                  });
         },
         py::arg("transport"), py::arg("epoch"), py::arg("layer_id"), py::arg("expert_count"),
         py::call_guard<py::gil_scoped_release>());
@@ -587,18 +598,17 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("FP8_LAYERWISE_CONTROL_BYTES") = kt::layerwise::kFP8LayerwiseControlBytes;
   m.attr("FP8_LAYERWISE_MAX_TP_SIZE") = kt::layerwise::kFP8LayerwiseMaxTPSize;
 
-  m.def("initialize_fp8_layerwise_control", &kt::layerwise::initialize_fp8_layerwise_control,
-        py::arg("control_ptr"), py::arg("control_size"), py::arg("tp_size"));
+  m.def("initialize_fp8_layerwise_control", &kt::layerwise::initialize_fp8_layerwise_control, py::arg("control_ptr"),
+        py::arg("control_size"), py::arg("tp_size"));
 
   py::class_<kt::layerwise::FP8LayerwiseTransport, std::shared_ptr<kt::layerwise::FP8LayerwiseTransport>>(
       m, "FP8LayerwiseTransport")
       .def(py::init<std::uintptr_t, std::size_t, int, int, int, const std::vector<std::uintptr_t>&,
                     const std::vector<std::uintptr_t>&, const std::vector<std::uintptr_t>&,
                     const std::vector<std::size_t>&, int, std::uint64_t>(),
-           py::arg("control_ptr"), py::arg("control_size"), py::arg("rank"), py::arg("tp_size"),
-           py::arg("cuda_device"), py::arg("local_host_ptrs"), py::arg("local_gpu_ptrs"),
-           py::arg("all_rank_host_ptrs"), py::arg("expert_nbytes"), py::arg("num_experts"),
-           py::arg("timeout_ms") = 60000)
+           py::arg("control_ptr"), py::arg("control_size"), py::arg("rank"), py::arg("tp_size"), py::arg("cuda_device"),
+           py::arg("local_host_ptrs"), py::arg("local_gpu_ptrs"), py::arg("all_rank_host_ptrs"),
+           py::arg("expert_nbytes"), py::arg("num_experts"), py::arg("timeout_ms") = 60000)
       .def("join", &kt::layerwise::FP8LayerwiseTransport::join, py::arg("epoch"), py::arg("layer_id"),
            py::arg("expert_count"), py::call_guard<py::gil_scoped_release>())
       .def(
@@ -634,16 +644,14 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
 #if defined(KTRANSFORMERS_USE_ASCEND_NPU)
   m.def(
-      "init_ascend_callback_worker",
-      []() { kt::ascend::ensure_callback_worker(nullptr); },
+      "init_ascend_callback_worker", []() { kt::ascend::ensure_callback_worker(nullptr); },
       "Start ACL aclrtProcessReport worker for stream callbacks (Ascend NPU).");
   m.def(
       "subscribe_ascend_stream",
       [](intptr_t stream_handle) {
         kt::ascend::ensure_stream_subscribed(reinterpret_cast<aclrtStream>(stream_handle));
       },
-      py::arg("stream_handle"),
-      "Subscribe an aclrtStream with the global callback worker.");
+      py::arg("stream_handle"), "Subscribe an aclrtStream with the global callback worker.");
   m.def("shutdown_ascend_callback_worker", &kt::ascend::shutdown_callback_worker,
         "Stop the ACL callback worker thread.");
   m.def("is_ascend_callback_worker_running", &kt::ascend::callback_worker_running,
@@ -977,8 +985,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   // SFT MoE with LoRA support (BF16, INT8, INT4, AWQ, K2)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "AMXBF16_SFT_MOE");
-  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup, AMX_FP4_MOE_TP>>(
-      moe_module, "MXFP4_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup, AMX_FP4_MOE_TP>>(moe_module, "MXFP4_SFT_MOE");
 #if defined(__AVX512VBMI__)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224FP8, AMX_FP8_MOE_TP>>(moe_module, "AMXFP8_SFT_MOE");
 #endif
@@ -1012,8 +1019,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   // AVX2 tier of the MXFP4 routed-expert LoRA SFT (same Python name as the AMX build)
   bind_moe_sft_module<avx2::AVX2_SFT_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "MXFP4_SFT_MOE");
   // AVX2 tier of the RAWINT4 routed-expert LoRA SFT (same Python name as the AMX build)
-  bind_moe_sft_module<avx2::AVX2_SFT_RAWINT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module,
-                                                                                  "AMXInt4_KGroup_SFT_MOE");
+  bind_moe_sft_module<avx2::AVX2_SFT_RAWINT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module, "AMXInt4_KGroup_SFT_MOE");
 #endif
   bind_moe_module<AVX2_MXFP8_MOE_TP<avx2::GemmKernelAVX2MXFP8>>(moe_module, "AVX2MXFP8_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
@@ -1024,6 +1030,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #endif
 #if defined(USE_SYCL)
   bind_moe_module<SYCL_GPTQ_INT4_MOE_TP<sycl_int4::GemmKernelSYCLGPTQInt4>>(moe_module, "SYCLGPTQInt4_MOE");
+  bind_moe_module<SYCL_XMX_GPTQ_INT4_MOE_TP>(moe_module, "SYCLXMXGPTQInt4_MOE");
 #endif
 
 #if defined(USE_MOE_KERNEL)

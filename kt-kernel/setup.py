@@ -25,6 +25,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_AVX512_BF16=OFF ON/OFF -> -DLLAMA_AVX512_BF16
   CPUINFER_ENABLE_AVX512_VBMI=OFF ON/OFF -> -DLLAMA_AVX512_VBMI (required for FP8 MoE)
   CPUINFER_ENABLE_CPPTRACE=ON/OFF  ON/OFF -> -DKTRANSFORMERS_ENABLE_CPPTRACE (debug-only)
+  CPUINFER_LLAMA_BUILD_COPY=ON/OFF Apply llama.cpp patches in the build directory, not the submodule
   CPUINFER_ENABLE_ONEDNN_VNNI=OFF  ON/OFF -> -DKTRANSFORMERS_CPU_USE_ONEDNN_VNNI
   CPUINFER_ONEDNN_SOURCE_DIR=/path Forward to -DKTRANSFORMERS_ONEDNN_SOURCE_DIR
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
@@ -727,6 +728,7 @@ class CMakeBuild(build_ext):
         _forward_str_env(cmake_args, "CPUINFER_LTO_JOBS", "CPUINFER_LTO_JOBS")
         _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
         _forward_bool_env(cmake_args, "CPUINFER_ENABLE_CPPTRACE", "KTRANSFORMERS_ENABLE_CPPTRACE")
+        _forward_bool_env(cmake_args, "CPUINFER_LLAMA_BUILD_COPY", "KTRANSFORMERS_LLAMA_BUILD_COPY")
         _forward_bool_env(cmake_args, "CPUINFER_ENABLE_ONEDNN_VNNI", "KTRANSFORMERS_CPU_USE_ONEDNN_VNNI")
         _forward_str_env(cmake_args, "CPUINFER_ONEDNN_SOURCE_DIR", "KTRANSFORMERS_ONEDNN_SOURCE_DIR")
 
