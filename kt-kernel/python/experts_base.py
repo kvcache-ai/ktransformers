@@ -79,6 +79,15 @@ def _should_bypass_stream_callback(device: torch.device) -> bool:
         # submit_with_cuda_stream would hang forever. Degrade to sync instead.
         if _ascend_callback_worker_degraded():
             return True
+    if device.type == "xpu" and not _xpu_native_bridge_available():
+        # No SYCL/Level Zero bridge in this build: submit_with_cuda_stream cannot
+        # take a sycl::queue (a CUDA build would misread it as a cudaStream_t).
+        _warn_xpu_sync_fallback_once()
+        return True
+    if device.type != "xpu" and _xpu_native_bridge_available():
+        # Mirror case: an XPU-built extension would reinterpret a cudaStream_t / aclrtStream as a
+        # sycl::queue*. Only reachable from a mismatched install, but the cost of the guard is nil.
+        return True
     return False
 
 
@@ -110,6 +119,78 @@ def _ensure_ascend_callback_worker() -> None:
         atexit.register(kt_kernel_ext.shutdown_ascend_callback_worker)
 
 
+# -----------------------------------------------------------------------------
+# Intel XPU stream bridge.
+#
+# When the extension is built with ``CPUINFER_USE_XPU=1`` (``gpu_backend == "xpu"``),
+# ``submit_with_cuda_stream`` / ``sync_with_cuda_stream`` take a ``sycl::queue*``
+# -- ``torch.xpu.Stream.sycl_queue`` -- and ``cpu_backend/xpu_stream_bridge.cpp``
+# gives them ``cudaLaunchHostFunc`` semantics on top of SYCL / Level Zero (mode
+# knob ``KT_XPU_BRIDGE``, see that file). xpu then follows the CUDA code path in
+# this module unchanged: async submit, stream-ordered sync.
+#
+# Any other build (CPU-only, or a CUDA/ROCm/... extension loaded next to torch
+# xpu) has no way to enqueue host callbacks on a sycl::queue -- a CUDA build would
+# even reinterpret the handle as a cudaStream_t -- so xpu degrades to the
+# synchronous submit/sync path (``_wait_device`` + ``submit`` + ``sync``), like
+# ``KT_FORCE_SYNC_SUBMIT=1`` does, and warns once to rebuild with
+# ``CPUINFER_USE_XPU=1``.
+# -----------------------------------------------------------------------------
+
+
+# Memoized result of the extension probe. None = not probed yet.
+_xpu_native_bridge: Optional[bool] = None
+_xpu_sync_fallback_warned: bool = False
+
+
+def _xpu_native_bridge_available() -> bool:
+    """True iff the loaded extension can bridge CPU-MoE tasks onto a sycl::queue.
+
+    Probed once and memoized: the answer is fixed for the lifetime of the
+    extension module and this sits on the per-layer forward path.
+    """
+    global _xpu_native_bridge
+    if _xpu_native_bridge is None:
+        _xpu_native_bridge = getattr(kt_kernel_ext, "gpu_backend", None) == "xpu" and hasattr(
+            kt_kernel_ext.CPUInfer, "submit_with_cuda_stream"
+        )
+    return _xpu_native_bridge
+
+
+def _warn_xpu_sync_fallback_once() -> None:
+    """Say once why xpu is running the synchronous submit/sync path."""
+    global _xpu_sync_fallback_warned
+    if _xpu_sync_fallback_warned:
+        return
+    _xpu_sync_fallback_warned = True
+    logger.warning(
+        "kt-kernel extension has no Intel XPU stream bridge (gpu_backend=%r); CPU-MoE on xpu "
+        "falls back to the synchronous submit/sync path (no CPU/GPU overlap). Rebuild with "
+        "CPUINFER_USE_XPU=1 to enable the async stream-callback path.",
+        getattr(kt_kernel_ext, "gpu_backend", None),
+    )
+
+
+def _ensure_xpu_stream_bridge_shutdown_hook() -> None:
+    """Register ``shutdown_xpu_stream_bridge`` with atexit (idempotent).
+
+    The bridge owns worker threads and Level Zero events. Destroying those from a
+    C++ static destructor would race the SYCL runtime's own teardown, so the
+    extension only joins threads there and relies on this hook for the orderly
+    shutdown while the runtime is still alive. Cheap no-op if the bridge was
+    never used.
+    """
+    shutdown = getattr(kt_kernel_ext, "shutdown_xpu_stream_bridge", None)
+    if shutdown is None:
+        return
+    if getattr(_ensure_xpu_stream_bridge_shutdown_hook, "_done", False):
+        return
+    import atexit
+
+    atexit.register(shutdown)
+    _ensure_xpu_stream_bridge_shutdown_hook._done = True  # type: ignore[attr-defined]
+
+
 def _sglang_is_capture_mode() -> bool:
     """True when sglang is inside ``model_capture_mode()`` (graph capture).
 
@@ -128,9 +209,9 @@ def _wait_device(device: torch.device) -> None:
     """Block until pending async copies on `device`'s current stream finish.
 
     NOTE on graph capture: torch.{cuda,npu}.synchronize() raises during cuda /
-    NPU graph capture (NPU returns ERR 107027 "stream is captured"). Skip sync
-    while capturing; graph MoE uses ``_launch_host_func`` + pinned buffers
-    (see ``kt_ep_wrapper``).
+    NPU graph capture (NPU returns ERR 107027 "stream is captured"); xpu is
+    treated the same way. Skip sync while capturing; graph MoE uses
+    ``_launch_host_func`` + pinned buffers (see ``kt_ep_wrapper``).
     """
     if device.type == "npu":
         try:
@@ -157,6 +238,15 @@ def _wait_device(device: torch.device) -> None:
         if _sglang_is_capture_mode():
             return
         torch.cuda.synchronize(device)
+    elif device.type == "xpu":
+        try:
+            if torch.xpu.is_current_stream_capturing():
+                return
+        except Exception:
+            pass
+        if _sglang_is_capture_mode():
+            return
+        torch.xpu.synchronize(device)
 
 
 def generate_gpu_experts_masks(
@@ -320,6 +410,7 @@ class _MoEBase:
                     _ensure_ascend_callback_worker()
             except Exception:
                 pass
+            _ensure_xpu_stream_bridge_shutdown_hook()
             worker_config = kt_kernel_ext.WorkerPoolConfig()
 
             if numa_nodes is not None:

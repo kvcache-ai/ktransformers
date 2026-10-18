@@ -19,6 +19,8 @@ option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
 option(KTRANSFORMERS_USE_MACA "ktransformers: use MACA" OFF)
 option(KTRANSFORMERS_USE_SYCL "ktransformers: use SYCL GPTQ INT4 MoE" OFF)
 option(KTRANSFORMERS_USE_ASCEND_NPU "ktransformers: use Ascend NPU (CANN)" OFF)
+option(KTRANSFORMERS_USE_XPU "ktransformers: use Intel XPU (torch.xpu; SYCL/Level Zero stream bridge)" OFF)
+set(KT_SYCL_ROOT "" CACHE PATH "Optional oneAPI compiler root with include/sycl/sycl.hpp and lib/libsycl.so (Intel XPU backend hint)")
 option(KTRANSFORMERS_CUDA_STATIC_RUNTIME "ktransformers: statically link CUDA runtime" ON)
 option(LLAMA_ARM_DOTPROD "llama: enable ARM NEON SDOT/UDOT" ON)
 option(LLAMA_ARM_FP16 "llama: enable ARM NEON FP16" ON)
@@ -45,13 +47,14 @@ foreach(_KT_GPU_BACKEND IN ITEMS
         KTRANSFORMERS_USE_ROCM
         KTRANSFORMERS_USE_MUSA
         KTRANSFORMERS_USE_MACA
-        KTRANSFORMERS_USE_ASCEND_NPU)
+        KTRANSFORMERS_USE_ASCEND_NPU
+        KTRANSFORMERS_USE_XPU)
     if(${_KT_GPU_BACKEND})
         math(EXPR _KT_GPU_BACKEND_COUNT "${_KT_GPU_BACKEND_COUNT} + 1")
     endif()
 endforeach()
 if(_KT_GPU_BACKEND_COUNT GREATER 1)
-    message(FATAL_ERROR "CUDA, SYCL, ROCm, MUSA, MACA, and Ascend backends are mutually exclusive")
+    message(FATAL_ERROR "CUDA, SYCL, ROCm, MUSA, MACA, Ascend, and Intel XPU backends are mutually exclusive")
 endif()
 
 # Choose compilers BEFORE project() so CMake honors them
@@ -662,6 +665,240 @@ elseif(KTRANSFORMERS_USE_ASCEND_NPU)
     message(STATUS "Ascend CL include: ${ACL_INCLUDE_DIR}")
     message(STATUS "Ascend CL library: ${ASCEND_CL_LIBRARY}")
     include_directories(${ACL_INCLUDE_DIR})
+elseif(KTRANSFORMERS_USE_XPU)
+    # Intel GPU (Arc / Data Center GPU) reached through torch.xpu streams. Unlike KTRANSFORMERS_USE_SYCL
+    # this does NOT switch the build to icpx: the CPU kernels keep the host compiler and its flags
+    # (-ffast-math etc.), and only cpu_backend/xpu_stream_bridge.cpp -- host-only SYCL + Level Zero
+    # code linked against libsycl/libze_loader -- sees the SYCL headers (per-source properties below).
+    message(STATUS "Intel XPU backend selected: CPU kernels stay on ${CMAKE_CXX_COMPILER}; only the stream bridge TU (cpu_backend/xpu_stream_bridge.cpp) is compiled against the SYCL/Level Zero headers")
+    add_compile_definitions(KTRANSFORMERS_USE_XPU=1)
+    add_compile_definitions(USE_XPU=1)
+
+    # Candidate oneAPI compiler roots, highest priority first (setup.py's find_sycl_root mirrors this).
+    set(_kt_xpu_roots "")
+    foreach(_kt_xpu_root IN ITEMS
+            "${KT_SYCL_ROOT}"
+            "$ENV{CPUINFER_SYCL_ROOT}"
+            "$ENV{SYCL_ROOT}"
+            "$ENV{CMPLR_ROOT}"
+            "$ENV{ONEAPI_ROOT}/compiler/latest"
+            "/opt/intel/oneapi/compiler/latest")
+        if(IS_DIRECTORY "${_kt_xpu_root}")
+            list(APPEND _kt_xpu_roots "${_kt_xpu_root}")
+        endif()
+    endforeach()
+    if(_kt_xpu_roots)
+        list(REMOVE_DUPLICATES _kt_xpu_roots)
+    endif()
+    # A root the user named explicitly but that holds no SYCL headers would otherwise be dropped
+    # silently and the build would use a different oneAPI than they asked for.
+    foreach(_kt_xpu_named "KT_SYCL_ROOT" "CPUINFER_SYCL_ROOT")
+        if("${_kt_xpu_named}" STREQUAL "KT_SYCL_ROOT")
+            set(_kt_xpu_named_value "${KT_SYCL_ROOT}")
+        else()
+            set(_kt_xpu_named_value "$ENV{CPUINFER_SYCL_ROOT}")
+        endif()
+        if(_kt_xpu_named_value AND NOT EXISTS "${_kt_xpu_named_value}/include/sycl/sycl.hpp")
+            message(WARNING "Intel XPU: ${_kt_xpu_named} is set to '${_kt_xpu_named_value}' but ${_kt_xpu_named_value}/include/sycl/sycl.hpp does not exist; ignoring it and searching the other oneAPI roots.")
+        endif()
+    endforeach()
+    set(_kt_xpu_root_includes "")
+    set(_kt_xpu_root_libdirs "")
+    foreach(_kt_xpu_root IN LISTS _kt_xpu_roots)
+        list(APPEND _kt_xpu_root_includes "${_kt_xpu_root}/include")
+        list(APPEND _kt_xpu_root_libdirs "${_kt_xpu_root}/lib" "${_kt_xpu_root}/lib64")
+    endforeach()
+
+    # Each lookup is an ordered HINTS pass (NO_DEFAULT_PATH, so e.g. the CMAKE_PREFIX_PATH that
+    # oneapi-vars.sh exports cannot jump the queue) followed by CMake's regular default-path search.
+    if(_kt_xpu_roots)
+        find_path(KT_SYCL_INCLUDE_DIR NAMES sycl/sycl.hpp HINTS ${_kt_xpu_roots} PATH_SUFFIXES include NO_DEFAULT_PATH)
+    endif()
+    find_path(KT_SYCL_INCLUDE_DIR NAMES sycl/sycl.hpp PATH_SUFFIXES include)
+
+    set(_kt_xpu_ze_include_hints "")
+    if(DEFINED ENV{LEVEL_ZERO_ROOT})
+        list(APPEND _kt_xpu_ze_include_hints "$ENV{LEVEL_ZERO_ROOT}/include")
+    endif()
+    if(DEFINED ENV{CONDA_PREFIX})
+        list(APPEND _kt_xpu_ze_include_hints "$ENV{CONDA_PREFIX}/include")
+    endif()
+    list(APPEND _kt_xpu_ze_include_hints ${_kt_xpu_root_includes} /usr/include /usr/local/include)
+    find_path(KT_LEVEL_ZERO_INCLUDE_DIR NAMES level_zero/ze_api.h HINTS ${_kt_xpu_ze_include_hints} NO_DEFAULT_PATH)
+    find_path(KT_LEVEL_ZERO_INCLUDE_DIR NAMES level_zero/ze_api.h)
+
+    # Prefer the libsycl that PyTorch itself loads (the Python env's lib dir, then torch/lib) so the
+    # bridge and torch share one SYCL runtime; the oneAPI roots are the fallback.
+    set(_kt_xpu_python "${PYTHON_EXECUTABLE}")
+    if(NOT _kt_xpu_python)
+        set(_kt_xpu_python "${Python_EXECUTABLE}")
+    endif()
+    if(NOT _kt_xpu_python)
+        set(_kt_xpu_python "${Python3_EXECUTABLE}")
+    endif()
+    set(_kt_xpu_py_libdirs "")
+    set(_kt_xpu_torch_libsycl "")
+    if(_kt_xpu_python)
+        # Ask torch which libsycl it actually loads, and link exactly that file. Deriving the path
+        # instead is unreliable: sysconfig's LIBDIR is the *base* interpreter's (so a venv's own
+        # lib/ is missed), and the file is often soname-only (libsycl.so.9), which find_library
+        # does not match. Two SYCL runtimes in one process would mean torch's sycl::queue* is
+        # dereferenced by a different runtime than the one that created it.
+        execute_process(
+            COMMAND "${_kt_xpu_python}" -c
+                "import torch; print(next((l.split()[-1] for l in open('/proc/self/maps') if 'libsycl.so' in l), ''))"
+            RESULT_VARIABLE _kt_xpu_rv
+            OUTPUT_VARIABLE _kt_xpu_torch_libsycl
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            TIMEOUT 180)
+        if(NOT _kt_xpu_rv EQUAL 0 OR NOT EXISTS "${_kt_xpu_torch_libsycl}")
+            set(_kt_xpu_torch_libsycl "")
+        endif()
+        # Fallback search dirs: the env prefix (where intel-sycl-rt installs libsycl), the base
+        # interpreter's libdir, and torch/lib.
+        foreach(_kt_xpu_py_expr
+                "import sys; print(sys.prefix + '/lib')"
+                "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"
+                "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+            execute_process(
+                COMMAND "${_kt_xpu_python}" -c "${_kt_xpu_py_expr}"
+                RESULT_VARIABLE _kt_xpu_rv
+                OUTPUT_VARIABLE _kt_xpu_py_libdir
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+                TIMEOUT 180)
+            if(_kt_xpu_rv EQUAL 0 AND IS_DIRECTORY "${_kt_xpu_py_libdir}")
+                list(APPEND _kt_xpu_py_libdirs "${_kt_xpu_py_libdir}")
+            endif()
+        endforeach()
+        if(_kt_xpu_py_libdirs)
+            list(REMOVE_DUPLICATES _kt_xpu_py_libdirs)
+        endif()
+    else()
+        message(STATUS "Intel XPU: no Python interpreter known to CMake; not searching the Python env for libsycl")
+    endif()
+
+    # Overwrite a value we picked ourselves on an earlier configure (tracked in KT_SYCL_LIBRARY_AUTO)
+    # but never one the user passed with -DKT_SYCL_LIBRARY. Without FORCE a stale cache entry would
+    # silently win and the "link what torch loads" rule would stop applying on every re-configure of
+    # an existing build directory.
+    if(_kt_xpu_torch_libsycl AND (NOT KT_SYCL_LIBRARY OR KT_SYCL_LIBRARY STREQUAL "${KT_SYCL_LIBRARY_AUTO}"))
+        if(NOT KT_SYCL_LIBRARY STREQUAL "${_kt_xpu_torch_libsycl}")
+            set(KT_SYCL_LIBRARY "${_kt_xpu_torch_libsycl}" CACHE FILEPATH
+                "SYCL runtime library for the Intel XPU bridge" FORCE)
+            message(STATUS "Intel XPU: linking the libsycl PyTorch already loads: ${KT_SYCL_LIBRARY}")
+        endif()
+        set(KT_SYCL_LIBRARY_AUTO "${_kt_xpu_torch_libsycl}" CACHE INTERNAL
+            "KT_SYCL_LIBRARY value chosen automatically from the libsycl PyTorch loads")
+    endif()
+    set(_kt_xpu_sycl_lib_hints ${_kt_xpu_py_libdirs} ${_kt_xpu_root_libdirs})
+    if(_kt_xpu_sycl_lib_hints)
+        find_library(KT_SYCL_LIBRARY NAMES sycl HINTS ${_kt_xpu_sycl_lib_hints} NO_DEFAULT_PATH)
+    endif()
+    find_library(KT_SYCL_LIBRARY NAMES sycl)
+    if(NOT KT_SYCL_LIBRARY)
+        # Soname-only installs (libsycl.so.9 with no dev symlink, the usual wheel layout) are
+        # invisible to find_library; glob for them before giving up.
+        foreach(_kt_xpu_libdir IN LISTS _kt_xpu_sycl_lib_hints)
+            file(GLOB _kt_xpu_sycl_soname "${_kt_xpu_libdir}/libsycl.so.[0-9]*")
+            if(_kt_xpu_sycl_soname)
+                list(SORT _kt_xpu_sycl_soname)
+                list(REVERSE _kt_xpu_sycl_soname)  # highest major first
+                list(GET _kt_xpu_sycl_soname 0 _kt_xpu_sycl_pick)
+                set(KT_SYCL_LIBRARY "${_kt_xpu_sycl_pick}" CACHE FILEPATH "SYCL runtime library for the Intel XPU bridge" FORCE)
+                message(STATUS "Intel XPU: no libsycl.so dev symlink; using ${KT_SYCL_LIBRARY}")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    set(_kt_xpu_ze_lib_hints ${_kt_xpu_py_libdirs} /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu
+        /usr/lib64 /usr/local/lib ${_kt_xpu_root_libdirs})
+    find_library(KT_ZE_LOADER_LIBRARY NAMES ze_loader HINTS ${_kt_xpu_ze_lib_hints} NO_DEFAULT_PATH)
+    find_library(KT_ZE_LOADER_LIBRARY NAMES ze_loader)
+
+    if(NOT KT_SYCL_INCLUDE_DIR OR NOT KT_LEVEL_ZERO_INCLUDE_DIR OR NOT KT_SYCL_LIBRARY OR NOT KT_ZE_LOADER_LIBRARY)
+        message(FATAL_ERROR
+            "KTRANSFORMERS_USE_XPU=ON but the SYCL/Level Zero prerequisites were not all found:\n"
+            "  sycl/sycl.hpp        : ${KT_SYCL_INCLUDE_DIR}\n"
+            "  level_zero/ze_api.h  : ${KT_LEVEL_ZERO_INCLUDE_DIR}\n"
+            "  libsycl              : ${KT_SYCL_LIBRARY}\n"
+            "  libze_loader         : ${KT_ZE_LOADER_LIBRARY}\n"
+            "Fixes: source the oneAPI environment (source /opt/intel/oneapi/setvars.sh) or pass "
+            "-DKT_SYCL_ROOT=<oneAPI compiler root> (setup.py: CPUINFER_SYCL_ROOT=...); install the Level Zero "
+            "headers and loader (sudo apt install level-zero-dev); make sure a SYCL runtime is available to the "
+            "Python env used for the build (pip install intel-sycl-rt).")
+    endif()
+
+    # Warn (never fail) when the SYCL headers and the libsycl we link disagree on the ABI major.
+    set(_kt_sycl_header_major "")
+    if(EXISTS "${KT_SYCL_INCLUDE_DIR}/sycl/version.hpp")
+        file(STRINGS "${KT_SYCL_INCLUDE_DIR}/sycl/version.hpp" _kt_sycl_major_line
+            REGEX "^#define[ \t]+__LIBSYCL_MAJOR_VERSION[ \t]+[0-9]+")
+        if(_kt_sycl_major_line MATCHES "__LIBSYCL_MAJOR_VERSION[ \t]+([0-9]+)")
+            set(_kt_sycl_header_major "${CMAKE_MATCH_1}")
+        endif()
+    endif()
+    get_filename_component(_kt_sycl_lib_real "${KT_SYCL_LIBRARY}" REALPATH)
+    get_filename_component(_kt_sycl_lib_name "${_kt_sycl_lib_real}" NAME)
+    set(_kt_sycl_lib_major "")
+    # Prefer the ELF SONAME over the file name: a file called libsycl.so.8 whose SONAME is
+    # libsycl.so.9 is what the loader will actually honour.
+    find_program(KT_XPU_READELF NAMES readelf llvm-readelf eu-readelf)
+    if(KT_XPU_READELF)
+        execute_process(
+            COMMAND "${KT_XPU_READELF}" -d "${_kt_sycl_lib_real}"
+            RESULT_VARIABLE _kt_xpu_rv
+            OUTPUT_VARIABLE _kt_sycl_soname_out
+            ERROR_QUIET)
+        if(_kt_xpu_rv EQUAL 0 AND _kt_sycl_soname_out MATCHES "SONAME[^\n]*libsycl\\.so\\.([0-9]+)")
+            set(_kt_sycl_lib_major "${CMAKE_MATCH_1}")
+            set(_kt_sycl_lib_name "${_kt_sycl_lib_name} (SONAME libsycl.so.${CMAKE_MATCH_1})")
+        endif()
+    endif()
+    if(_kt_sycl_lib_major)
+        # already resolved from the SONAME
+    elseif(_kt_sycl_lib_name MATCHES "\\.so\\.([0-9]+)")
+        set(_kt_sycl_lib_major "${CMAKE_MATCH_1}")
+    else()
+        # No SONAME and no versioned name; fall back to the old readelf attempt for clarity.
+        if(KT_XPU_READELF)
+            execute_process(
+                COMMAND "${KT_XPU_READELF}" -d "${_kt_sycl_lib_real}"
+                RESULT_VARIABLE _kt_xpu_rv
+                OUTPUT_VARIABLE _kt_sycl_dynamic
+                ERROR_QUIET)
+            if(_kt_xpu_rv EQUAL 0 AND _kt_sycl_dynamic MATCHES "SONAME[^\n]*libsycl\\.so\\.([0-9]+)")
+                set(_kt_sycl_lib_major "${CMAKE_MATCH_1}")
+                set(_kt_sycl_lib_name "${_kt_sycl_lib_name} (SONAME libsycl.so.${CMAKE_MATCH_1})")
+            endif()
+        endif()
+    endif()
+    if(_kt_sycl_header_major AND _kt_sycl_lib_major)
+        if(_kt_sycl_header_major STREQUAL _kt_sycl_lib_major)
+            message(STATUS "Intel XPU: SYCL ABI major ${_kt_sycl_header_major} (headers) matches ${_kt_sycl_lib_name}")
+        else()
+            message(WARNING "Intel XPU: SYCL headers in ${KT_SYCL_INCLUDE_DIR} declare __LIBSYCL_MAJOR_VERSION ${_kt_sycl_header_major} but ${KT_SYCL_LIBRARY} resolves to ${_kt_sycl_lib_name} (major ${_kt_sycl_lib_major}). Set KT_SYCL_ROOT (CPUINFER_SYCL_ROOT) to the oneAPI release whose headers match, or -DKT_SYCL_LIBRARY=<path> to choose the library; the library is otherwise taken from the one PyTorch loads, which is the one that must win.")
+        endif()
+    else()
+        message(STATUS "Intel XPU: could not determine the SYCL ABI major from the headers/library; skipping the version check")
+    endif()
+
+    # The check above compares headers against the library we link. The hazard that actually breaks
+    # at runtime is linking a different SYCL runtime than the one torch has already loaded: both end
+    # up in the process and the bridge dereferences torch's sycl::queue* with the wrong one.
+    if(_kt_xpu_torch_libsycl AND NOT KT_SYCL_LIBRARY STREQUAL "${_kt_xpu_torch_libsycl}")
+        get_filename_component(_kt_torch_sycl_real "${_kt_xpu_torch_libsycl}" REALPATH)
+        if(NOT _kt_sycl_lib_real STREQUAL "${_kt_torch_sycl_real}")
+            message(WARNING "Intel XPU: linking ${KT_SYCL_LIBRARY} but PyTorch loads ${_kt_xpu_torch_libsycl}. Two SYCL runtimes in one process will dereference torch's sycl::queue* with the runtime that did not create it. Pass -DKT_SYCL_LIBRARY=${_kt_xpu_torch_libsycl}, or build against the oneAPI release that matches your PyTorch XPU build.")
+        endif()
+    endif()
+
+    message(STATUS "Intel XPU: SYCL include dir       : ${KT_SYCL_INCLUDE_DIR}")
+    message(STATUS "Intel XPU: Level Zero include dir : ${KT_LEVEL_ZERO_INCLUDE_DIR}")
+    message(STATUS "Intel XPU: libsycl                : ${KT_SYCL_LIBRARY}")
+    message(STATUS "Intel XPU: libze_loader           : ${KT_ZE_LOADER_LIBRARY}")
 elseif(KTRANSFORMERS_CPU_USE_KML)
     message(STATUS "KML CPU detected")
 else()
@@ -901,6 +1138,22 @@ target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC OpenMP::Ope
 if(KTRANSFORMERS_USE_ASCEND_NPU AND ASCEND_CL_LIBRARY)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${ASCEND_CL_LIBRARY})
     target_include_directories(${PROJECT_NAME} PRIVATE ${ACL_INCLUDE_DIR})
+endif()
+if(KTRANSFORMERS_USE_XPU)
+    # aux_source_directory(cpu_backend) already lists the bridge TU (its body is #if-guarded, so it is an
+    # empty TU in every other build). Only this file sees the SYCL/Level Zero headers -- they stay off the
+    # global include path so the CPU kernels cannot pick them up. The SYCL headers are not -ffast-math
+    # clean, and SYCL_DISABLE_FSYCL_SYCLHPP_WARNING silences their "not compiling with -fsycl" notice:
+    # this is host-only code, no device kernels are built, so no icpx is involved.
+    set(_kt_xpu_bridge_src ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/xpu_stream_bridge.cpp)
+    if(NOT EXISTS "${_kt_xpu_bridge_src}")
+        message(FATAL_ERROR "KTRANSFORMERS_USE_XPU=ON but ${_kt_xpu_bridge_src} is missing from the source tree")
+    endif()
+    set_source_files_properties(${_kt_xpu_bridge_src} PROPERTIES
+        INCLUDE_DIRECTORIES "${KT_SYCL_INCLUDE_DIR};${KT_SYCL_INCLUDE_DIR}/sycl;${KT_LEVEL_ZERO_INCLUDE_DIR}"
+        COMPILE_OPTIONS "-fno-fast-math;-DSYCL_DISABLE_FSYCL_SYCLHPP_WARNING;-Wno-deprecated-declarations")
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${KT_SYCL_LIBRARY} ${KT_ZE_LOADER_LIBRARY})
+    message(STATUS "Building for Intel XPU (SYCL/Level Zero stream bridge)")
 endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     if(KTRANSFORMERS_CPU_DEBUG)
