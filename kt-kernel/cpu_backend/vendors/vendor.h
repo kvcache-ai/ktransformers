@@ -12,6 +12,8 @@
 #include "maca.h"
 #elif USE_ASCEND_NPU
 #include "ascend_npu.h"
+#elif USE_XPU
+#include "xpu.h"
 #endif
 
 #endif  // CPUINFER_VENDOR_VENDOR_H

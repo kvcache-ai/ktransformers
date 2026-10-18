@@ -28,6 +28,10 @@ Example usage:
     >>> import kt_kernel
     >>> print(kt_kernel.__cpu_variant__)  # 'amx', 'avx512', or 'avx2'
 
+    Accelerator-agnostic stream helpers (cuda / npu / xpu) for the stream-callback API:
+    >>> kt_kernel.current_stream_handle("xpu")  # int(torch.xpu.current_stream().sycl_queue)
+    >>> kt_kernel.synchronize_device("xpu")
+
 Environment Variables:
     KT_KERNEL_CPU_VARIANT: Override automatic detection ('amx', 'avx512', 'avx2')
     KT_KERNEL_DEBUG: Enable debug output ('1' to enable)
@@ -35,6 +39,11 @@ Environment Variables:
 """
 
 from __future__ import annotations
+
+# Import torch before the extension: GPU builds link the accelerator runtime torch already
+# carries (libsycl for XPU, libamdhip64 for ROCm, libascendcl for Ascend), so resolve it through
+# torch instead of relying on the build-tree RPATH, which a relocated wheel does not have.
+import torch  # noqa: F401
 
 # Detect CPU and load optimal extension variant
 from ._cpu_detect import initialize as _initialize_cpu
@@ -60,6 +69,16 @@ kt_kernel_ext = _kt_kernel_ext
 # Import main API
 from .experts import KTMoEWrapper
 from .experts_base import generate_gpu_experts_masks
+
+# Shut the Intel XPU stream bridge down while the SYCL runtime is still alive. The C++ exit guard
+# only joins its threads, because the order of static destruction against that runtime is undefined.
+# Registered here rather than on first CPUInfer use so callers that build a CPUInfer directly, not
+# through KTMoEWrapper, are covered too. No-op when the bridge was never used.
+if hasattr(_kt_kernel_ext, "shutdown_xpu_stream_bridge"):
+    import atexit as _atexit
+
+    _atexit.register(_kt_kernel_ext.shutdown_xpu_stream_bridge)
+from .accel import current_stream_handle, synchronize as synchronize_device
 
 def __getattr__(name):
     if name == "AMXSFTMoEWrapper":
@@ -105,6 +124,8 @@ __all__ = [
     "KTMoEWrapper",
     "AMXSFTMoEWrapper",
     "generate_gpu_experts_masks",
+    "current_stream_handle",
+    "synchronize_device",
     "kt_kernel_ext",
     "__cpu_variant__",
     "__int8_kernel__",

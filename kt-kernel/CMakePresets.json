@@ -53,6 +53,19 @@
         "KTRANSFORMERS_CPU_MOE_AMD": "ON",
         "KTRANSFORMERS_CPU_MOE_KERNEL": "ON"
       }
+    },
+    {
+      "name": "xpu",
+      "displayName": "xpu_platform",
+      "description": "for Intel XPU (Arc / Data Center GPU) hosts: AMX CPU kernels + SYCL/Level Zero stream bridge",
+      "cacheVariables": {
+        "KTRANSFORMERS_CPU_USE_AMX": "ON",
+        "LLAMA_AVX512": "OFF",
+        "LLAMA_AVX2": "OFF",
+        "KTRANSFORMERS_CPU_USE_AMX_AVX512": "ON",
+        "KTRANSFORMERS_USE_CUDA": "OFF",
+        "KTRANSFORMERS_USE_XPU": "ON"
+      }
     }
 
   ]
