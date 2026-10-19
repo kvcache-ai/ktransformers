@@ -432,6 +432,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
+        moe_config.mmap_weights_dir = getattr(self, "mmap_experts_dir", "") or ""
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
 
@@ -547,6 +548,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
+        moe_config.mmap_weights_dir = getattr(self, "mmap_experts_dir", "") or ""
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
 
@@ -884,6 +886,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
+        moe_config.mmap_weights_dir = getattr(self, "mmap_experts_dir", "") or ""
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
         # Clamp-before-SiLU; 0.0 = disabled. Read by `act_fn` in
