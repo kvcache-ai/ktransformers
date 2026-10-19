@@ -89,6 +89,10 @@ EOF
 
 install_dependencies() {
   echo "Checking and installing system dependencies..."
+  if [ "${CPUINFER_USE_SYCL:-0}" = "1" ] && command -v cmake >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 && pkg-config --exists hwloc numa; then
+    echo "CMake, hwloc and NUMA development dependencies are already installed."
+    return 0
+  fi
 
   # Determine if we need to use sudo
   SUDO=""

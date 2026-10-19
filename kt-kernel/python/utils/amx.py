@@ -42,6 +42,7 @@ AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 AVXVNNI256GPTQInt4Packed_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4Packed_MOE", None)
 AVXVNNI256RawInt4_MOE = getattr(_moe_mod, "AVXVNNI256RawInt4_MOE", None)
 SYCLGPTQInt4_MOE = getattr(_moe_mod, "SYCLGPTQInt4_MOE", None)
+SYCLXMXGPTQInt4_MOE = getattr(_moe_mod, "SYCLXMXGPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
@@ -112,6 +113,29 @@ def _supports_avxvnni256_rawint4_group_size(group_size: Optional[int]) -> bool:
     if group_size is None:
         return True
     return group_size > 0 and group_size % 32 == 0 and group_size <= _AVXVNNI256_RAW_INT4_MAX_GROUP_SIZE
+
+
+def _select_sycl_int4_backend():
+    """Keep the experimental XMX executor opt-in; never silently fall back."""
+    profile = os.getenv("KT_SYCL_XMX_PROFILE")
+    if profile is not None and profile != "panther-lake":
+        raise ValueError("KT_SYCL_XMX_PROFILE must be panther-lake or unset")
+    backend = os.getenv("KT_SYCL_INT4_BACKEND", "xmx" if profile else "legacy").strip().lower()
+    if profile and backend != "xmx":
+        raise ValueError("KT_SYCL_XMX_PROFILE=panther-lake requires the xmx backend")
+    if backend == "legacy":
+        cls = SYCLGPTQInt4_MOE
+    elif backend == "xmx":
+        cls = SYCLXMXGPTQInt4_MOE
+    else:
+        raise ValueError("KT_SYCL_INT4_BACKEND must be legacy or xmx")
+    if cls is None:
+        raise RuntimeError(f"SYCL {backend} backend not compiled; rebuild kt-kernel with CPUINFER_USE_SYCL=1")
+    if profile and getattr(cls, "implementation_revision", lambda: 0)() < 7:
+        raise RuntimeError(
+            "Panther Lake profile requires XMX revision >= 7; rebuild kt-kernel with ./install.sh --sycl"
+        )
+    return cls
 
 
 def _select_gptq_int4_backend(group_size: Optional[int] = None):
@@ -663,9 +687,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "CPUINFER_USE_SYCL=1 using a SYCL compiler such as icpx."
             )
         if method == "NVFP4" and not _HAS_AVX2_MXFP4_SUPPORT:
-            raise RuntimeError(
-                "NVFP4 needs the AVX2 FP4 backend (AVX2MXFP4_MOE), which is not compiled in."
-            )
+            raise RuntimeError("NVFP4 needs the AVX2 FP4 backend (AVX2MXFP4_MOE), which is not compiled in.")
         if method == "MXFP4" and not (_HAS_MXFP4_SUPPORT or _HAS_AVX2_MXFP4_SUPPORT):
             raise RuntimeError(
                 "MXFP4 backend not available. Required ISA (any one of):\n"
@@ -1007,7 +1029,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.group_size = actual_gs
             moe_config.quant_config.zero_point = False
             _preflight_sycl_device()
-            self.moe = SYCLGPTQInt4_MOE(moe_config)
+            self.moe = _select_sycl_int4_backend()(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2
@@ -1102,15 +1124,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
         each rank's local H2D copy of expert ``e``.
         """
         if self.method != "FP8":
-            raise RuntimeError(
-                "run_layerwise_fp8_batch is only valid for the block-FP8 NativeMoEWrapper backend"
-            )
+            raise RuntimeError("run_layerwise_fp8_batch is only valid for the block-FP8 NativeMoEWrapper backend")
         if self.moe is None:
             raise RuntimeError("MoE instance not initialized; cannot run FP8 layerwise transport.")
         if not hasattr(self.moe, "run_layerwise_fp8_batch"):
-            raise NotImplementedError(
-                "The installed kt-kernel extension does not expose run_layerwise_fp8_batch."
-            )
+            raise NotImplementedError("The installed kt-kernel extension does not expose run_layerwise_fp8_batch.")
         # The native batch calls the shared NUMA distributor directly.  Drain
         # CPUInfer first so it cannot race a previously queued task against the
         # non-reentrant distributor state.
