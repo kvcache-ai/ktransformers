@@ -71,7 +71,7 @@ def identity_map():
     return torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
 
 
-def make_rawint4_weights(seed):
+def make_rawint4_weights(seed, gs=group_size):
     """Random packed RAWINT4 weights and bf16 scales for all three projections."""
     gen = torch.Generator().manual_seed(seed)
 
@@ -79,7 +79,7 @@ def make_rawint4_weights(seed):
         return torch.randint(0, 256, (expert_num, n, k // 2), dtype=torch.uint8, generator=gen).contiguous()
 
     def scales(n, k):
-        s = torch.rand((expert_num, n, k // group_size), generator=gen) * 0.02 + 0.001
+        s = torch.rand((expert_num, n, k // gs), generator=gen) * 0.02 + 0.001
         return s.to(torch.bfloat16).contiguous()
 
     return {
@@ -92,18 +92,18 @@ def make_rawint4_weights(seed):
     }
 
 
-def base_config(pool_backend):
+def base_config(pool_backend, gs=group_size):
     config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
     config.max_len = max_len
     config.quant_config.bits = 4
-    config.quant_config.group_size = group_size
+    config.quant_config.group_size = gs
     config.quant_config.zero_point = False
     config.pool = pool_backend
     return config
 
 
-def build_flat_moe(backend_cls, cpu_infer, w, p2l_map):
-    config = base_config(cpu_infer.backend_)
+def build_flat_moe(backend_cls, cpu_infer, w, p2l_map, gs=group_size):
+    config = base_config(cpu_infer.backend_, gs)
     config.gate_proj = w["gate_qw"].data_ptr()
     config.up_proj = w["up_qw"].data_ptr()
     config.down_proj = w["down_qw"].data_ptr()
@@ -116,7 +116,7 @@ def build_flat_moe(backend_cls, cpu_infer, w, p2l_map):
     return moe
 
 
-def build_per_expert_moe(backend_cls, cpu_infer, w, p2l_map):
+def build_per_expert_moe(backend_cls, cpu_infer, w, p2l_map, gs=group_size):
     """Load through per-expert pointers, each expert in its own storage.
 
     Returns the MoE instance and the per-expert tensors, which the caller must
@@ -124,7 +124,7 @@ def build_per_expert_moe(backend_cls, cpu_infer, w, p2l_map):
     directly from these buffers).
     """
     holders = []
-    config = base_config(cpu_infer.backend_)
+    config = base_config(cpu_infer.backend_, gs)
     for weight_key, scale_key, proj_attr, scale_attr in (
         ("gate_qw", "gate_sc", "gate_projs", "gate_scales"),
         ("up_qw", "up_sc", "up_projs", "up_scales"),
@@ -282,6 +282,43 @@ def test_int32_pack_quantized_layout_matches_uint8():
         assert torch.equal(out_i32, out_u8), f"int32-packed weights differ from uint8 (qlen={qlen})"
 
 
+def test_avxvnni_packed_weights_match_unpacked():
+    """KT_RAWINT4_PACKED_WEIGHTS=1 keeps nibbles resident and unpacks in-register.
+
+    Same weight bytes, same scales and weight_sums, same integer dots: outputs
+    must be bitwise equal to the default unpacked-int8 layout, through both the
+    flat and the per-expert load path.
+    """
+    backend_cls = avxvnni_backend()
+    if backend_cls is None:
+        print("Skipping: AVXVNNI256RawInt4_MOE not available")
+        return
+
+    prev = os.environ.get("KT_RAWINT4_PACKED_WEIGHTS")
+    try:
+        for gs in (32, 128):
+            w = make_rawint4_weights(seed=555 + gs, gs=gs)
+            p2l_map = identity_map()
+            cpu_infer = make_cpu_infer(1)
+            os.environ["KT_RAWINT4_PACKED_WEIGHTS"] = "0"
+            moe_unpacked = build_flat_moe(backend_cls, cpu_infer, w, p2l_map, gs=gs)
+            os.environ["KT_RAWINT4_PACKED_WEIGHTS"] = "1"
+            moe_packed = build_flat_moe(backend_cls, cpu_infer, w, p2l_map, gs=gs)
+            moe_packed_pe, holders = build_per_expert_moe(backend_cls, cpu_infer, w, p2l_map, gs=gs)
+
+            for qlen in (1, 16):
+                out_unpacked = run_forward(cpu_infer, moe_unpacked, qlen, seed=qlen)
+                out_packed = run_forward(cpu_infer, moe_packed, qlen, seed=qlen)
+                out_packed_pe = run_forward(cpu_infer, moe_packed_pe, qlen, seed=qlen)
+                assert torch.equal(out_packed, out_unpacked), f"packed flat load differs (gs={gs}, qlen={qlen})"
+                assert torch.equal(out_packed_pe, out_unpacked), f"packed per-expert load differs (gs={gs}, qlen={qlen})"
+    finally:
+        if prev is None:
+            os.environ.pop("KT_RAWINT4_PACKED_WEIGHTS", None)
+        else:
+            os.environ["KT_RAWINT4_PACKED_WEIGHTS"] = prev
+
+
 def test_flat_load_two_subpools_matches_single():
     backends = available_backends()
     if not backends:
@@ -316,5 +353,6 @@ if __name__ == "__main__":
     test_avx2_per_expert_load_matches_flat()
     test_per_expert_load_respects_physical_to_logical_map()
     test_int32_pack_quantized_layout_matches_uint8()
+    test_avxvnni_packed_weights_match_unpacked()
     test_flat_load_two_subpools_matches_single()
     print("PASSED")
