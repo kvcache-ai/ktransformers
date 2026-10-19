@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-3537cc5a.js";
+            window.path_to_searchindex_js = "searchindex-098aa1bd.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78d73750.js"></script>
@@ -3604,6 +3604,8 @@ curl http://localhost:30000/v1/chat/completions \
 <h1 id="在-intel-igpu-上使用-sycl-gptq-int4-后端"><a class="header" href="#在-intel-igpu-上使用-sycl-gptq-int4-后端">在 Intel iGPU 上使用 SYCL GPTQ INT4 后端</a></h1>
 <p>本教程介绍如何使用 KTransformers 的 <code>SYCL_GPTQ_INT4</code> 后端，将 MoE 模型中的对称 GPTQ INT4 experts 放到 Intel 集成显卡（iGPU）上计算。</p>
 <p>这是一个异构推理方案：Intel iGPU 负责未放在 CUDA GPU 上的 GPTQ INT4 experts；Attention、Embedding、LM Head 以及通过 <code>--kt-num-gpu-experts</code> 保留的 experts 仍由 CUDA GPU 执行。因此，当前实现不能替代 NVIDIA GPU，也不是纯 Intel GPU 推理后端。</p>
+<p>Panther Lake XMX 的最终使用说明见 <a href="zh/Intel-iGPU_zh.html">Intel iGPU XMX 后端</a>，
+源码构建步骤见 <a href="zh/Intel-iGPU-Installation_zh.html">环境安装</a>。</p>
 <h2 id="目录-1"><a class="header" href="#目录-1">目录</a></h2>
 <ul>
 <li><a href="#支持范围">支持范围</a></li>
