@@ -504,6 +504,16 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11 ${CMAKE_CUR
 # but succeeds `git apply --reverse --check`.
 # ---------------------------------------------------------------------------
 set(KT_LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp)
+option(KTRANSFORMERS_LLAMA_BUILD_COPY "Apply vendored llama.cpp patches to a build-local copy" OFF)
+if(KTRANSFORMERS_LLAMA_BUILD_COPY)
+    set(KT_LLAMA_CPP_COPY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/patched_deps)
+    if(NOT EXISTS "${KT_LLAMA_CPP_COPY_ROOT}/llama.cpp/CMakeLists.txt")
+        file(COPY "${KT_LLAMA_CPP_DIR}" DESTINATION "${KT_LLAMA_CPP_COPY_ROOT}" PATTERN ".git" EXCLUDE)
+    endif()
+    set(KT_LLAMA_CPP_DIR "${KT_LLAMA_CPP_COPY_ROOT}/llama.cpp")
+    # Headers in the patched copy must precede the original third_party path.
+    include_directories(BEFORE "${KT_LLAMA_CPP_COPY_ROOT}")
+endif()
 set(KT_LLAMA_CPP_PATCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party_patches/llama.cpp)
 file(GLOB KT_LLAMA_CPP_PATCHES "${KT_LLAMA_CPP_PATCH_DIR}/*.patch")
 list(SORT KT_LLAMA_CPP_PATCHES)
@@ -515,16 +525,24 @@ if(KT_LLAMA_CPP_PATCHES)
     endif()
 endif()
 
+set(KT_LLAMA_GIT_COMMAND ${GIT_EXECUTABLE})
+if(KTRANSFORMERS_LLAMA_BUILD_COPY)
+    # Otherwise git discovers the outer repository and can silently skip
+    # patches whose paths are inside the ignored build directory.
+    set(KT_LLAMA_GIT_COMMAND ${CMAKE_COMMAND} -E env
+        "GIT_CEILING_DIRECTORIES=${KT_LLAMA_CPP_COPY_ROOT}" ${GIT_EXECUTABLE})
+endif()
+
 foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} apply --check "${KT_PATCH}"
+        COMMAND ${KT_LLAMA_GIT_COMMAND} apply --check "${KT_PATCH}"
         WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
         RESULT_VARIABLE KT_PATCH_CHECK
         OUTPUT_QUIET
         ERROR_QUIET)
     if(KT_PATCH_CHECK EQUAL 0)
         execute_process(
-            COMMAND ${GIT_EXECUTABLE} apply "${KT_PATCH}"
+            COMMAND ${KT_LLAMA_GIT_COMMAND} apply "${KT_PATCH}"
             WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
             RESULT_VARIABLE KT_PATCH_APPLY
             ERROR_VARIABLE KT_PATCH_APPLY_ERR)
@@ -535,7 +553,7 @@ foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
         message(STATUS "llama.cpp: applied patch ${KT_PATCH}")
     else()
         execute_process(
-            COMMAND ${GIT_EXECUTABLE} apply --reverse --check "${KT_PATCH}"
+            COMMAND ${KT_LLAMA_GIT_COMMAND} apply --reverse --check "${KT_PATCH}"
             WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
             RESULT_VARIABLE KT_PATCH_REVERSE_CHECK
             OUTPUT_QUIET
@@ -543,6 +561,11 @@ foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
         if(KT_PATCH_REVERSE_CHECK EQUAL 0)
             message(STATUS "llama.cpp: patch already applied, skipping ${KT_PATCH}")
         else()
+            if(KTRANSFORMERS_LLAMA_BUILD_COPY)
+                message(FATAL_ERROR
+                    "llama.cpp patch ${KT_PATCH} neither applies nor is already applied to the build copy.\n"
+                    "Remove ${KT_LLAMA_CPP_DIR} and reconfigure to refresh it from the submodule.")
+            endif()
             message(FATAL_ERROR
                 "llama.cpp patch ${KT_PATCH} neither applies nor is already applied.\n"
                 "third_party/llama.cpp is probably not at the pinned commit or has local edits.\n"
@@ -553,7 +576,7 @@ foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
     endif()
 endforeach()
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
+add_subdirectory(${KT_LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 if(KTRANSFORMERS_USE_CUDA)
@@ -796,6 +819,8 @@ else()
     message(STATUS "LTO: disabled")
 endif()
 
+target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+
 if(KTRANSFORMERS_CPU_USE_ONEDNN_VNNI)
     if(KTRANSFORMERS_ONEDNN_SOURCE_DIR)
         if(NOT EXISTS "${KTRANSFORMERS_ONEDNN_SOURCE_DIR}/CMakeLists.txt")
@@ -877,6 +902,10 @@ if(TARGET ${PROJECT_NAME} AND DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_P
         INSTALL_RPATH "$ENV{CONDA_PREFIX}/lib"
         SKIP_BUILD_RPATH OFF
     )
+endif()
+if(KTRANSFORMERS_USE_SYCL)
+    include(cmake/SYCLRuntime.cmake)
+    kt_add_sycl_runtime_rpath(${PROJECT_NAME})
 endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     message(STATUS "KML CPU detected")

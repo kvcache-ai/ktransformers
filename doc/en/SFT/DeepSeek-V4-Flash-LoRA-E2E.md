@@ -5,11 +5,9 @@ KT trains CPU routed-expert LoRA while Transformers retains attention, routing,
 mHC and shared experts. Routed-expert base weights remain frozen native MXFP4;
 non-expert FP8 weights are decoded to BF16 for training.
 
-Use the matching [Transformers-KT](https://github.com/kvcache-ai/transformers/pull/8)
-and [SGLang-KT](https://github.com/kvcache-ai/sglang/pull/99) integrations and the
-companion LF branch providing `deepseek4_nothink`. Install a validated companion
-wheel set with its dependency lock. This integration PR does not select release
-versions; the existing default package extras do not supply these pending branches.
+For the 0.7.2 package installation and dynamic LoRA serving recipe, see the
+[quickstart](./DeepSeek-V4-Flash-LoRA-Quickstart.md). The static export path below
+remains available for deployments that merge ordinary LoRA into a BF16 cache.
 
 ## Supported recipe
 

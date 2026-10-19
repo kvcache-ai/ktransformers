@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -57,6 +58,10 @@ inline sycl::queue& queue() {
   (void)async_error_state();
   static sycl::queue q([] {
     auto async_handler = [](sycl::exception_list exceptions) { async_error_state().capture(std::move(exceptions)); };
+    const char* profile = std::getenv("KT_SYCL_PROFILE");
+    const sycl::property_list properties = profile && std::string(profile) == "1"
+                                               ? sycl::property_list{sycl::property::queue::enable_profiling{}}
+                                               : sycl::property_list{};
 
     try {
       const auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
@@ -65,10 +70,10 @@ inline sycl::queue& queue() {
       }
       for (const auto& device : devices) {
         if (device.get_platform().get_backend() == sycl::backend::ext_oneapi_level_zero) {
-          return sycl::queue(device, async_handler);
+          return sycl::queue(device, async_handler, properties);
         }
       }
-      return sycl::queue(devices.front(), async_handler);
+      return sycl::queue(devices.front(), async_handler, properties);
     } catch (const sycl::exception& error) {
       throw std::runtime_error(std::string("Failed to create the SYCL GPTQ INT4 queue. Check sycl-ls, "
                                            "the render-group permission, or ONEAPI_DEVICE_SELECTOR. Original error: ") +
