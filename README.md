@@ -23,7 +23,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Aug 26, 2026**: Added native support for **GLM-5.3-flash**, bringing 1M-token context and multimodal input to consumer GPUs. ([Tutorial](./doc/en/kt-kernel/GLM-5.3-Flash-Tutorial.md))
 * **Aug 25, 2026**: Uploaded a new easy-to-use [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](./doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.md), covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.
 * **Aug 17, 2026**: LoRA fine-tuning now supports compatible AVX512 x86 CPUs, including AMD servers, without requiring AMX. ([v0.7.0 Release Notes](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.7.0))
-* **Aug 16, 2026**: DeepSeek-V4-Flash on a single Ascend NPU with CPU expert offload. ([Tutorial](./doc/en/DeepSeek-V4-Flash_tutorial_for_Ascend_NPU.md))
+* **Aug 16, 2026**: DeepSeek-V4-Flash on a single Huawei Ascend NPU with CPU expert offload. ([Tutorial](./doc/en/DeepSeek-V4-Flash_tutorial_for_Ascend_NPU.md))
 * **Aug 5, 2026**: Introduced native block-FP8 LoRA fine-tuning ([PR #2141](https://github.com/kvcache-ai/ktransformers/pull/2141))
 * **July 23, 2026**: Added end-to-end BF16 full-parameter fine-tuning for MoE models, including complete checkpoint saving. ([PR #2094](https://github.com/kvcache-ai/ktransformers/pull/2094))
 * **June 21, 2026**: MiniMax-M3 Day0 Support! ([Tutorial](./doc/en/kt-kernel/MiniMax-M3-Tutorial.md))
@@ -41,7 +41,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Dec 5, 2025**: Support Native Kimi-K2-Thinking inference ([Tutorial](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md))
 * **Nov 6, 2025**: Support Kimi-K2-Thinking inference ([Tutorial](./doc/en/Kimi-K2-Thinking.md)) and fine-tune ([Tutorial](./doc/en/SFT_Installation_Guide_KimiK2.md))
 * **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration. ([Tutorial](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md))
-* **Oct 27, 2025**: Support Ascend NPU. ([Tutorial](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md))
+* **Oct 27, 2025**: Support Huawei Ascend NPU. ([Tutorial](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md))
 * **Oct 10, 2025**: Integrating into SGLang. ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
 * **Sept 11, 2025**: Support Qwen3-Next. ([Tutorial](./doc/en/Qwen3-Next.md))
 * **Sept 05, 2025**: Support Kimi-K2-0905. ([Tutorial](./doc/en/Kimi-K2.md))
