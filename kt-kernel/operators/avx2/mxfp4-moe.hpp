@@ -16,9 +16,11 @@
 #include <tmmintrin.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -296,6 +298,36 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   const __m256 w2 = _mm256_castsi256_ps(_mm256_unpacklo_epi16(zero256, u16b));       \
   const __m256 w3 = _mm256_castsi256_ps(_mm256_unpackhi_epi16(zero256, u16b))
 
+    // KT_MXFP4_REM_ROWS=0 runs the remaining 2-3 rows one at a time, as before
+    static const bool kRemRows = [] {
+      const char* v = std::getenv("KT_MXFP4_REM_ROWS");
+      return v ? std::atoi(v) != 0 : true;
+    }();
+    auto rem_rows = [&](auto nr_const, int mi0, int ni, const uint8_t* b_row, const float* b_scales) {
+      constexpr int NR = decltype(nr_const)::value;
+      __m256 ta[NR], tb[NR];
+#pragma GCC unroll 3
+      for (int r = 0; r < NR; r++) ta[r] = tb[r] = _mm256_setzero_ps();
+      for (int g = 0; g < group_count; g++) {
+        KT_MXFP4_DECODE_GROUP(b_row, g);
+        const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+#pragma GCC unroll 3
+        for (int r = 0; r < NR; r++) {
+          const float* ap = a_perm + (size_t)(mi0 + r) * k + (size_t)g * 32;
+          __m256 gacc = _mm256_mul_ps(_mm256_loadu_ps(ap), w0);
+          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 8), w1, gacc);
+          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 16), w2, gacc);
+          gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, gacc);
+          if (g & 1)
+            tb[r] = _mm256_fmadd_ps(gacc, sv, tb[r]);
+          else
+            ta[r] = _mm256_fmadd_ps(gacc, sv, ta[r]);
+        }
+      }
+#pragma GCC unroll 3
+      for (int r = 0; r < NR; r++) c.data[(size_t)(mi0 + r) * n + ni] = hsum_avx2(_mm256_add_ps(ta[r], tb[r]));
+    };
+
     for (int ni = n_start; ni < n_end; ni++) {
       const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
       const float* b_scales = b.d + (size_t)ni * group_count;
@@ -348,6 +380,17 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
         c.data[(size_t)(mi + 1) * n + ni] = hsum_avx2(tot1);
         c.data[(size_t)(mi + 2) * n + ni] = hsum_avx2(tot2);
         c.data[(size_t)(mi + 3) * n + ni] = hsum_avx2(tot3);
+      }
+
+      // 2 or 3 remaining rows (m = 2, 3, 6, 7: a small decode batch or a speculative
+      // verify): each group decoded once for all of them, the single-row arithmetic
+      // per row, so the outputs are those of the loop below, bit for bit.
+      if (kRemRows && m - mi >= 2) {
+        if (m - mi == 2)
+          rem_rows(std::integral_constant<int, 2>{}, mi, ni, b_row, b_scales);
+        else
+          rem_rows(std::integral_constant<int, 3>{}, mi, ni, b_row, b_scales);
+        mi = m;
       }
 
       // Single-row remainder (also the whole decode path when m == 1).
