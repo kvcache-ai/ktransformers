@@ -924,6 +924,12 @@ elseif(KTRANSFORMERS_USE_XPU)
     message(STATUS "Intel XPU: libze_loader           : ${KT_ZE_LOADER_LIBRARY}")
 elseif(KTRANSFORMERS_CPU_USE_KML)
     message(STATUS "KML CPU detected")
+    # No GPU backend here, so this is a CPU-only build. Saying so matters: without
+    # KTRANSFORMERS_CPU_ONLY the stream-callback methods are still bound, but every #if arm in
+    # their bodies is false (cpuinfer.h), so submit_with_cuda_stream would silently drop the CPU
+    # MoE work instead of failing. Defining it removes the bindings, and callers that probe with
+    # hasattr() take their synchronous path.
+    add_compile_definitions(KTRANSFORMERS_CPU_ONLY=1)
 else()
     message(STATUS "No GPU support enabled, building for CPU only")
     add_compile_definitions(KTRANSFORMERS_CPU_ONLY=1)
