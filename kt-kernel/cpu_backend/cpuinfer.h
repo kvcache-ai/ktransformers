@@ -28,6 +28,8 @@
 #include "vendors/maca.h"
 #elif KTRANSFORMERS_USE_ASCEND_NPU
 #include "vendors/ascend_npu.h"
+#elif KTRANSFORMERS_USE_XPU
+#include "vendors/xpu.h"
 #endif
 
 #include "./vendors/vendor.h"
@@ -94,6 +96,12 @@ class CPUInfer {
     void* args = (void*)params.second;
     *((CPUInfer**)args) = this;
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)func, args);
+#elif defined(KTRANSFORMERS_USE_XPU)
+    // user_cuda_stream is a sycl::queue* (torch.xpu.Stream.sycl_queue); see cpu_backend/xpu_stream_bridge.cpp.
+    void (*func)(void*) = (void (*)(void*))params.first;
+    void* args = (void*)params.second;
+    *((CPUInfer**)args) = this;
+    kt::xpu::launch_host_func(reinterpret_cast<void*>(user_cuda_stream), func, args);
 #endif
   }
 #endif
@@ -119,6 +127,9 @@ class CPUInfer {
     defined(KTRANSFORMERS_USE_ASCEND_NPU)
     SyncArgs* args = new SyncArgs{this, allow_n_pending};
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)args);
+#elif defined(KTRANSFORMERS_USE_XPU)
+    kt::xpu::launch_sync(reinterpret_cast<void*>(user_cuda_stream),
+                         [this, allow_n_pending] { task_queue_->sync(allow_n_pending); });
 #endif
   }
 #endif

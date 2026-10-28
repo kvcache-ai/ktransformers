@@ -10,12 +10,14 @@ HW_MAPPING = {
     "cpu": HWBackend.CPU,
     "cuda": HWBackend.CUDA,
     "amd": HWBackend.AMD,
+    "xpu": HWBackend.XPU,
 }
 
 LABEL_MAPPING = {
     HWBackend.CPU: ["default"],
     HWBackend.AMD: ["stage-a-test-1"],
     HWBackend.CUDA: ["stage-a-test-1"],
+    HWBackend.XPU: ["default"],
 }
 
 
@@ -50,7 +52,7 @@ def main():
     parser.add_argument(
         "--hw",
         type=str,
-        choices=["cpu", "cuda", "amd"],
+        choices=["cpu", "cuda", "amd", "xpu"],
         required=True,
         help="Hardware backend to run tests on.",
     )

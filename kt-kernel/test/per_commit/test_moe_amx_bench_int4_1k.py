@@ -29,6 +29,8 @@ try:
     kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     from tqdm import tqdm
 
+    # Weights are generated on CUDA when available (original behaviour) and on the CPU otherwise.
+    _WEIGHT_INIT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     HAS_DEPS = True
 except ImportError as e:
     HAS_DEPS = False
@@ -164,17 +166,23 @@ def test_moe_amx_int4_1k_benchmark():
         moes = []
         for layer_index in range(layer_num):
             gate_proj = (
-                torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
+                torch.randn(
+                    (expert_num, intermediate_size, hidden_size), dtype=torch.float32, device=_WEIGHT_INIT_DEVICE
+                )
                 .to("cpu")
                 .contiguous()
             )
             up_proj = (
-                torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
+                torch.randn(
+                    (expert_num, intermediate_size, hidden_size), dtype=torch.float32, device=_WEIGHT_INIT_DEVICE
+                )
                 .to("cpu")
                 .contiguous()
             )
             down_proj = (
-                torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cuda")
+                torch.randn(
+                    (expert_num, hidden_size, intermediate_size), dtype=torch.float32, device=_WEIGHT_INIT_DEVICE
+                )
                 .to("cpu")
                 .contiguous()
             )
@@ -209,10 +217,14 @@ def test_moe_amx_int4_1k_benchmark():
             torch.rand((gen_iter, qlen, num_experts_per_tok), dtype=torch.float32, device="cpu").to("cpu").contiguous()
         )
         input_tensor = (
-            torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
+            torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device=_WEIGHT_INIT_DEVICE)
+            .to("cpu")
+            .contiguous()
         )
         output_tensor = (
-            torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
+            torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device=_WEIGHT_INIT_DEVICE)
+            .to("cpu")
+            .contiguous()
         )
         bsz_tensor = torch.tensor([qlen], device="cpu")
 
