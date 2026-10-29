@@ -102,7 +102,7 @@ Q4权重：[DeepSeek-R1-Q4_K_M](https://modelscope.cn/models/unsloth/DeepSeek-R1
 
 W8A8权重：[DeepSeek-R1-W8A8](https://modelers.cn/models/State_Cloud/DeepSeek-R1-W8A8)
 
-使用[merge_safetensor_gguf.py](../../merge_tensors/merge_safetensor_gguf.py)来合并Q4和W8A8权重：
+使用[merge_safetensor_gguf.py](../../archive/merge_tensors/merge_safetensor_gguf.py)来合并Q4和W8A8权重：
 
 ```bash
 python merge_safetensor_gguf.py --safetensor_path /mnt/weights/DeepSeek-R1-Q4_K_M --gguf_path /mnt/weights/DeepSeek-R1-W8A8 --output_path /mnt/weights/DeepSeek-R1-q4km-w8a8
