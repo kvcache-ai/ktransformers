@@ -20,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Get version
         id: get_version
@@ -28,14 +28,16 @@ jobs:
           version=$(cat version.py | grep '__version__' | cut -d'"' -f2)
           echo "TAG=v$version" >> $GITHUB_OUTPUT
 
-      - name: Create and push tag
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.TAG }}
         run: |
-          TAG=${{ steps.get_version.outputs.TAG }}
-          git config user.name "ktransformers-bot"
-          git config user.email "ktransformers-bot@users.noreply.github.com"
-          if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" > /dev/null 2>&1; then
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > /dev/null 2>&1; then
             echo "Tag ${TAG} already exists on origin, skipping."
             exit 0
           fi
-          git tag "${TAG}"
-          git push origin "${TAG}"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${TAG}" \
+            -f "sha=${GITHUB_SHA}" > /dev/null
+          echo "Created ${TAG} at ${GITHUB_SHA}."
