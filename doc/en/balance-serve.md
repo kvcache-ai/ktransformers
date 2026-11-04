@@ -55,9 +55,10 @@ docker exec -it ktrans bash
 
 ⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
 
-⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
-
-⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
+`balance_serve` depends on KTransformers' patched `custom_flashinfer`, which is installed by
+the balance-serve build. Do not reinstall upstream `flashinfer` / `flashinfer-python` in the
+same environment after installation; doing so can replace the patched package and cause runtime
+ABI mismatches such as unexpected keyword argument errors in FlashInfer attention wrappers.
 
 ### 2. Set Up Conda Environment
 
