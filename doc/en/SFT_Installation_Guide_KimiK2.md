@@ -116,7 +116,7 @@ cpu_infer: 32
 chunk_size: 8192
 ```
 
-For more details about --kt_optimize_rule, please refer to https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/KTransformers-Fine-Tuning_User-Guide.md
+For more details about --kt_optimize_rule, please refer to https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md
 
 （2）examples/inference/kimik2_lora_sft_kt.yaml
 

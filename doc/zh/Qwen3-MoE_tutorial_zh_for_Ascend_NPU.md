@@ -33,7 +33,7 @@ Q4权重：[Qwen3-235B-A22B-Instruct-2507-GGUF](https://modelscope.cn/models/uns
 
 W8A8权重：[Qwen3-235B-A22B-w8a8](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8)
 
-使用[merge_safetensor_gguf_for_qwen3.py](../../merge_tensors/merge_safetensor_gguf_for_qwen3.py)来合并Q4和W8A8权重：
+使用[merge_safetensor_gguf_for_qwen3.py](../../archive/merge_tensors/merge_safetensor_gguf_for_qwen3.py)来合并Q4和W8A8权重：
 
 ```bash
 python merge_safetensor_gguf_for_qwen3.py --safetensor_path /mnt/weights/Qwen3-235B-A22B-Q4_K_M --gguf_path /mnt/weights/Qwen3-235B-A22B-W8A8 --output_path /mnt/weights/Qwen3-235B-A22B-q4km-w8a8
