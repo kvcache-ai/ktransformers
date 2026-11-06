@@ -173,7 +173,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
         Args:
             physical_to_logical_map_cpu: Optional mapping from physical to logical expert IDs
-                                         Shape: [num_experts], dtype: int32
+                                         Shape: [num_experts], dtype: int64
                                          If None, uses identity mapping [0, 1, 2, ..., num_experts-1]
         """
         if not _HAS_LLAMAFILE_SUPPORT:
@@ -183,8 +183,10 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             )
 
         if physical_to_logical_map_cpu is None:
-            physical_to_logical_map_cpu = torch.arange(self.num_experts, dtype=torch.int32, device="cpu")
+            physical_to_logical_map_cpu = torch.arange(self.num_experts, dtype=torch.int64, device="cpu")
             print(f"  Using default identity mapping for {self.num_experts} experts")
+        # the C++ side reads the map as uint64 (one entry per physical expert slot)
+        physical_to_logical_map_cpu = physical_to_logical_map_cpu.to(device="cpu", dtype=torch.int64).contiguous()
 
         base_key = f"blk.{self.layer_idx}"
 
