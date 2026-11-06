@@ -12,6 +12,8 @@
 #ifndef CPUINFER_OPERATOR_AVX2_FP8_MOE_H
 #define CPUINFER_OPERATOR_AVX2_FP8_MOE_H
 
+#include <string>
+
 #include "avx2_bf16_gemm.hpp"
 #include "avx2_bf16_utils.hpp"
 #include "fp8_dequant.hpp"
@@ -246,6 +248,23 @@ class AVX2_FP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_FP8_MOE_TP<T>> {
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("AVX2 FP8 MoE only supports block-wise FP8 (group_size > 0, no zero_point)");
+    }
+    // Block-wise FP8 quantizes each weight dimension on a group_size grid, and
+    // the CPU MoE splits `intermediate_size` across one TP part per NUMA subpool
+    // (see TP_MOE_Common, which already requires intermediate_size % tp_count).
+    // If a TP slice does not start/end on a block boundary, the per-block scales
+    // are mis-indexed and the GEMM silently returns garbage instead of failing.
+    // Only a split that cuts through a block is invalid: hidden_size is never
+    // split, and a single TP part may keep a partial trailing block, both of
+    // which the buffer/allocation code and the GEMM tail already handle.
+    const int group_size = quant_config.group_size;
+    const int tp_count = config_.pool != nullptr ? config_.pool->config.subpool_count : 1;
+    if (group_size > 1 && tp_count > 1 && config_.intermediate_size % group_size != 0) {
+      throw std::runtime_error(
+          "AVX2 FP8 MoE cannot split intermediate_size across " + std::to_string(tp_count) +
+          " TP parts while staying aligned to group_size=" + std::to_string(group_size) +
+          " (per-TP intermediate_size=" + std::to_string(config_.intermediate_size) +
+          "). Reduce the CPU thread-pool / NUMA subpool count so each TP slice is a multiple of group_size.");
     }
     printf("Created AVX2_FP8_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
   }
