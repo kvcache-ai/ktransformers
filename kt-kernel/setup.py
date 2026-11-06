@@ -44,6 +44,8 @@ GPU/NPU backends:
   CPUINFER_USE_MUSA=0/1           -DKTRANSFORMERS_USE_MUSA
   CPUINFER_USE_MACA=0/1           -DKTRANSFORMERS_USE_MACA
   CPUINFER_USE_ASCEND_NPU=0/1     -DKTRANSFORMERS_USE_ASCEND_NPU
+  CPUINFER_USE_XPU=0/1            -DKTRANSFORMERS_USE_XPU (Intel GPU: SYCL/Level Zero stream bridge)
+  CPUINFER_SYCL_ROOT=/path        -DKT_SYCL_ROOT (oneAPI compiler root with include/sycl/sycl.hpp)
   MACA_PATH=/opt/maca             MACA SDK root
 
 ARM aarch64 feature toggles:
@@ -62,6 +64,7 @@ Resulting wheel exposes a top-level package `kt_kernel` with AMXMoEWrapper and o
 """
 
 from __future__ import annotations
+import importlib.util
 import os
 import re
 import sys
@@ -151,6 +154,103 @@ def detect_parallel_jobs() -> str:
 def cpu_feature_flags() -> list[str]:
     mode = os.environ.get("CPUINFER_CPU_INSTRUCT", "NATIVE").upper()
     return [tok for tok in CPU_FEATURE_MAP.get(mode, CPU_FEATURE_MAP["NATIVE"]).split() if tok]
+
+
+################################################################################
+# Intel XPU (SYCL / Level Zero stream bridge) detection helpers
+################################################################################
+
+# Last-resort oneAPI compiler root; the full candidate order below mirrors the
+# KTRANSFORMERS_USE_XPU block in CMakeLists.txt.
+SYCL_ROOT_DEFAULT = "/opt/intel/oneapi/compiler/latest"
+
+# Tiny script for `python -c`: exit status 0 iff the interpreter's torch sees a usable XPU device.
+TORCH_XPU_PROBE_CODE = """\
+import sys, torch
+sys.exit(0 if getattr(torch, 'xpu', None) and torch.xpu.is_available() else 1)
+"""
+
+
+def sycl_root_candidates() -> list[str]:
+    """Candidate oneAPI compiler roots, highest priority first (unset variables are skipped)."""
+    cands = [os.environ.get(name) for name in ("CPUINFER_SYCL_ROOT", "SYCL_ROOT", "CMPLR_ROOT")]
+    oneapi_root = os.environ.get("ONEAPI_ROOT")
+    if oneapi_root:
+        cands.append(os.path.join(oneapi_root, "compiler", "latest"))
+    cands.append(SYCL_ROOT_DEFAULT)
+    return [c for c in cands if c]
+
+
+def find_sycl_root() -> str | None:
+    """First candidate root that contains include/sycl/sycl.hpp, or None."""
+    for cand in sycl_root_candidates():
+        if (Path(cand) / "include" / "sycl" / "sycl.hpp").is_file():
+            return cand
+    return None
+
+
+def find_xpu_prerequisites() -> tuple[str | None, list[str]]:
+    """Return (sycl_root, missing) for the files the XPU CMake branch requires.
+
+    CMake needs sycl/sycl.hpp, level_zero/ze_api.h, libsycl and libze_loader, and FATAL_ERRORs
+    without them. Auto-detection must therefore test all of them, not just the SYCL headers:
+    enabling the backend on a host that is missing the Level Zero dev files would turn a build
+    that used to succeed (CPU-only) into a hard error. libsycl comes from the Python env that
+    torch.xpu was found in, so it is not re-checked here.
+    """
+    sycl_root = find_sycl_root()
+    missing = [] if sycl_root else ["sycl/sycl.hpp (oneAPI compiler root)"]
+
+    # Keep these lists in step with the KTRANSFORMERS_USE_XPU block in CMakeLists.txt and with
+    # detect_sycl_headers() in install.sh, so the three detectors accept the same hosts: Level Zero
+    # from conda/pip is as valid as a distro package.
+    env_dirs = [p for p in (os.environ.get("CONDA_PREFIX"), sys.prefix) if p]
+    ze_header_dirs = []
+    level_zero_root = os.environ.get("LEVEL_ZERO_ROOT")
+    if level_zero_root:
+        ze_header_dirs.append(os.path.join(level_zero_root, "include"))
+    ze_header_dirs += [os.path.join(d, "include") for d in env_dirs]
+    ze_header_dirs += [os.path.join(c, "include") for c in sycl_root_candidates()]
+    ze_header_dirs += ["/usr/include", "/usr/local/include"]
+    if not any((Path(d) / "level_zero" / "ze_api.h").is_file() for d in ze_header_dirs):
+        missing.append("level_zero/ze_api.h (apt install level-zero-dev)")
+
+    ze_lib_dirs = [os.path.join(d, "lib") for d in env_dirs]
+    ze_lib_dirs += [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/local/lib",
+        "/usr/lib",
+    ]
+    ze_lib_dirs += [os.path.join(c, lib) for c in sycl_root_candidates() for lib in ("lib", "lib64")]
+    if not any((Path(d) / "libze_loader.so").exists() for d in ze_lib_dirs):
+        missing.append("libze_loader.so (apt install level-zero-dev)")
+
+    return sycl_root, missing
+
+
+def _importable_in_build_env(module: str) -> bool:
+    """True iff `module` imports in the interpreter running this build."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def detect_torch_xpu(timeout: float = 120) -> bool:
+    """Probe torch.xpu in a subprocess of the build interpreter (any failure/timeout -> False)."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", TORCH_XPU_PROBE_CODE],
+            timeout=timeout,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
 
 
 ################################################################################
@@ -578,6 +678,7 @@ class CMakeBuild(build_ext):
                     "CPUINFER_USE_MUSA",
                     "CPUINFER_USE_MACA",
                     "CPUINFER_USE_ASCEND_NPU",
+                    "CPUINFER_USE_XPU",
                 )
             )
             if requested_non_cuda_gpu:
@@ -602,6 +703,58 @@ class CMakeBuild(build_ext):
                 + (f"YES ({cann_root})" if auto_npu else "NO")
             )
 
+        # Intel XPU: when CPUINFER_USE_XPU is unset, enable the SYCL/Level Zero stream bridge only
+        # if no other GPU backend is active, the build interpreter's torch sees an XPU device, and
+        # every dev file the CMake branch requires is present (find_xpu_prerequisites). Anything
+        # short of that stays CPU-only rather than failing a build that used to work.
+        xpu_env = _env_get_bool("CPUINFER_USE_XPU", None)
+        if xpu_env is None:
+            other_gpu_active = any(
+                _env_get_bool(name, False)
+                for name in (
+                    "CPUINFER_USE_CUDA",
+                    "CPUINFER_USE_SYCL",
+                    "CPUINFER_USE_ROCM",
+                    "CPUINFER_USE_MUSA",
+                    "CPUINFER_USE_MACA",
+                    "CPUINFER_USE_ASCEND_NPU",
+                )
+            )
+            auto_xpu = False
+            if other_gpu_active:
+                print("-- CPUINFER_USE_XPU not set; another GPU backend is active, XPU disabled")
+            elif _env_get_bool("CPUINFER_BUILD_ALL_VARIANTS", False):
+                # Distribution builds must stay portable: a wheel linked against libsycl cannot be
+                # imported at all on a host without a SYCL runtime, even for CPU-only use.
+                print(
+                    "-- CPUINFER_USE_XPU not set; multi-variant (distribution) build, XPU disabled "
+                    "(set CPUINFER_USE_XPU=1 to build the bridge into every variant)"
+                )
+            elif not detect_torch_xpu():
+                print("-- CPUINFER_USE_XPU not set; auto-detected torch.xpu: NO")
+                if not _importable_in_build_env("torch"):
+                    # pip's default build isolation hides the outer env's torch from this
+                    # interpreter, so the probe cannot see an XPU even when one is present.
+                    print(
+                        "   Note: torch is not importable in this build interpreter (pip build "
+                        "isolation?); the XPU probe cannot run. Use ./install.sh, "
+                        "--no-build-isolation, or set CPUINFER_USE_XPU=1 to build the bridge."
+                    )
+            else:
+                sycl_root, missing = find_xpu_prerequisites()
+                auto_xpu = not missing
+                print(
+                    "-- CPUINFER_USE_XPU not set; auto-detected torch.xpu: YES; SYCL/Level Zero dev files: "
+                    + (f"YES ({sycl_root})" if auto_xpu else f"NO (missing: {', '.join(missing)})")
+                )
+                if not auto_xpu:
+                    print(
+                        "   Hint: source /opt/intel/oneapi/setvars.sh (or set "
+                        "CPUINFER_SYCL_ROOT=<oneAPI compiler root>) and install level-zero-dev to "
+                        "build the Intel XPU stream bridge (CPUINFER_USE_XPU=0 silences this hint)"
+                    )
+            os.environ["CPUINFER_USE_XPU"] = "1" if auto_xpu else "0"
+
         enabled_gpu_backends = [
             name
             for name, env_name in (
@@ -611,6 +764,7 @@ class CMakeBuild(build_ext):
                 ("MUSA", "CPUINFER_USE_MUSA"),
                 ("MACA", "CPUINFER_USE_MACA"),
                 ("ASCEND", "CPUINFER_USE_ASCEND_NPU"),
+                ("XPU", "CPUINFER_USE_XPU"),
             )
             if _env_get_bool(env_name, False)
         ]
@@ -782,6 +936,10 @@ class CMakeBuild(build_ext):
                 os.environ.setdefault("CPUINFER_ENABLE_KML", "OFF")
             if not _env_get_bool("CPUINFER_ENABLE_BLIS", None):
                 os.environ.setdefault("CPUINFER_ENABLE_BLIS", "OFF")
+        if _env_get_bool("CPUINFER_USE_XPU", False):
+            cmake_args.append("-DKTRANSFORMERS_USE_XPU=ON")
+            print("-- Enabling Intel XPU backend (-DKTRANSFORMERS_USE_XPU=ON)")
+            _forward_str_env(cmake_args, "CPUINFER_SYCL_ROOT", "KT_SYCL_ROOT")
 
         if platform.machine().lower() in ("aarch64", "arm64"):
             arm_feature_map = (
@@ -869,6 +1027,8 @@ for _backend_name, _env_name in (
     ("ROCM", "CPUINFER_USE_ROCM"),
     ("MUSA", "CPUINFER_USE_MUSA"),
     ("MACA", "CPUINFER_USE_MACA"),
+    ("ASCEND", "CPUINFER_USE_ASCEND_NPU"),
+    ("XPU", "CPUINFER_USE_XPU"),
 ):
     if _env_get_bool(_env_name, False):
         gpu_backend = _backend_name
