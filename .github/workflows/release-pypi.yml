@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -136,6 +138,7 @@ jobs:
       - name: Checkout Accelerate-KT source
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           repository: ${{ needs.runner-preflight.outputs.accelerate_repository }}
           ref: ${{ needs.runner-preflight.outputs.accelerate_ref }}
           path: sources/accelerate
@@ -143,6 +146,7 @@ jobs:
       - name: Checkout Transformers-KT source
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           repository: ${{ needs.runner-preflight.outputs.transformers_repository }}
           ref: ${{ needs.runner-preflight.outputs.transformers_ref }}
           path: sources/transformers
@@ -242,6 +246,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Set up Python
@@ -332,6 +337,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -446,6 +452,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
