@@ -139,6 +139,8 @@ huggingface-cli download deepseek-ai/DeepSeek-V4-Flash \
 | Official checkpoint | `DSV4_NATIVE_CKPT` | ~150 GB | source for the GGUF conversion only |
 | 43 per-layer MXFP4 GGUF | `DSV4_GGUF_DIR` | ~138 GiB | `--kt-weight-path`: the CPU experts, produced in Step 5 |
 
+An optional **community-maintained, expert-only GGUF set** is available on [ModelScope](https://modelscope.cn/models/kmon03f/DeepSeek-V4-Flash-KT-MXFP4-CPU-Experts) (43 per-layer files, about 137 GiB). The model card includes source revisions, SHA-256 manifests, full-expert bit-exact validation, pinned KT/SGLang versions and a Kunpeng 920 + Ascend 910B4-1 smoke test. These are CPU expert weights only; a compatible W8A8 checkpoint is still required. This is an unofficial third-party artifact; check the recorded versions and hashes before use.
+
 `DSV4_GGUF_DIR` defaults to `${DSV4_MODEL_ROOT}/cache`. If the GGUF set lives somewhere else —
 a separate volume, or a copy someone already converted — point at it instead and Step 5 will
 reuse it:
