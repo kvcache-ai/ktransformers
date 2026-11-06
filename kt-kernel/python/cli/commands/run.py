@@ -27,7 +27,7 @@ from kt_kernel.cli.utils.console import (
     print_warning,
     prompt_choice,
 )
-from kt_kernel.cli.utils.environment import detect_cpu_info, detect_gpus, detect_ram_gb
+from kt_kernel.cli.utils.environment import cuda_visible_devices_for, detect_cpu_info, detect_gpus, detect_ram_gb
 from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 
 
@@ -288,7 +288,7 @@ def _run_impl(
 
         # Set CUDA_VISIBLE_DEVICES for selected GPUs
         selected_gpus = config["selected_gpus"]
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in selected_gpus)
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices_for(selected_gpus)
 
         # Detect hardware for parameter resolution (needed for resolve() function later)
         gpus = detect_gpus()
