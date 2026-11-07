@@ -755,20 +755,41 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
     @staticmethod
     def _release_loader(layer_idx: int = -1):
+        """Release file handles but keep the loader instance for reuse across layers.
+
+        The tensor index (tensor_file_map) is retained to avoid rebuilding it for
+        each layer. Only the mmap handles are released.
+        """
         if NativeMoEWrapper._native_loader_instance is not None:
             NativeMoEWrapper._native_loader_instance.close_all_handles()
-            NativeMoEWrapper._native_loader_instance = None
+            # NOTE: We intentionally do NOT set _native_loader_instance = None here.
+            # The loader instance (with its tensor index) is kept for reuse by
+            # subsequent layers. The index is only cleared when force_release_loader()
+            # is called at the end of model loading.
             if layer_idx >= 0:
                 logger.info(
-                    "[KT] Released NativeMoEWrapper loader after layer %d: " "safetensors mmap handles freed.",
+                    "[KT] Released NativeMoEWrapper loader handles after layer %d: "
+                    "safetensors mmap handles freed, index retained for reuse.",
                     layer_idx,
                 )
             else:
-                logger.info("[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed.")
+                logger.info("[KT] Released NativeMoEWrapper loader handles: "
+                           "safetensors mmap handles freed, index retained for reuse.")
 
     @staticmethod
     def force_release_loader():
-        NativeMoEWrapper._release_loader()
+        """Fully release the loader including the tensor index.
+
+        Call this after all layers have been loaded to free all resources.
+        """
+        if NativeMoEWrapper._native_loader_instance is not None:
+            # Clear the index maps as well
+            NativeMoEWrapper._native_loader_instance.tensor_file_map.clear()
+            NativeMoEWrapper._native_loader_instance.tensor_type_map.clear()
+            NativeMoEWrapper._native_loader_instance.tensor_device_map.clear()
+            NativeMoEWrapper._native_loader_instance = None
+            logger.info("[KT] Fully released NativeMoEWrapper loader: "
+                       "safetensors index and handles freed.")
 
     def load_weights_from_tensors(
         self,
@@ -788,12 +809,18 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.loader = NativeMoEWrapper._native_loader_instance
             t_recreate_elapsed = (time.time() - t_recreate_start) * 1000
             logger.info(
-                "[KT] Recreated NativeMoEWrapper loader for layer %d (took %.1fms)",
+                "[KT] Created NativeMoEWrapper loader for layer %d (took %.1fms)",
                 self.layer_idx,
                 t_recreate_elapsed,
             )
         else:
             self.loader = NativeMoEWrapper._native_loader_instance
+
+        # Preload only the shard files needed for this layer.
+        # This avoids opening all safetensor files when only a subset is needed.
+        _base_key_for_preload = f"model.layers.{self.layer_idx}"
+        if hasattr(self.loader, 'preload_layer_files'):
+            self.loader.preload_layer_files(_base_key_for_preload)
 
         t0 = time.time()
         _candidates = [
@@ -1056,6 +1083,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
             del self.up_scales
             del self.down_scales
 
+        # Close file handles for this layer but keep the loader instance
+        # (with its tensor index) for reuse by subsequent layers.
         NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
         t6 = time.time()
 

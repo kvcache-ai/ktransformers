@@ -140,14 +140,18 @@ class SafeTensorLoader:
     SafeTensor format loader for AMX quantized weights.
 
     Supports loading tensors from .safetensors files with NUMA-sharded expert weights.
+    Optimized to reuse the tensor index across layers, only reopening the shard
+    files actually needed for each layer.
     """
 
     tensor_file_map: dict
     tensor_type_map: dict
     file_handle_map: dict
     tensor_device_map: dict
+    _folder_path: str
 
     def __init__(self, file_path: str):
+        self._folder_path = None
         self.__load_tensor_file_map(file_path)
 
     def __load_tensor_file_map(self, file_path: str):
@@ -157,6 +161,7 @@ class SafeTensorLoader:
             folder_path = os.path.dirname(file_path)
         else:
             folder_path = file_path
+        self._folder_path = folder_path
         self.file_handle_map = {}
         self.tensor_file_map = {}
         self.tensor_type_map = {}
@@ -168,13 +173,13 @@ class SafeTensorLoader:
             for file in files:
                 if file.endswith(".safetensors"):
                     found_safetensor = True
-                    file_path = os.path.join(root, file)
+                    full_path = os.path.join(root, file)
                     if file not in self.file_handle_map:
                         try:
-                            handle = safe_open(file_path, framework="pt")
+                            handle = safe_open(full_path, framework="pt")
                             self.file_handle_map[file] = handle
                         except Exception as e:
-                            print(f"Error opening Safetensor file {file_path}: {e}")
+                            print(f"Error opening Safetensor file {full_path}: {e}")
                             continue
 
                     f = self.file_handle_map.get(file)
@@ -184,33 +189,75 @@ class SafeTensorLoader:
                         for key in f.keys():
                             self.tensor_file_map[key] = file
                     except Exception as e:
-                        print(f"Error reading Safetensor file {file_path}: {e}")
+                        print(f"Error reading Safetensor file {full_path}: {e}")
 
         if not found_safetensor:
             raise FileNotFoundError(f"No Safetensor files found in {folder_path}")
+
+    def _ensure_handle(self, file: str):
+        """Ensure a file handle is open, reopening if necessary."""
+        if file not in self.file_handle_map:
+            full_path = os.path.join(self._folder_path, file)
+            try:
+                handle = safe_open(full_path, framework="pt")
+                self.file_handle_map[file] = handle
+            except Exception as e:
+                print(f"Error opening Safetensor file {full_path}: {e}")
+                raise FileNotFoundError(f"File {file} not found in Safetensor files")
 
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
             raise KeyError(f"Key {key} not found in Safetensor files")
         file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+        self._ensure_handle(file)
+        f = self.file_handle_map[file]
         tensor = f.get_tensor(key)
         return tensor.to(device)
 
     def close_all_handles(self):
-        """Close all file handles and clear the handle map.
+        """Close all file handles but keep the tensor index for reuse.
 
         Note: safetensors.safe_open doesn't expose a close() method. Releasing
         the mmap relies on reference counting: once file_handle_map is cleared
         and no tensor holds a reference to the underlying mmap region, the OS
         will reclaim the page cache. gc.collect() is called here to trigger
         immediate reclamation rather than waiting for the next GC cycle.
+
+        The tensor_file_map (index) is retained so subsequent layers can reuse
+        it without rebuilding the full index from disk.
         """
         import gc
         self.file_handle_map.clear()
         gc.collect()
+
+    def get_files_for_layer(self, base_key: str) -> set[str]:
+        """Get the set of shard files needed for a given layer base_key.
+
+        Args:
+            base_key: Base key like "model.layers.{layer_idx}" or "blk.{layer_idx}"
+
+        Returns:
+            Set of filenames that contain tensors for this layer.
+        """
+        needed_files = set()
+        prefix = base_key.replace("model.layers.", "blk.")
+        for key, file in self.tensor_file_map.items():
+            if key.startswith(prefix):
+                needed_files.add(file)
+        return needed_files
+
+    def preload_layer_files(self, base_key: str):
+        """Preload only the shard files needed for a specific layer.
+
+        This is an optimization to avoid opening all shards when only a subset
+        is needed for the current layer.
+
+        Args:
+            base_key: Base key like "model.layers.{layer_idx}" or "blk.{layer_idx}"
+        """
+        needed_files = self.get_files_for_layer(base_key)
+        for file in needed_files:
+            self._ensure_handle(file)
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """
