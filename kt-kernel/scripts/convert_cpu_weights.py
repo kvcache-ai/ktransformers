@@ -130,6 +130,12 @@ def load_model_config(input_path: str, input_type: str = None) -> Dict:
         print(f"FP8 quantization config detected:")
         print(f"  format: {quant_config.get('fmt', 'unknown')}")
         print(f"  weight_block_size: {weight_block_size}")
+
+    # For AutoRound input, the quantization config is read by the converter
+    # No special handling needed here as the converter reads quantization_config.json directly
+    elif input_type == "autoround":
+        print(f"AutoRound input type detected - quantization config will be read by converter")
+
     return model_config
 
 
@@ -568,6 +574,146 @@ class AWQToColumnMajorConverter(ConverterBase):
                 qweights_batch = qweights_stack[batch_start:batch_end].to("cuda")
                 qzeros_batch = qzeros_stack[batch_start:batch_end].to("cuda")
                 iweights_batch, izeros_batch = unpack_reverse_awq_interleaving(qweights_batch, qzeros_batch)
+                qweights_1d_batch, qzeros_1d_batch = pack_column_major_1d(iweights_batch, izeros_batch)
+
+                for idx in range(batch_start, batch_end):
+                    expert_id = valid_experts[idx]
+                    batch_idx = idx - batch_start
+                    output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.scale"] = expert_scales[idx].flatten()
+                    output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.weight"] = qweights_1d_batch[
+                        batch_idx
+                    ].cpu()
+                    if qzeros_1d_batch is not None:
+                        output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.qzeros"] = qzeros_1d_batch[
+                            batch_idx
+                        ].cpu()
+
+            gc.collect()
+
+        elapsed = time.time() - start_time
+        print(f"  Generated {len(output_tensors)} column-major 1D tensors in {elapsed:.2f}s")
+        return output_tensors
+
+
+class AutoRoundToColumnMajorConverter(ConverterBase):
+    """Convert raw AutoRound safetensors to NUMA-sliced column-major format.
+
+    AutoRound supports two packing formats:
+    - auto_round:auto_gptq: GPTQ-like format (no interleaving, symmetric quantization)
+    - auto_round:auto_awq: AWQ-like format (with AWQ interleaving, may have zero points)
+
+    The packing format is read from quantization_config.json in the input directory.
+    """
+
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        model_config: Dict,
+        cpuinfer_threads: int = 60,
+        threadpool_count: int = 2,
+        input_type: str = None,
+        merge_to_safetensor: bool = True,
+    ):
+        super().__init__(
+            input_path, output_path, model_config, cpuinfer_threads, threadpool_count, input_type, merge_to_safetensor
+        )
+        # Read AutoRound quantization config to determine packing format
+        self._read_autoround_config()
+
+    def _read_autoround_config(self):
+        """Read quantization_config.json to get AutoRound packing format and parameters."""
+        config_path = os.path.join(self.input_path, "quantization_config.json")
+        if not os.path.exists(config_path):
+            # Try config.json
+            config_path = os.path.join(self.input_path, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                quant_config = config.get("quantization_config", {})
+            else:
+                raise FileNotFoundError(f"quantization_config.json not found in {self.input_path}")
+        else:
+            with open(config_path, "r") as f:
+                quant_config = json.load(f)
+
+        self.packing_format = quant_config.get("packing_format", "auto_round:auto_gptq")
+        self.weight_bits = quant_config.get("bits", quant_config.get("weight_bits", 4))
+        self.group_size = quant_config.get("group_size", 64)
+        self.sym = quant_config.get("sym", True)
+
+        print(f"AutoRound config detected:")
+        print(f"  packing_format: {self.packing_format}")
+        print(f"  weight_bits: {self.weight_bits}")
+        print(f"  group_size: {self.group_size}")
+        print(f"  sym: {self.sym}")
+
+        if self.packing_format not in ["auto_round:auto_gptq", "auto_round:auto_awq"]:
+            raise ValueError(f"Unsupported AutoRound packing_format: {self.packing_format}")
+
+        if self.weight_bits not in [4, 8]:
+            raise ValueError(f"Unsupported weight_bits: {self.weight_bits}, only 4 and 8 are supported")
+
+    # NOTE: Only this method differs across quantization methods.
+    def _convert_layer_experts(self, layer_idx: int, expert_ids: List[int]) -> Dict[str, torch.Tensor]:
+        """Convert all experts in a layer to column major format with optimized AutoRound processing."""
+        output_tensors = {}
+
+        start_time = time.time()
+        print(f"Converting layer {layer_idx} with {len(expert_ids)} experts...")
+
+        # Pre-compute projection name mappings
+        proj_mappings = {"up_proj": "ffn_up_exps", "gate_proj": "ffn_gate_exps", "down_proj": "ffn_down_exps"}
+
+        # Batch process all experts to reduce nested loops
+        for proj_name, out_proj in proj_mappings.items():
+            # Load all expert tensors for this projection at once
+            expert_qweights = []
+            expert_qzeros = []
+            expert_scales = []
+            valid_experts = []
+
+            for expert_id in expert_ids:
+                qweight_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.qweight"
+                qzeros_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.qzeros"
+                scales_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.scales"
+
+                if qweight_key in self.tensor_file_map:
+                    qweight = self._load_tensor(qweight_key)
+                    qzeros = self._load_tensor(qzeros_key) if qzeros_key in self.tensor_file_map else None
+                    scales = self._load_tensor(scales_key) if scales_key in self.tensor_file_map else None
+
+                    expert_qweights.append(qweight)
+                    expert_qzeros.append(qzeros)
+                    expert_scales.append(scales)
+                    valid_experts.append(expert_id)
+
+            if not valid_experts:
+                continue
+
+            print(f"  Processing {proj_name}: {len(valid_experts)} experts")
+
+            qweights_stack = torch.stack([w for w in expert_qweights if w is not None], dim=0)
+            qzeros_stack = torch.stack([z for z in expert_qzeros if z is not None], dim=0)
+
+            batch_size = 128
+
+            for batch_start in range(0, len(valid_experts), batch_size):
+                batch_end = min(batch_start + batch_size, len(valid_experts))
+                qweights_batch = qweights_stack[batch_start:batch_end].to("cuda")
+                qzeros_batch = qzeros_stack[batch_start:batch_end].to("cuda")
+
+                # Unpack based on packing format
+                if self.packing_format == "auto_round:auto_gptq":
+                    # GPTQ format: simple row-major unpack, no interleaving reversal
+                    iweights_batch = unpack(qweights_batch)
+                    izeros_batch = unpack(qzeros_batch) if qzeros_batch is not None else None
+                elif self.packing_format == "auto_round:auto_awq":
+                    # AWQ format: unpack with AWQ interleaving reversal
+                    iweights_batch, izeros_batch = unpack_reverse_awq_interleaving(qweights_batch, qzeros_batch)
+                else:
+                    raise ValueError(f"Unknown packing_format: {self.packing_format}")
+
                 qweights_1d_batch, qzeros_1d_batch = pack_column_major_1d(iweights_batch, izeros_batch)
 
                 for idx in range(batch_start, batch_end):
@@ -1106,9 +1252,9 @@ def main():
     parser.add_argument("--input-path", "-i", required=True, help="Input directory with safetensors")
     parser.add_argument(
         "--input-type",
-        choices=["awq", "fp8", "fp16", "bf16"],
+        choices=["awq", "fp8", "fp16", "bf16", "autoround"],
         required=True,
-        help="Input weight type (awq/fp8/fp16/bf16)",
+        help="Input weight type (awq/fp8/fp16/bf16/autoround)",
     )
     parser.add_argument("--output", "-o", required=True, help="Output directory for converted safetensors")
     parser.add_argument(
@@ -1187,6 +1333,17 @@ def main():
                 args.cpuinfer_threads,
                 args.threadpool_count,
                 input_type=None,
+                merge_to_safetensor=merge_to_safetensor,
+            )
+        elif args.input_type == "autoround":
+            # AutoRound is a pre-quantized format like AWQ
+            converter = AutoRoundToColumnMajorConverter(
+                args.input_path,
+                args.output,
+                model_config,
+                args.cpuinfer_threads,
+                args.threadpool_count,
+                input_type=args.input_type,
                 merge_to_safetensor=merge_to_safetensor,
             )
         elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
