@@ -931,7 +931,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
                     f"AVX-VNNI-256 supports positive multiples of 32 up to "
                     f"{_AVXVNNI256_RAW_INT4_MAX_GROUP_SIZE}; AVX2 (AVX2RawInt4_MOE) is used as the final fallback."
                 )
-            retain_source_weights = backend_cls is AVX2RawInt4_MOE
+            # RAWINT4 uses direct pointers into mmap'd safetensor data for ALL backends.
+            # Retain source tensors to keep mmap alive for the lifetime of the wrapper.
+            retain_source_weights = True
             self.moe = backend_cls(moe_config)
         elif self.method == "MXFP4":
             # MXFP4: E2M1 nibble-packed weights, ue8m0/bf16 per-32 group scale
