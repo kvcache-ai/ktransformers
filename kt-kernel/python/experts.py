@@ -368,7 +368,7 @@ def _create_inference_wrapper(
         raise NotImplementedError(f"Unsupported inference method: {method}")
 
     # Create and return backend instance.
-    # `swiglu_limit != 0` is validated for block-FP8, MXFP4, MXFP8 and LLAMAFILE.
+    # `swiglu_limit != 0` is validated for block-FP8, MXFP4, NVFP4, MXFP8 and LLAMAFILE.
     # NativeMoEWrapper also serves RAWINT4 / BF16 / FP8_PERCHANNEL / GPTQ_INT4, so a
     # `backend_cls is NativeMoEWrapper` test would silently forward a stale
     # 10.0 (e.g., from a leftover SGLANG_DSV4_2604_SUBMODE=2604B in the env)
@@ -378,17 +378,17 @@ def _create_inference_wrapper(
     # validates the GGUF tensor types while loading and applies the clamp in its
     # scalar/NEON-independent activation step.
     extra_kwargs = {}
-    if method in ("FP8", "MXFP4", "MXFP8", "LLAMAFILE"):
+    if method in ("FP8", "MXFP4", "NVFP4", "MXFP8", "LLAMAFILE"):
         extra_kwargs["swiglu_limit"] = swiglu_limit
         extra_kwargs["swiglu_alpha"] = swiglu_alpha
     elif swiglu_limit != 0.0:
         raise ValueError(
             f"swiglu_limit={swiglu_limit} is only supported on "
-            "method='FP8'/'MXFP4'/'MXFP8'/'LLAMAFILE', "
+            "method='FP8'/'MXFP4'/'NVFP4'/'MXFP8'/'LLAMAFILE', "
             f"got method={method!r} (backend={backend_cls.__name__}). This "
             f"usually means SGLANG_DSV4_2604_SUBMODE=2604B is set in the "
             f"environment while the current launch does not actually use "
-            "FP8/MXFP4/MXFP8/LLAMAFILE weights — either unset the env or select a "
+            "FP8/MXFP4/NVFP4/MXFP8/LLAMAFILE weights — either unset the env or select a "
             "matching --kt-method."
         )
     return backend_cls(
