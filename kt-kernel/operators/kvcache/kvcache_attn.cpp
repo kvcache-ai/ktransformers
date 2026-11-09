@@ -60,72 +60,138 @@ void KVCache::attention_kvhead_(const uint16_t* q_in_data, ggml_fp16_t* output, 
           for (int i = full_blocks + 1; i < seq_len_ / 8; ++i) {
             thread_local_attn_mask_[thread_id][i] = 0;
           }
+
+          // Prepare anchor data if anchor_num > 0
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            // Anchor buffer: [num_k_anchor * bsz, head_dim] in fp16
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Also need V anchor buffer (same size)
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Fill anchor buffers from global anchor_ array
+            // anchor_ layout: [layer_id * max_block_num * anchor_num * q_head_num * head_dim +
+            //                  block_idx * anchor_num * q_head_num * head_dim +
+            //                  anchor_id * q_head_num * head_dim + head_id * head_dim]
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              // Copy n_gqa heads for this anchor
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              // V anchors use the same data (K anchors are used for both K and V in current impl)
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                                          (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                                            head_id * n_gqa_ * config_.head_dim],
                                          seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(), GGML_TYPE_F16,
-                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_fp32_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
         } else {
+          // Prepare anchor data if anchor_num > 0 (full block case)
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                 (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                   head_id * n_gqa_ * config_.head_dim],
-                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                nullptr, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr,
-                nullptr, thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_k_anchor, k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
+                thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
 
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q4_0,
-                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
-                                         thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q8_0,
-                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
-                                         thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
@@ -285,72 +351,139 @@ void KVCache::attention_layer_(const uint16_t* q_in_data, ggml_fp16_t* output, f
           for (int i = full_blocks + 1; i < seq_len_ / 8; ++i) {
             thread_local_attn_mask_[thread_id][i] = 0;
           }
+
+          // Prepare anchor data if anchor_num > 0
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            // Anchor buffer: [num_k_anchor * bsz, head_dim] in fp16
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Also need V anchor buffer (same size)
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Fill anchor buffers from global anchor_ array
+            // anchor_ layout: [layer_id * max_block_num * anchor_num * q_head_num * head_dim +
+            //                  block_idx * anchor_num * q_head_num * head_dim +
+            //                  anchor_id * q_head_num * head_dim + head_id * head_dim]
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              // Copy n_gqa heads for this anchor
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              // V anchors use the same data (K anchors are used for both K and V in current impl)
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                                          (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                                            head_id * n_gqa_ * config_.head_dim],
                                          seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(), GGML_TYPE_F16,
-                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_fp32_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
         } else {
+          // Prepare anchor data if anchor_num > 0 (full block case)
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                 (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                   head_id * n_gqa_ * config_.head_dim],
-                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                nullptr, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr,
-                nullptr, thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_k_anchor, k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
+                thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
 
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q4_0,
-                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
-                                         thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q8_0,
-                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
@@ -477,6 +610,10 @@ void KVCache::attn(const ggml_fp16_t* q_in, ggml_fp16_t* output, float* attn_lse
   const uint16_t* q_in_data = const_cast<const uint16_t*>(q_in);
 
   quantize_q_(q_in_data, batch_size);
+
+  // Note: Anchors are computed in attn_with_kvcache before cache_seqlens is modified.
+  // If attn is called directly (not through attn_with_kvcache), anchors must be pre-computed.
+
   if (config_.retrieval_type == RetrievalType::LAYER) {
     attn_initialize_layer_(batch_size, layer_idx, block_table, max_block_num, cache_seqlens);
     retrieval_kvcache_layer_(q_in_data, init_block_num, local_block_num, pick_block_num, q_len, generate_token_idx,
@@ -509,6 +646,11 @@ void KVCache::attn_with_kvcache(const ggml_fp16_t* q_in, const ggml_fp16_t* k_in
 
   update_kvcache_fp16(k_in, v_in, layer_idx, block_table, batch_size, max_block_num, cache_seqlens, q_len, backend);
   //    printf("update finished.\n");
+
+  // Compute anchors before cache_seqlens is modified (needed for anchor attention)
+  if (config_.anchor_num > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+    calc_anchor_all_layers(block_table, cache_seqlens, batch_size, max_block_num, backend);
+  }
 
   // cache_seqlens memory is modified.
   for (int i = 0; i < batch_size; i++) {
@@ -890,72 +1032,139 @@ void KVCache::calculate_sparsity_layer_(const uint16_t* q_in_data, float* attn_s
           for (int i = full_blocks + 1; i < seq_len_ / 8; ++i) {
             thread_local_attn_mask_[thread_id][i] = 0;
           }
+
+          // Prepare anchor data if anchor_num > 0
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            // Anchor buffer: [num_k_anchor * bsz, head_dim] in fp16
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Also need V anchor buffer (same size)
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Fill anchor buffers from global anchor_ array
+            // anchor_ layout: [layer_id * max_block_num * anchor_num * q_head_num * head_dim +
+            //                  block_idx * anchor_num * q_head_num * head_dim +
+            //                  anchor_id * q_head_num * head_dim + head_id * head_dim]
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              // Copy n_gqa heads for this anchor
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              // V anchors use the same data (K anchors are used for both K and V in current impl)
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                                          (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                                            head_id * n_gqa_ * config_.head_dim],
                                          seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(), GGML_TYPE_F16,
-                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_fp32_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
         } else {
+          // Prepare anchor data if anchor_num > 0 (full block case)
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                 (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                   head_id * n_gqa_ * config_.head_dim],
-                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                nullptr, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr,
-                nullptr, thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_k_anchor, k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
+                thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
 
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q4_0,
-                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
-                                         thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q8_0,
-                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
@@ -1216,72 +1425,139 @@ void KVCache::calculate_sparsity_kvhead_(const uint16_t* q_in_data, float* attn_
           for (int i = full_blocks + 1; i < seq_len_ / 8; ++i) {
             thread_local_attn_mask_[thread_id][i] = 0;
           }
+
+          // Prepare anchor data if anchor_num > 0
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            // Anchor buffer: [num_k_anchor * bsz, head_dim] in fp16
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Also need V anchor buffer (same size)
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            // Fill anchor buffers from global anchor_ array
+            // anchor_ layout: [layer_id * max_block_num * anchor_num * q_head_num * head_dim +
+            //                  block_idx * anchor_num * q_head_num * head_dim +
+            //                  anchor_id * q_head_num * head_dim + head_id * head_dim]
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              // Copy n_gqa heads for this anchor
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              // V anchors use the same data (K anchors are used for both K and V in current impl)
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                                          (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                                            head_id * n_gqa_ * config_.head_dim],
                                          seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(), GGML_TYPE_F16,
-                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_fp32_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q4_0, 0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                 q_q8_0_[batch_id][head_id].data(), seq_len_, 0, false, thread_local_attn_mask_[thread_id].data(),
-                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
+                GGML_TYPE_Q8_0, 0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
                 thread_local_attn_score_[thread_id].data(), thread_local_output_q8_0_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
         } else {
+          // Prepare anchor data if anchor_num > 0 (full block case)
+          int bsz = n_gqa_;
+          int num_k_anchor = config_.anchor_num;
+          int num_v_anchor = config_.anchor_num;
+          ggml_fp16_t* k_anchor_buf = nullptr;
+          ggml_fp16_t* v_anchor_buf = nullptr;
+          char* draft_ptr = thread_local_draft_[thread_id].data();
+
+          if (num_k_anchor > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+            size_t anchor_buf_size = num_k_anchor * bsz * config_.head_dim * sizeof(ggml_fp16_t);
+            k_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            v_anchor_buf = reinterpret_cast<ggml_fp16_t*>(draft_ptr);
+            draft_ptr += anchor_buf_size;
+
+            size_t anchor_base = (size_t)layer_id_ * config_.max_block_num * config_.anchor_num * config_.q_head_num * config_.head_dim +
+                                 (size_t)block_idx * config_.anchor_num * config_.q_head_num * config_.head_dim;
+
+            for (int anchor_id = 0; anchor_id < num_k_anchor; anchor_id++) {
+              size_t src_offset = anchor_base + anchor_id * config_.q_head_num * config_.head_dim +
+                                  head_id * bsz * config_.head_dim;
+              size_t dst_offset = anchor_id * bsz * config_.head_dim;
+              memcpy(&k_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+              memcpy(&v_anchor_buf[dst_offset], &anchor_[src_offset], bsz * config_.head_dim * sizeof(ggml_fp16_t));
+            }
+          }
+
           if (config_.kv_type == ggml_type::GGML_TYPE_F16) {
             attn_with_kvcache_one_block_(
                 config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_F16,
                 (void*)&q_in_data[batch_id * config_.kv_head_num * n_gqa_ * config_.head_dim +
                                   head_id * n_gqa_ * config_.head_dim],
-                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(), 0,
-                nullptr, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(), 0, nullptr,
-                nullptr, thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
-                thread_local_attn_lse_[thread_id].data(), thread_local_draft_[thread_id].data(), nullptr, cos_.data(),
-                sin_.data());
+                seq_len_, 0, true, nullptr, GGML_TYPE_F16, 0, k_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_k_anchor, k_anchor_buf, nullptr, GGML_TYPE_F16, 1, v_cache_fp16_[layer_id_][head_id][block_idx].data(),
+                num_v_anchor, v_anchor_buf, nullptr,
+                thread_local_attn_score_[thread_id].data(), thread_local_output_fp32_[thread_id].data(),
+                thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
 
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q4_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q4_0,
-                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q4[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q4_0, 1, v_cache_q4[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
-                                         thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         thread_local_attn_lse_[thread_id].data(), draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           } else if (config_.kv_type == ggml_type::GGML_TYPE_Q8_0) {
             attn_with_kvcache_one_block_(config_.head_dim, config_.q_head_num / config_.kv_head_num, GGML_TYPE_Q8_0,
                                          q_q8_0_[batch_id][head_id].data(), seq_len_, 0, true, nullptr, GGML_TYPE_Q8_0,
-                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), 0, nullptr, nullptr,
-                                         GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(), 0,
-                                         nullptr, nullptr, thread_local_attn_score_[thread_id].data(),
+                                         0, k_cache_q8[layer_id_][head_id][block_idx].data(), num_k_anchor,
+                                         k_anchor_buf, nullptr, GGML_TYPE_Q8_0, 1, v_cache_q8[layer_id_][head_id][block_idx].data(),
+                                         num_v_anchor, v_anchor_buf, nullptr,
+                                         thread_local_attn_score_[thread_id].data(),
                                          thread_local_output_q8_0_[thread_id].data(),
                                          thread_local_attn_lse_[thread_id].data(),
-                                         thread_local_draft_[thread_id].data(), nullptr, cos_.data(), sin_.data());
+                                         draft_ptr, nullptr, cos_.data(), sin_.data());
             dequantize_row_q8_0(thread_local_output_q8_0_[thread_id].data(),
                                 thread_local_output_fp32_[thread_id].data(), n_gqa_ * config_.head_dim);
           }
@@ -1524,6 +1800,12 @@ void KVCache::get_attn_sparsity(const ggml_fp16_t* q_in, float* attn_sparsity, i
   const uint16_t* q_in_data = const_cast<const uint16_t*>(q_in);
 
   quantize_q_(q_in_data, batch_size);
+
+  // Compute anchors if anchor_num > 0 (needed for anchor attention)
+  if (config_.anchor_num > 0 && config_.anchor_type != AnchorType::FIXED_ANCHOR) {
+    calc_anchor_all_layers(block_table, cache_seqlens, batch_size, max_block_num, backend);
+  }
+
   if (config_.retrieval_type == RetrievalType::LAYER) {
     attn_initialize_layer_(batch_size, layer_idx, block_table, max_block_num, cache_seqlens);
     retrieval_kvcache_layer_(q_in_data, 1, local, topk, q_len, generate_token_idx, batch_size, layer_idx, cache_seqlens,
@@ -1611,8 +1893,13 @@ void KVCache::attn_with_kvcache_one_block_(int head_dim, int bsz,
     assert(v_type == GGML_TYPE_F16);
 
     // attn = q * k + q * k_anchor
-    // TODO: anchor
-    assert(num_k_anchor == 0);
+    // Support for anchor attention
+    float* anchor_attn_score = nullptr;
+    if (num_k_anchor > 0) {
+      // Allocate space for anchor attention scores: [bsz, num_k_anchor]
+      anchor_attn_score = reinterpret_cast<float*>(draft);
+      draft = reinterpret_cast<char*>(draft) + bsz * num_k_anchor * sizeof(float);
+    }
 
     if (rotary_angle != nullptr) {
       ggml_fp16_t* k_cache_with_rope_fp16 =
@@ -1678,22 +1965,54 @@ void KVCache::attn_with_kvcache_one_block_(int head_dim, int bsz,
       }
     }
 
-    // attn = softmax(attn)
+    // Compute anchor attention if anchors are provided
+    // k_cache_anchors is expected to be [num_k_anchor * bsz, head_dim] where bsz = n_gqa (query heads per kv_head)
+    // Each anchor_id has bsz rows, one per query head
+    if (num_k_anchor > 0 && k_cache_anchors != nullptr) {
+      // Compute Q * K_anchor^T: [bsz, head_dim] x [head_dim, num_k_anchor * bsz] -> [bsz, num_k_anchor * bsz]
+      // We only need the diagonal blocks: for each head i, anchor_id * bsz + i
+      bool ok = llamafile_sgemm(num_k_anchor * bsz, bsz, head_dim, (ggml_fp16_t*)k_cache_anchors, head_dim, (ggml_fp16_t*)q,
+                                head_dim, anchor_attn_score, num_k_anchor * bsz, 0, 1, GGML_TASK_TYPE_COMPUTE, k_type,
+                                GGML_TYPE_F16, GGML_TYPE_F32, GGML_PREC_DEFAULT);
+      if (!ok) {
+        printf("llamafile_sgemm for anchor failed\n");
+      }
+      // Scale anchor attention
+      ggml_vec_scale_f32(bsz * num_k_anchor * bsz, anchor_attn_score, scale_factor);
+    }
+
+    // attn = softmax(attn) - combine regular and anchor attention
     for (int i = 0; i < bsz; i++) {
       float sum_exp = 0;
+      // Regular attention
       for (int j = 0; j < past_kv_len; j++) {
         attn_score[i * past_kv_len + j] = std::exp(attn_score[i * past_kv_len + j]);
         sum_exp += attn_score[i * past_kv_len + j];
       }
+      // Anchor attention - extract diagonal elements: anchor_attn_score[anchor_id * bsz + i, i]
+      if (num_k_anchor > 0) {
+        for (int j = 0; j < num_k_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;  // [anchor_id * bsz + i, i] in row-major [num_k_anchor*bsz, bsz]
+          anchor_attn_score[idx] = std::exp(anchor_attn_score[idx]);
+          sum_exp += anchor_attn_score[idx];
+        }
+      }
+      // Normalize
       for (int j = 0; j < past_kv_len; j++) {
         attn_score[i * past_kv_len + j] /= sum_exp;
+      }
+      if (num_k_anchor > 0) {
+        for (int j = 0; j < num_k_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          anchor_attn_score[idx] /= sum_exp;
+        }
       }
       if (lse != nullptr) {
         lse[i] = std::log(sum_exp);
       }
     }
 
-    // output = attn * v + attn * v_anchor
+    // output = attn * v + attn_anchor * v_anchor
     // std::vector<float> sum(bsz * head_dim);
     float* sum =
         reinterpret_cast<float*>(reinterpret_cast<char*>(draft) + sizeof(block_q8_0) * bsz * past_kv_len / QK8_0);
@@ -1707,13 +2026,34 @@ void KVCache::attn_with_kvcache_one_block_(int head_dim, int bsz,
       attn_score_fp16[i] = GGML_FP32_TO_FP16(attn_score[i]);
     }
 
-    // TODO: anchor
-    assert(num_v_anchor == 0);
+    // Regular V attention
     bool ok = llamafile_sgemm(head_dim, bsz, past_kv_len, (ggml_fp16_t*)v_cache, past_kv_len,
                               (ggml_fp16_t*)attn_score_fp16, past_kv_len, sum, head_dim, 0, 1, GGML_TASK_TYPE_COMPUTE,
                               v_type, GGML_TYPE_F16, GGML_TYPE_F32, GGML_PREC_DEFAULT);
     if (!ok) {
       printf("llamafile_sgemm failed\n");
+    }
+
+    // Anchor V attention
+    if (num_v_anchor > 0 && v_cache_anchors != nullptr) {
+      // Convert anchor attention to fp16 - extract diagonal elements
+      // anchor_attn_score is [num_k_anchor * bsz, bsz], we need diagonal [bsz, num_k_anchor]
+      ggml_fp16_t* anchor_attn_score_fp16 = (reinterpret_cast<ggml_fp16_t*>(reinterpret_cast<char*>(attn_score_fp16) +
+                                                                          bsz * past_kv_len * sizeof(ggml_fp16_t)));
+      for (int i = 0; i < bsz; i++) {
+        for (int j = 0; j < num_v_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          anchor_attn_score_fp16[i * num_v_anchor + j] = GGML_FP32_TO_FP16(anchor_attn_score[idx]);
+        }
+      }
+      // Accumulate anchor attention * v_anchor into sum
+      // v_cache_anchors is [num_v_anchor * bsz, head_dim]
+      ok = llamafile_sgemm(head_dim, bsz, num_v_anchor * bsz, (ggml_fp16_t*)v_cache_anchors, head_dim,
+                           anchor_attn_score_fp16, num_v_anchor, sum, head_dim, 1, 1, GGML_TASK_TYPE_COMPUTE,
+                           v_type, GGML_TYPE_F16, GGML_TYPE_F32, GGML_PREC_DEFAULT);
+      if (!ok) {
+        printf("llamafile_sgemm for anchor v failed\n");
+      }
     }
 
     // copy to output
@@ -1727,8 +2067,13 @@ void KVCache::attn_with_kvcache_one_block_(int head_dim, int bsz,
     assert(v_type == GGML_TYPE_Q4_0 || v_type == GGML_TYPE_Q8_0);
 
     // attn = q * k + q * k_anchor
-    // TODO: anchor
-    assert(num_k_anchor == 0);
+    // Support for anchor attention
+    float* anchor_attn_score = nullptr;
+    if (num_k_anchor > 0) {
+      // Allocate space for anchor attention scores: [bsz, num_k_anchor]
+      anchor_attn_score = reinterpret_cast<float*>(draft);
+      draft = reinterpret_cast<char*>(draft) + bsz * num_k_anchor * sizeof(float);
+    }
 
     if (rotary_angle != nullptr) {
       ggml_fp16_t* k_cache_with_rope_fp16 =
@@ -1805,33 +2150,105 @@ void KVCache::attn_with_kvcache_one_block_(int head_dim, int bsz,
       }
     }
 
-    // attn = softmax(attn)
+    // Compute anchor attention if anchors are provided
+    // k_cache_anchors is expected to be [num_k_anchor * bsz, head_dim] where bsz = n_gqa (query heads per kv_head)
+    if (num_k_anchor > 0 && k_cache_anchors != nullptr) {
+      // Compute Q * K_anchor^T: [bsz, head_dim] x [head_dim, num_k_anchor * bsz] -> [bsz, num_k_anchor * bsz]
+      // We only need the diagonal blocks
+      if (k_type == GGML_TYPE_Q4_0) {
+        bool ok = llamafile_sgemm(num_k_anchor * bsz, bsz, head_dim, (ggml_fp16_t*)k_cache_anchors, head_dim, (block_q8_0*)q,
+                                  head_dim / 32, anchor_attn_score, num_k_anchor * bsz, 0, 1, GGML_TASK_TYPE_COMPUTE,
+                                  GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_F32, GGML_PREC_DEFAULT);
+        if (!ok) {
+          printf("llamafile_sgemm for anchor failed\n");
+        }
+      } else if (k_type == GGML_TYPE_Q8_0) {
+        bool ok = llamafile_sgemm(num_k_anchor * bsz, bsz, head_dim, (ggml_fp16_t*)k_cache_anchors, head_dim, (block_q8_0*)q,
+                                  head_dim / 32, anchor_attn_score, num_k_anchor * bsz, 0, 1, GGML_TASK_TYPE_COMPUTE,
+                                  GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_F32, GGML_PREC_DEFAULT);
+        if (!ok) {
+          printf("llamafile_sgemm for anchor failed\n");
+        }
+      }
+      // Scale anchor attention
+      float scale_factor = 1.0 / std::sqrt(float(head_dim));
+      ggml_vec_scale_f32(bsz * num_k_anchor * bsz, anchor_attn_score, scale_factor);
+    }
+
+    // attn = softmax(attn) - combine regular and anchor attention
     for (int i = 0; i < bsz; i++) {
       float sum_exp = 0;
+      // Regular attention
       for (int j = 0; j < past_kv_len; j++) {
         attn_score[i * past_kv_len + j] = std::exp(attn_score[i * past_kv_len + j]);
         sum_exp += attn_score[i * past_kv_len + j];
       }
+      // Anchor attention - extract diagonal elements
+      if (num_k_anchor > 0) {
+        for (int j = 0; j < num_k_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          anchor_attn_score[idx] = std::exp(anchor_attn_score[idx]);
+          sum_exp += anchor_attn_score[idx];
+        }
+      }
+      // Normalize
       for (int j = 0; j < past_kv_len; j++) {
         attn_score[i * past_kv_len + j] /= sum_exp;
+      }
+      if (num_k_anchor > 0) {
+        for (int j = 0; j < num_k_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          anchor_attn_score[idx] /= sum_exp;
+        }
       }
       if (lse != nullptr) {
         lse[i] = std::log(sum_exp);
       }
     }
 
-    // output = attn * v + attn * v_anchor
+    // output = attn * v + attn_anchor * v_anchor
     // std::vector<block_q8_0> attn_q8_0(bsz * past_kv_len / QK8_0);
     block_q8_0* attn_q8_0 = reinterpret_cast<block_q8_0*>(draft);
     quantize_row_q8_0(attn_score, attn_q8_0, bsz * past_kv_len);
     // std::vector<float> sum(bsz * head_dim);
     float* sum =
         reinterpret_cast<float*>(reinterpret_cast<char*>(draft) + sizeof(block_q8_0) * bsz * past_kv_len / QK8_0);
-    // TODO: anchor
-    assert(num_v_anchor == 0);
+
+    // Regular V attention
     llamafile_sgemm(head_dim, bsz, past_kv_len / 32, (block_q4_0*)v_cache, past_kv_len / 32, attn_q8_0,
                     past_kv_len / 32, sum, head_dim, 0, 1, GGML_TASK_TYPE_COMPUTE, v_type, GGML_TYPE_Q8_0,
                     GGML_TYPE_F32, GGML_PREC_DEFAULT);
+
+    // Anchor V attention
+    if (num_v_anchor > 0 && v_cache_anchors != nullptr) {
+      // Convert anchor attention to q8_0 - extract diagonal elements
+      // anchor_attn_score is [num_k_anchor * bsz, bsz], we need diagonal [bsz, num_k_anchor]
+      block_q8_0* anchor_attn_q8_0 = reinterpret_cast<block_q8_0*>(reinterpret_cast<char*>(attn_q8_0) +
+                                                                   sizeof(block_q8_0) * bsz * past_kv_len / QK8_0);
+      for (int i = 0; i < bsz; i++) {
+        for (int j = 0; j < num_v_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          float val = anchor_attn_score[idx];
+          // Quantize single value - we'll fill the block_q8_0
+          // For simplicity, we'll quantize the whole row later
+        }
+      }
+      // Quantize the diagonal elements into anchor_attn_q8_0 [bsz, num_v_anchor]
+      // Create temporary float array for diagonal elements
+      std::vector<float> anchor_diag(bsz * num_v_anchor);
+      for (int i = 0; i < bsz; i++) {
+        for (int j = 0; j < num_v_anchor; j++) {
+          int idx = j * bsz * bsz + i * bsz + i;
+          anchor_diag[i * num_v_anchor + j] = anchor_attn_score[idx];
+        }
+      }
+      quantize_row_q8_0(anchor_diag.data(), anchor_attn_q8_0, bsz * num_v_anchor);
+      // Accumulate anchor attention * v_anchor into sum
+      // v_cache_anchors is [num_v_anchor * bsz, head_dim] (quantized as q4_0)
+      llamafile_sgemm(head_dim, bsz, num_v_anchor * bsz / 32, (block_q4_0*)v_cache_anchors, num_v_anchor * bsz / 32,
+                      anchor_attn_q8_0, num_v_anchor, sum, head_dim, 1, 1, GGML_TASK_TYPE_COMPUTE, v_type,
+                      GGML_TYPE_Q8_0, GGML_TYPE_F32, GGML_PREC_DEFAULT);
+    }
 
     quantize_row_q8_0(sum, (block_q8_0*)output, bsz * head_dim);
   }

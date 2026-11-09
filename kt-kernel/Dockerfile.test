@@ -1,0 +1,32 @@
+# Build and test environment for kt-kernel
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    libnuma-dev \
+    libhwloc-dev \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    python3-full \
+    wget \
+    pybind11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment for Python packages
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python packages in venv
+RUN pip3 install --no-cache-dir numpy torch --index-url https://download.pytorch.org/whl/cpu
+
+WORKDIR /kt-kernel
+
+CMD ["bash"]

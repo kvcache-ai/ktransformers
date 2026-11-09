@@ -151,6 +151,76 @@ py::object from_float_ptr(uintptr_t input_ptr, int size, ggml_type type) {
   return tensor;
 }
 
+// KVCache wrapper functions for pointer conversion (uintptr_t -> raw pointers)
+static void kvcache_calc_anchor_all_layers(KVCache& self, uintptr_t block_table, uintptr_t cache_seqlens,
+                                           int batch_size, int max_block_num, WorkerPool* backend) {
+  self.calc_anchor_all_layers(reinterpret_cast<int*>(block_table),
+                              reinterpret_cast<int*>(cache_seqlens),
+                              batch_size, max_block_num, backend);
+}
+
+static void kvcache_attn(KVCache& self, uintptr_t q_in, uintptr_t output, uintptr_t attn_lse,
+                         int layer_idx, int generate_token_idx, int q_len, int batch_size,
+                         int max_block_num, uintptr_t block_table, uintptr_t cache_seqlens,
+                         int pick_block_num, int init_block_num, int local_block_num,
+                         WorkerPool* backend) {
+  self.attn(reinterpret_cast<const ggml_fp16_t*>(q_in),
+            reinterpret_cast<ggml_fp16_t*>(output),
+            reinterpret_cast<float*>(attn_lse),
+            layer_idx, generate_token_idx, q_len, batch_size,
+            max_block_num, reinterpret_cast<int*>(block_table), reinterpret_cast<int*>(cache_seqlens),
+            pick_block_num, init_block_num, local_block_num, backend);
+}
+
+static void kvcache_attn_with_kvcache(KVCache& self, uintptr_t q_in, uintptr_t k_in, uintptr_t v_in,
+                                      uintptr_t output, uintptr_t attn_lse,
+                                      int layer_idx, int generate_token_idx, int q_len, int batch_size,
+                                      int max_block_num, uintptr_t block_table, uintptr_t cache_seqlens,
+                                      int topk, int local, WorkerPool* backend) {
+  self.attn_with_kvcache(reinterpret_cast<const ggml_fp16_t*>(q_in),
+                         reinterpret_cast<const ggml_fp16_t*>(k_in),
+                         reinterpret_cast<const ggml_fp16_t*>(v_in),
+                         reinterpret_cast<ggml_fp16_t*>(output),
+                         reinterpret_cast<float*>(attn_lse),
+                         layer_idx, generate_token_idx, q_len, batch_size,
+                         max_block_num, reinterpret_cast<int*>(block_table), reinterpret_cast<int*>(cache_seqlens),
+                         topk, local, backend);
+}
+
+static void kvcache_get_attn_sparsity(KVCache& self, uintptr_t q_in, uintptr_t attn_sparsity,
+                                      int layer_idx, int generate_token_idx, int q_len, int batch_size,
+                                      int max_block_num, uintptr_t block_table, uintptr_t cache_seqlens,
+                                      uintptr_t block_table_origin, uintptr_t cache_seqlens_origin,
+                                      int max_block_num_origin, int topk, int local,
+                                      WorkerPool* backend) {
+  self.get_attn_sparsity(reinterpret_cast<const ggml_fp16_t*>(q_in),
+                         reinterpret_cast<float*>(attn_sparsity),
+                         layer_idx, generate_token_idx, q_len, batch_size,
+                         max_block_num, reinterpret_cast<int*>(block_table), reinterpret_cast<int*>(cache_seqlens),
+                         reinterpret_cast<int*>(block_table_origin), reinterpret_cast<int*>(cache_seqlens_origin),
+                         max_block_num_origin, topk, local, backend);
+}
+
+static void kvcache_update_kvcache_fp16(KVCache& self, uintptr_t k_in, uintptr_t v_in,
+                                        int layer_id, uintptr_t block_table, int batch_size,
+                                        int max_block_num, uintptr_t cache_seqlens, int q_len,
+                                        WorkerPool* backend) {
+  self.update_kvcache_fp16(reinterpret_cast<const ggml_fp16_t*>(k_in),
+                           reinterpret_cast<const ggml_fp16_t*>(v_in),
+                           layer_id, reinterpret_cast<int*>(block_table), batch_size,
+                           max_block_num, reinterpret_cast<int*>(cache_seqlens), q_len, backend);
+}
+
+static void kvcache_get_and_update_kvcache_fp16(KVCache& self, uintptr_t k_in, uintptr_t v_in,
+                                                int layer_id, uintptr_t block_table, int batch_size,
+                                                int max_block_num, uintptr_t cache_seqlens, int q_len,
+                                                WorkerPool* backend) {
+  self.get_and_update_kvcache_fp16(reinterpret_cast<ggml_fp16_t*>(k_in),
+                                   reinterpret_cast<ggml_fp16_t*>(v_in),
+                                   layer_id, reinterpret_cast<int*>(block_table), batch_size,
+                                   max_block_num, reinterpret_cast<int*>(cache_seqlens), q_len, backend);
+}
+
 template <typename T>
 std::vector<std::vector<uintptr_t>> void_ptr_nested_to_uint(const std::vector<std::vector<T*>>& input) {
   std::vector<std::vector<uintptr_t>> result;
@@ -1181,7 +1251,44 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def(py::init<KVCacheConfig>())
       .def("get_cache_total_len", &KVCache::get_cache_total_len)
       .def("update_cache_total_len",
-           [](KVCache& kvcache, int cache_total_len) { kvcache.update_cache_total_len(cache_total_len); });
+           [](KVCache& kvcache, int cache_total_len) { kvcache.update_cache_total_len(cache_total_len); })
+      .def("calc_anchor_all_layers", &kvcache_calc_anchor_all_layers,
+           py::arg("block_table"), py::arg("cache_seqlens"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("backend"),
+           "Compute anchors for all layers")
+      .def("attn", &kvcache_attn,
+           py::arg("q_in"), py::arg("output"), py::arg("attn_lse"), py::arg("layer_idx"),
+           py::arg("generate_token_idx"), py::arg("q_len"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("block_table"), py::arg("cache_seqlens"),
+           py::arg("pick_block_num"), py::arg("init_block_num"), py::arg("local_block_num"),
+           py::arg("backend"),
+           "Attention with KV cache retrieval")
+      .def("attn_with_kvcache", &kvcache_attn_with_kvcache,
+           py::arg("q_in"), py::arg("k_in"), py::arg("v_in"), py::arg("output"), py::arg("attn_lse"),
+           py::arg("layer_idx"), py::arg("generate_token_idx"), py::arg("q_len"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("block_table"), py::arg("cache_seqlens"),
+           py::arg("topk"), py::arg("local"), py::arg("backend"),
+           "Attention with KV cache including key/value updates")
+      .def("get_attn_sparsity", &kvcache_get_attn_sparsity,
+           py::arg("q_in"), py::arg("attn_sparsity"), py::arg("layer_idx"),
+           py::arg("generate_token_idx"), py::arg("q_len"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("block_table"), py::arg("cache_seqlens"),
+           py::arg("block_table_origin"), py::arg("cache_seqlens_origin"),
+           py::arg("max_block_num_origin"), py::arg("topk"), py::arg("local"),
+           py::arg("backend"),
+           "Get attention sparsity for anchor-based retrieval")
+      .def("update_kvcache_fp16", &kvcache_update_kvcache_fp16,
+           py::arg("k_in"), py::arg("v_in"), py::arg("layer_id"),
+           py::arg("block_table"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("cache_seqlens"), py::arg("q_len"),
+           py::arg("backend"),
+           "Update KV cache with FP16 key/value tensors")
+      .def("get_and_update_kvcache_fp16", &kvcache_get_and_update_kvcache_fp16,
+           py::arg("k_in"), py::arg("v_in"), py::arg("layer_id"),
+           py::arg("block_table"), py::arg("batch_size"),
+           py::arg("max_block_num"), py::arg("cache_seqlens"), py::arg("q_len"),
+           py::arg("backend"),
+           "Get and update KV cache with FP16 key/value tensors");
 
   auto utils = m.def_submodule("utils");
 
