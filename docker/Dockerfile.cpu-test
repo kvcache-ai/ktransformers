@@ -52,7 +52,7 @@ RUN rm -rf build && mkdir -p build && cd build && \
         -DKTRANSFORMERS_CPU_USE_KML=OFF \
         -DLLAMA_AVX2=ON \
         -DLLAMA_FMA=ON \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=Debug \
     && make -j$(nproc)
 
 # Run benchmarks
