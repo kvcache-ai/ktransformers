@@ -174,12 +174,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Use header-only fmt to avoid needing to link libfmt (fix undefined symbol vprint)
 add_compile_definitions(FMT_HEADER_ONLY)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-if(NOT KTRANSFORMERS_USE_SYCL)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+    if(NOT KTRANSFORMERS_USE_SYCL)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+    endif()
 endif()
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenMP REQUIRED)
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
@@ -708,6 +710,18 @@ set(LLAMAFILE_AVX2_FILES
 )
 
 foreach(f ${LLAMAFILE_AVX2_FILES})
+    if(EXISTS "${f}")
+        set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
+    endif()
+endforeach()
+
+# Add AVX2/F16C/FMA flags to local source files that include AVX2 headers
+set(KT_AVX2_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ext_bindings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe-sft-tp.cpp
+)
+
+foreach(f ${KT_AVX2_FILES})
     if(EXISTS "${f}")
         set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
     endif()
