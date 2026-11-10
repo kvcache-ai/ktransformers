@@ -696,6 +696,23 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile SOURCE_DIR4)
+
+# Add AVX2/F16C flags to llamafile AVX2-specific source files
+set(LLAMAFILE_AVX2_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/iqk_mul_mat_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/iqk_mul_mat_amd_zen4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_mixmul_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_mixmul_amd_zen4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_sgemm_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_sgemm_amd_zen4.cpp
+)
+
+foreach(f ${LLAMAFILE_AVX2_FILES})
+    if(EXISTS "${f}")
+        set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
+    endif()
+endforeach()
+
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # message(STATUS "SOURCE_DIR3: ${SOURCE_DIR3}")
 
@@ -996,10 +1013,15 @@ endif()
 
 
 
-find_library(NUMA_LIBRARY NAMES numa)
-if(NUMA_LIBRARY)
-    message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
+if(APPLE)
+    # On macOS, NUMA is not available - build without NUMA support
+    message(STATUS "macOS detected - building without NUMA support")
 else()
-    message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
+    find_library(NUMA_LIBRARY NAMES numa)
+    if(NUMA_LIBRARY)
+        message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
+    else()
+        message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
+    endif()
 endif()
