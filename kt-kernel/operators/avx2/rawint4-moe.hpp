@@ -67,8 +67,9 @@ struct GemmKernelAVX2RawInt4 {
   };
 
   struct BufferB {
-    uint8_t* b = nullptr;
-    float* d = nullptr;
+    uint8_t* b = nullptr;        // Packed INT4 weights (original)
+    float* d = nullptr;          // K-group scales (float32)
+    float* predecoded = nullptr; // Pre-decoded FP32 weights [N, K] (dequantized with scales applied)
     int n = 0;
     int k = 0;
     int k_group_size = 0;
@@ -76,18 +77,22 @@ struct GemmKernelAVX2RawInt4 {
 
     BufferB() = default;
 
-    // Full allocation: b and d packed into a single aligned block.
+    // Full allocation: b, d, and predecoded packed into a single aligned block.
     BufferB(int n_, int k_, int k_group_size_, void* ptr)
         : b((uint8_t*)ptr), n(n_), k(k_), k_group_size(k_group_size_) {
       if (k_group_size <= 0 || k % k_group_size != 0 || k % 8 != 0) {
         throw std::runtime_error("RAWINT4 requires k aligned to group_size and 8");
       }
       k_group_count = k / k_group_size;
-      d = (float*)((uint8_t*)ptr + ((size_t)n * k / 2));
+      size_t weight_bytes = (size_t)n * k / 2;
+      size_t scale_bytes = (size_t)n * k_group_count * sizeof(float);
+      d = (float*)((uint8_t*)ptr + weight_bytes);
+      predecoded = (float*)((uint8_t*)ptr + weight_bytes + scale_bytes);
     }
 
     // Scale-only allocation: b points to external (mmap'd) weight data; d owns scale_ptr.
     // Used when weights are consumed directly from safetensor mmap without copying.
+    // Pre-decoded buffer is NOT allocated in this mode (weights stay in mmap).
     BufferB(int n_, int k_, int k_group_size_, void* scale_ptr, std::nullptr_t /*scale_only*/)
         : b(nullptr), n(n_), k(k_), k_group_size(k_group_size_) {
       if (k_group_size <= 0 || k % k_group_size != 0 || k % 8 != 0) {
@@ -95,11 +100,13 @@ struct GemmKernelAVX2RawInt4 {
       }
       k_group_count = k / k_group_size;
       d = (float*)scale_ptr;
+      predecoded = nullptr; // No pre-decoded buffer in scale-only mode
     }
 
-    // Full size: packed INT4 weights + float32 scales.
+    // Full size: packed INT4 weights + float32 scales + pre-decoded FP32 weights.
     static size_t required_size(size_t n, size_t k, int k_group_size) {
-      return n * k / 2 + n * (k / k_group_size) * sizeof(float);
+      size_t k_group_count = k / k_group_size;
+      return n * k / 2 + n * k_group_count * sizeof(float) + n * k * sizeof(float);
     }
 
     // Scale-only size: only float32 scales (b will point to external weight data).
@@ -113,6 +120,37 @@ struct GemmKernelAVX2RawInt4 {
       const size_t row_bytes = (size_t)k / 2;
       std::memcpy(b + (size_t)n_start * row_bytes, proj + (size_t)n_start * row_bytes,
                   (size_t)(n_end - n_start) * row_bytes);
+
+      // Pre-decode INT4 weights to FP32 with scales applied for this thread's N range
+      // This runs once during weight loading, avoiding decode in every GEMM
+      if (predecoded != nullptr) {
+        for (int ni = n_start; ni < n_end; ni++) {
+          const uint8_t* src_row = proj + (size_t)ni * row_bytes;
+          float* dst_row = predecoded + (size_t)ni * k;
+          const float* scales_row = d + (size_t)ni * k_group_count;
+
+          int ki = 0;
+          for (int g = 0; g < k_group_count; g++) {
+            float scale = scales_row[g];
+            int k_base = g * k_group_size;
+            int group_end = k_base + k_group_size;
+
+            for (; ki + 8 <= group_end; ki += 8) {
+              uint32_t packed;
+              std::memcpy(&packed, src_row + ki / 2, sizeof(uint32_t));
+              __m256 dec = rawint4_dequant_8x4bit_unscaled(packed);
+              // Apply scale during pre-decode
+              dec = _mm256_mul_ps(dec, _mm256_set1_ps(scale));
+              _mm256_storeu_ps(dst_row + ki, dec);
+            }
+            for (; ki < group_end; ki++) {
+              const uint8_t packed = src_row[ki / 2];
+              const int nibble = (ki & 1) ? (packed >> 4) : (packed & 0x0F);
+              dst_row[ki] = (float)(nibble - 8) * scale;
+            }
+          }
+        }
+      }
     }
   };
 
@@ -153,9 +191,14 @@ static inline void gemm_rawint4(int m, int n, int k, GemmKernelAVX2RawInt4::Buff
   const int group_count = b.k_group_count;
   const size_t row_bytes = (size_t)k / 2;
 
+  // Pre-decoded weights should be available (populated in from_raw_mat during load_weights)
+  // Fallback to on-the-fly decode only if predecoded is null (scale-only mode)
+  const bool use_predecoded = b.predecoded != nullptr;
+
   for (int ni = n_start; ni < n_end; ni++) {
     const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
     const float* b_scales = b.d + (size_t)ni * group_count;
+    const float* b_predecoded_row = use_predecoded ? b.predecoded + (size_t)ni * k : nullptr;
 
     // Prefetch the head of the next B row while we chew through this one.
     // Streams the decoupled weight pages for large N without blocking.
@@ -168,56 +211,91 @@ static inline void gemm_rawint4(int m, int n, int k, GemmKernelAVX2RawInt4::Buff
     for (int mi = 0; mi < m; mi++) {
       const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
 
-      // Running vector total: each group folds in via a single FMA with its
-      // scale broadcast, so we only do one horizontal reduction per (mi, ni).
-      __m256 total_acc = _mm256_setzero_ps();
-      float scalar_tail = 0.0f;
-
-      for (int g = 0; g < group_count; g++) {
-        const float scale = b_scales[g];
-        const int k_base = g * group_size;
-
+      if (use_predecoded) {
+        // Fast path: use pre-decoded FP32 weights (scales already applied)
+        // Simple dot product: sum(A[m,k] * predecoded[n,k])
+        float sum = 0.0f;
         __m256 acc1 = _mm256_setzero_ps();
         __m256 acc2 = _mm256_setzero_ps();
         __m256 acc3 = _mm256_setzero_ps();
         __m256 acc4 = _mm256_setzero_ps();
 
         int ki = 0;
-        for (; ki + 32 <= group_size; ki += 32) {
-          uint32_t p0, p1, p2, p3;
-          std::memcpy(&p0, b_row + (k_base + ki) / 2, sizeof(uint32_t));
-          std::memcpy(&p1, b_row + (k_base + ki + 8) / 2, sizeof(uint32_t));
-          std::memcpy(&p2, b_row + (k_base + ki + 16) / 2, sizeof(uint32_t));
-          std::memcpy(&p3, b_row + (k_base + ki + 24) / 2, sizeof(uint32_t));
-          acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki), rawint4_dequant_8x4bit_unscaled(p0), acc1);
-          acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 8), rawint4_dequant_8x4bit_unscaled(p1), acc2);
-          acc3 =
-              _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 16), rawint4_dequant_8x4bit_unscaled(p2), acc3);
-          acc4 =
-              _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 24), rawint4_dequant_8x4bit_unscaled(p3), acc4);
+        for (; ki + 32 <= k; ki += 32) {
+          acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki),
+                                  _mm256_loadu_ps(b_predecoded_row + ki), acc1);
+          acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 8),
+                                  _mm256_loadu_ps(b_predecoded_row + ki + 8), acc2);
+          acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 16),
+                                  _mm256_loadu_ps(b_predecoded_row + ki + 16), acc3);
+          acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 24),
+                                  _mm256_loadu_ps(b_predecoded_row + ki + 24), acc4);
         }
-        __m256 g_acc = _mm256_add_ps(_mm256_add_ps(acc1, acc3), _mm256_add_ps(acc2, acc4));
-
-        for (; ki + 8 <= group_size; ki += 8) {
-          uint32_t packed;
-          std::memcpy(&packed, b_row + (k_base + ki) / 2, sizeof(uint32_t));
-          g_acc =
-              _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki), rawint4_dequant_8x4bit_unscaled(packed), g_acc);
+        for (; ki + 8 <= k; ki += 8) {
+          acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki),
+                                  _mm256_loadu_ps(b_predecoded_row + ki), acc1);
         }
 
-        // Fold this group's unscaled accumulator into the running total with
-        // one scale-broadcast FMA — saves (group_count - 1) hsum reductions
-        // compared to reducing per group.
-        total_acc = _mm256_fmadd_ps(g_acc, _mm256_broadcast_ss(&scale), total_acc);
+        float block_sum = hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc1, acc3),
+                                                   _mm256_add_ps(acc2, acc4)));
 
-        for (; ki < group_size; ki++) {
-          const uint8_t packed = b_row[(k_base + ki) / 2];
-          const int nibble = ((k_base + ki) & 1) ? (packed >> 4) : (packed & 0x0F);
-          scalar_tail += GGML_BF16_TO_FP32(a_row[k_base + ki]) * (float)(nibble - 8) * scale;
+        // Scalar tail
+        for (; ki < k; ki++) {
+          block_sum += GGML_BF16_TO_FP32(a_row[ki]) * b_predecoded_row[ki];
         }
+
+        c.data[(size_t)mi * n + ni] = block_sum;
+      } else {
+        // Fallback: original on-the-fly decode (scale-only mode)
+        __m256 total_acc = _mm256_setzero_ps();
+        float scalar_tail = 0.0f;
+
+        for (int g = 0; g < group_count; g++) {
+          const float scale = b_scales[g];
+          const int k_base = g * group_size;
+
+          __m256 acc1 = _mm256_setzero_ps();
+          __m256 acc2 = _mm256_setzero_ps();
+          __m256 acc3 = _mm256_setzero_ps();
+          __m256 acc4 = _mm256_setzero_ps();
+
+          int ki = 0;
+          for (; ki + 32 <= group_size; ki += 32) {
+            uint32_t p0, p1, p2, p3;
+            std::memcpy(&p0, b_row + (k_base + ki) / 2, sizeof(uint32_t));
+            std::memcpy(&p1, b_row + (k_base + ki + 8) / 2, sizeof(uint32_t));
+            std::memcpy(&p2, b_row + (k_base + ki + 16) / 2, sizeof(uint32_t));
+            std::memcpy(&p3, b_row + (k_base + ki + 24) / 2, sizeof(uint32_t));
+            acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki), rawint4_dequant_8x4bit_unscaled(p0), acc1);
+            acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 8), rawint4_dequant_8x4bit_unscaled(p1), acc2);
+            acc3 =
+                _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 16), rawint4_dequant_8x4bit_unscaled(p2), acc3);
+            acc4 =
+                _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki + 24), rawint4_dequant_8x4bit_unscaled(p3), acc4);
+          }
+          __m256 g_acc = _mm256_add_ps(_mm256_add_ps(acc1, acc3), _mm256_add_ps(acc2, acc4));
+
+          for (; ki + 8 <= group_size; ki += 8) {
+            uint32_t packed;
+            std::memcpy(&packed, b_row + (k_base + ki) / 2, sizeof(uint32_t));
+            g_acc =
+                _mm256_fmadd_ps(load_bf16_to_fp32(a_row + k_base + ki), rawint4_dequant_8x4bit_unscaled(packed), g_acc);
+          }
+
+          // Fold this group's unscaled accumulator into the running total with
+          // one scale-broadcast FMA — saves (group_count - 1) hsum reductions
+          // compared to reducing per group.
+          total_acc = _mm256_fmadd_ps(g_acc, _mm256_broadcast_ss(&scale), total_acc);
+
+          for (; ki < group_size; ki++) {
+            const uint8_t packed = b_row[(k_base + ki) / 2];
+            const int nibble = ((k_base + ki) & 1) ? (packed >> 4) : (packed & 0x0F);
+            scalar_tail += GGML_BF16_TO_FP32(a_row[k_base + ki]) * (float)(nibble - 8) * scale;
+          }
+        }
+
+        c.data[(size_t)mi * n + ni] = hsum_avx2(total_acc) + scalar_tail;
       }
-
-      c.data[(size_t)mi * n + ni] = hsum_avx2(total_acc) + scalar_tail;
     }
   }
 }
