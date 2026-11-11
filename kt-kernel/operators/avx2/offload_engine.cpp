@@ -44,8 +44,8 @@ static void decode_fp8_weight_matrix(
         size_t col_end = std::min(col_start + block_size, cols);
         size_t block_col_size = col_end - col_start;
 
-        // Scale for this block
-        float scale = scales[br * n_block_cols + bc];
+        // Scale is NOT applied here — gemm_fp8_with_predecoded applies it once
+        // at sum += block_sum * scale. Applying it here too would double-scale.
 
         const uint8_t* src_block_row = src_row + col_start;
         float* dst_block_row = dst_row + col_start;
@@ -53,11 +53,10 @@ static void decode_fp8_weight_matrix(
         size_t c = 0;
         for (; c + 8 <= block_col_size; c += 8) {
           __m256 dec = fp8x8_to_fp32x8(src_block_row + c);
-          dec = _mm256_mul_ps(dec, _mm256_set1_ps(scale));
           _mm256_storeu_ps(dst_block_row + c, dec);
         }
         for (; c < block_col_size; ++c) {
-          dst_block_row[c] = fp8_to_fp32_scalar(src_block_row[c]) * scale;
+          dst_block_row[c] = fp8_to_fp32_scalar(src_block_row[c]);
         }
       }
     }
@@ -278,9 +277,9 @@ void OffloadEngine::decode_expert_to_cache(size_t logical_expert_id, ExpertCache
   const float* down_scale_src;
 
   if (is_rawint4) {
-    // RAWINT4: K-group scales [rows, cols/k_group_size]
-    const size_t gate_up_scale_elems = intermediate_size * div_up(hidden_size, k_group_size);
-    const size_t down_scale_elems = hidden_size * div_up(intermediate_size, k_group_size);
+    // RAWINT4: K-group scales [div_up(rows, k_group_size), div_up(cols, k_group_size)]
+    const size_t gate_up_scale_elems = div_up(intermediate_size, k_group_size) * div_up(hidden_size, k_group_size);
+    const size_t down_scale_elems = div_up(hidden_size, k_group_size) * div_up(intermediate_size, k_group_size);
     gate_scale_src = config_.gate_scale + physical_expert * gate_up_scale_elems;
     up_scale_src = config_.up_scale + physical_expert * gate_up_scale_elems;
     down_scale_src = config_.down_scale + physical_expert * down_scale_elems;

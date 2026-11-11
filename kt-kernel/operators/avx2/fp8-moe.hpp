@@ -266,7 +266,6 @@ static inline void gemm_fp8(
 
 // ============================================================================
 // AVX2 FP8 GEMM with external pre-decoded weights
-// Used by offloaded MoE where pre-decoded weights come from OffloadEngine
 // ============================================================================
 
 static inline void gemm_fp8_with_predecoded(
