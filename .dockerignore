@@ -29,3 +29,7 @@ kt-kernel/bench/venv
 third_party/custom_flashinfer
 third_party/sglang
 third_party/llama.cpp
+# Core dumps from crashes — do not include in Docker build context
+core
+kt-kernel/bench/core
+*.core
