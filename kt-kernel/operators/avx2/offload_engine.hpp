@@ -37,6 +37,7 @@ struct OffloadConfig {
   size_t intermediate_size = 0;
   int block_size = 128;        // For FP8 block-wise quantization
   int k_group_size = 32;       // For RAWINT4 K-group scales
+  bool is_rawint4 = false;     // Set to true for RAWINT4 variant
 
   // Offloading policy
   size_t max_cached_experts = 4;      // Max experts to keep pre-decoded in cache

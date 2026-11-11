@@ -78,7 +78,7 @@ static void decode_rawint4_weight_matrix(
     const uint8_t* src, const float* scales,
     float* dst, size_t rows, size_t cols, int k_group_size) {
   // src is packed INT4 [rows, cols/2] (row-major)
-  // scales is [rows, cols/k_group_size] (row-major, float32)
+  // scales is [div_up(rows, k_group_size), div_up(cols, k_group_size)] (row-major block-wise, float32)
   // dst is row-major [rows, cols] (float32, dequantized with scales applied)
 
   size_t k_group_count = cols / k_group_size;
@@ -86,7 +86,9 @@ static void decode_rawint4_weight_matrix(
 
   for (size_t r = 0; r < rows; ++r) {
     const uint8_t* src_row = src + r * row_bytes;
-    const float* scales_row = scales + r * k_group_count;
+    // Scales are per K-group block, not per row. Rows within the same K-group
+    // share the same scale row, so index by r / k_group_size.
+    const float* scales_row = scales + (r / k_group_size) * k_group_count;
     float* dst_row = dst + r * cols;
 
     int c = 0;

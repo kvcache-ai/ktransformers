@@ -3,6 +3,7 @@
 Reference comparison test for AVX2RAWINT4_MOE_OFFLOAD.
 Compares C++ offload MoE output against pure PyTorch INT4 dequant + matmul.
 RAWINT4: 4-bit packed weights, per K-group scales, value = (nibble - 8) * scale.
+Scales are block-wise: [div_up(rows, k_group_size), div_up(cols, k_group_size)].
 """
 import os, sys
 import torch
@@ -14,57 +15,75 @@ CPUINFER_PARAM = 304
 CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
 
+def div_up(a, b):
+    return (a + b - 1) // b
+
+
 def rawint4_quantize(tensor, k_group_size=32):
     """Quantize BF16/FP32 tensor to RAWINT4 with per K-group scales.
     Stores 2 nibbles per byte. Value = (nibble - 8) * scale.
+    Scales are block-wise: [div_up(rows, k_group_size), div_up(cols, k_group_size)].
     """
     rows, cols = tensor.shape
-    k_groups = cols // k_group_size
+    k_group_rows = div_up(rows, k_group_size)
+    k_group_cols = div_up(cols, k_group_size)
     assert cols % k_group_size == 0, f"cols {cols} not divisible by k_group_size {k_group_size}"
 
     packed = torch.zeros((rows, cols // 2), dtype=torch.uint8)
-    scales = torch.zeros((rows, k_groups), dtype=torch.float32)
+    scales = torch.zeros((k_group_rows, k_group_cols), dtype=torch.float32)
 
-    for r in range(rows):
-        for g in range(k_groups):
-            k_start = g * k_group_size
-            k_end = k_start + k_group_size
-            block = tensor[r, k_start:k_end].to(torch.float32)
+    for rb in range(k_group_rows):
+        row_start = rb * k_group_size
+        row_end = min(row_start + k_group_size, rows)
+        for cg in range(k_group_cols):
+            col_start = cg * k_group_size
+            col_end = min(col_start + k_group_size, cols)
+            block = tensor[row_start:row_end, col_start:col_end].to(torch.float32)
             abs_max = block.abs().max().item()
-            scale = abs_max / 7.0 if abs_max > 0 else 1.0  # max |nibble-8| = 8, but use 7 for headroom
-            scales[r, g] = scale
+            scale = abs_max / 7.0 if abs_max > 0 else 1.0
+            scales[rb, cg] = scale
 
             # Quantize: nibble = round(v / scale) + 8, clamped to [0, 15]
             quantized = ((block / scale).round() + 8).clamp(0, 15).to(torch.uint8)
 
-            # Pack two nibbles per byte
-            for c_in_group in range(0, k_group_size, 2):
-                c = k_start + c_in_group
-                nibble_lo = quantized[c_in_group].item()
-                nibble_hi = quantized[c_in_group + 1].item() if c_in_group + 1 < k_group_size else 0
-                packed[r, c // 2] = (nibble_hi << 4) | nibble_lo
+            # Pack two nibbles per byte, per row
+            for r_in_block in range(row_end - row_start):
+                r = row_start + r_in_block
+                for c_in_group in range(0, col_end - col_start, 2):
+                    c = col_start + c_in_group
+                    nibble_lo = quantized[r_in_block, c_in_group].item()
+                    nibble_hi = quantized[r_in_block, c_in_group + 1].item() if c_in_group + 1 < col_end - col_start else 0
+                    packed[r, c // 2] = (nibble_hi << 4) | nibble_lo
 
     return packed.contiguous(), scales.contiguous()
 
 
 def rawint4_dequant(packed, scales, k_group_size=32):
-    """Dequantize RAWINT4 weights to FP32."""
+    """Dequantize RAWINT4 weights to FP32.
+    Scales are block-wise: [div_up(rows, k_group_size), div_up(cols, k_group_size)].
+    """
     rows, packed_cols = packed.shape
     cols = packed_cols * 2
-    k_groups = cols // k_group_size
+    k_group_rows = div_up(rows, k_group_size)
+    k_group_cols = div_up(cols, k_group_size)
     out = torch.zeros((rows, cols), dtype=torch.float32)
 
-    for r in range(rows):
-        for g in range(k_groups):
-            scale = scales[r, g].item()
-            k_start = g * k_group_size
-            for c_in_group in range(k_group_size):
-                c = k_start + c_in_group
-                byte_idx = c // 2
-                is_lo = (c % 2 == 0)
-                byte_val = packed[r, byte_idx].item()
-                nibble = byte_val & 0x0F if is_lo else (byte_val >> 4) & 0x0F
-                out[r, c] = (nibble - 8) * scale
+    for rb in range(k_group_rows):
+        row_start = rb * k_group_size
+        row_end = min(row_start + k_group_size, rows)
+        for cg in range(k_group_cols):
+            scale = scales[rb, cg].item()
+            col_start = cg * k_group_size
+            col_end = min(col_start + k_group_size, cols)
+            for r_in_block in range(row_end - row_start):
+                r = row_start + r_in_block
+                for c_in_group in range(col_end - col_start):
+                    c = col_start + c_in_group
+                    byte_idx = c // 2
+                    is_lo = (c % 2 == 0)
+                    byte_val = packed[r, byte_idx].item()
+                    nibble = byte_val & 0x0F if is_lo else (byte_val >> 4) & 0x0F
+                    out[r, c] = (nibble - 8) * scale
     return out
 
 
