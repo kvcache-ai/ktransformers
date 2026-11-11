@@ -63,6 +63,7 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__)
 #include "operators/avx2/bf16-moe.hpp"
 #include "operators/avx2/fp8-moe.hpp"
+#include "operators/avx2/fp8_moe_offload.hpp"
 #include "operators/avx2/gptq_int4-moe.hpp"
 #include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #include "operators/avx2/gptq_int4_avxvnni_packed-moe.hpp"
@@ -74,6 +75,7 @@ static const bool _is_plain_ = false;
 #endif
 #include "operators/avx2/mxfp8-moe.hpp"
 #include "operators/avx2/rawint4-moe.hpp"
+#include "operators/avx2/rawint4_moe_offload.hpp"
 #include "operators/avx2/rawint4_avxvnni-moe.hpp"
 #endif
 #if defined(USE_SYCL)
@@ -1082,8 +1084,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__x86_64__)
   bind_moe_module<AVX2_BF16_MOE_TP<avx2::GemmKernelAVX2BF16>>(moe_module, "AVX2BF16_MOE");
   bind_moe_module<AVX2_FP8_MOE_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE");
+  bind_moe_module<avx2::AVX2_FP8_MOE_OFFLOAD_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE_OFFLOAD");
   bind_moe_module<AVX2_GPTQ_INT4_MOE_TP<avx2::GemmKernelAVX2GPTQInt4>>(moe_module, "AVX2GPTQInt4_MOE");
   bind_moe_module<AVX2_RAW_INT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module, "AVX2RawInt4_MOE");
+  bind_moe_module<avx2::AVX2_RAW_INT4_MOE_OFFLOAD_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module, "AVX2RawInt4_MOE_OFFLOAD");
   bind_moe_module<AVX2_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "AVX2MXFP4_MOE");
 #if !defined(USE_AMX_AVX_KERNEL)
   // AVX2 tier of the MXFP4 routed-expert LoRA SFT (same Python name as the AMX build)

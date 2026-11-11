@@ -719,6 +719,7 @@ endforeach()
 set(KT_AVX2_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/ext_bindings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe-sft-tp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/operators/avx2/offload_engine.cpp
 )
 
 foreach(f ${KT_AVX2_FILES})
@@ -726,6 +727,9 @@ foreach(f ${KT_AVX2_FILES})
         set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
     endif()
 endforeach()
+
+# AVX2 operators directory (for offload_engine.cpp and other AVX2-specific .cpp files)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/avx2 SOURCE_DIR_AVX2)
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # message(STATUS "SOURCE_DIR3: ${SOURCE_DIR3}")
@@ -757,7 +761,7 @@ message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 
 
-set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
+set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7} ${SOURCE_DIR_AVX2})
 
 # Gradient clipping must propagate NaN/Inf even though the other KT kernels use fast-math.
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/bf16_sumsq.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")

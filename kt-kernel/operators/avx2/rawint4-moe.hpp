@@ -50,9 +50,18 @@ struct GemmKernelAVX2RawInt4 {
     size_t k = 0;
 
     BufferA() = default;
-    BufferA(size_t m, size_t k_, int, void* ptr) : data((ggml_bf16_t*)ptr), max_m(m), k(k_) {}
+    
+    // 3-argument constructor (for base class template / offload version)
+    BufferA(size_t m, size_t k_, void* ptr) : data((ggml_bf16_t*)ptr), max_m(m), k(k_) {}
+    
+    // 4-argument constructor (for non-offload RAWINT4 version)
+    BufferA(size_t m, size_t k_, int group_size, void* ptr) : data((ggml_bf16_t*)ptr), max_m(m), k(k_) {}
 
-    static size_t required_size(size_t m, size_t k, int) { return m * k * sizeof(ggml_bf16_t); }
+    // 2-argument required_size (for base class template / offload version)
+    static size_t required_size(size_t m, size_t k) { return m * k * sizeof(ggml_bf16_t); }
+    
+    // 3-argument required_size (for non-offload RAWINT4 version)
+    static size_t required_size(size_t m, size_t k, int group_size) { return m * k * sizeof(ggml_bf16_t); }
 
     void set_data(void* ptr) { data = (ggml_bf16_t*)ptr; }
 
@@ -296,6 +305,71 @@ static inline void gemm_rawint4(int m, int n, int k, GemmKernelAVX2RawInt4::Buff
 
         c.data[(size_t)mi * n + ni] = hsum_avx2(total_acc) + scalar_tail;
       }
+    }
+  }
+}
+
+// ============================================================================
+// GEMM with pre-decoded weights (for offload engine)
+// Uses pre-decoded FP32 weights [N, K] where scales are already applied
+// ============================================================================
+static inline void gemm_rawint4_with_predecoded(int m, int n, int k, GemmKernelAVX2RawInt4::BufferA& a,
+                                                GemmKernelAVX2RawInt4::BufferB& b, GemmKernelAVX2RawInt4::BufferC& c, int ith,
+                                                int nth,
+                                                const float* predecoded_weights, const float* scales) {
+  // predecoded_weights: [n, k] - already dequantized with scales applied
+  // scales: not used (already applied in predecoded), kept for API compatibility
+  (void)scales;
+  (void)b;  // Not used in predecoded path
+
+  auto [n_start, n_end] = split_range(n, ith, nth);
+
+  for (int ni = n_start; ni < n_end; ni++) {
+    const float* b_predecoded_row = predecoded_weights + (size_t)ni * k;
+
+    // Prefetch the head of the next B row
+    if (ni + 1 < n_end) {
+      const float* b_next = predecoded_weights + (size_t)(ni + 1) * k;
+      _mm_prefetch((const char*)b_next, _MM_HINT_T0);
+      _mm_prefetch((const char*)(b_next + 64), _MM_HINT_T0);
+    }
+
+    for (int mi = 0; mi < m; mi++) {
+      const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
+
+      // Fast path: use pre-decoded FP32 weights (scales already applied)
+      // Simple dot product: sum(A[m,k] * predecoded[n,k])
+      float sum = 0.0f;
+      __m256 acc1 = _mm256_setzero_ps();
+      __m256 acc2 = _mm256_setzero_ps();
+      __m256 acc3 = _mm256_setzero_ps();
+      __m256 acc4 = _mm256_setzero_ps();
+
+      int ki = 0;
+      for (; ki + 32 <= k; ki += 32) {
+        acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki),
+                                _mm256_loadu_ps(b_predecoded_row + ki), acc1);
+        acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 8),
+                                _mm256_loadu_ps(b_predecoded_row + ki + 8), acc2);
+        acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 16),
+                                _mm256_loadu_ps(b_predecoded_row + ki + 16), acc3);
+        acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki + 24),
+                                _mm256_loadu_ps(b_predecoded_row + ki + 24), acc4);
+      }
+      for (; ki + 8 <= k; ki += 8) {
+        acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + ki),
+                                _mm256_loadu_ps(b_predecoded_row + ki), acc1);
+      }
+
+      float block_sum = hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc1, acc3),
+                                                 _mm256_add_ps(acc2, acc4)));
+
+      // Scalar tail
+      for (; ki < k; ki++) {
+        block_sum += GGML_BF16_TO_FP32(a_row[ki]) * b_predecoded_row[ki];
+      }
+
+      c.data[(size_t)mi * n + ni] = block_sum;
     }
   }
 }
