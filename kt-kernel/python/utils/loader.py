@@ -13,6 +13,50 @@ import numpy as np
 import torch
 from enum import IntEnum
 from safetensors import safe_open
+
+_LOAD_THREADS = int(os.environ.get("KT_LOAD_THREADS", "8") or 1)
+_NOCOPY = os.environ.get("KT_LOAD_NOCOPY", "1") == "1"
+_FILE_MAP_CACHE = {}
+_FULL_HEADER_CACHE = {}
+_ST_DTYPES = {
+    "F32": torch.float32,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F64": torch.float64,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "BOOL": torch.bool,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+}
+
+
+def _st_full_header(path):
+    """{key: (dtype str, shape, abs_offset, nbytes)} of one safetensors file."""
+    h = _FULL_HEADER_CACHE.get(path)
+    if h is None:
+        import json
+        import struct
+
+        with open(path, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            meta = json.loads(fh.read(n))
+        h = {}
+        for k, v in meta.items():
+            if k == "__metadata__":
+                continue
+            b, e = v["data_offsets"]
+            h[k] = (v["dtype"], tuple(v["shape"]), 8 + n + b, e - b)
+        _FULL_HEADER_CACHE[path] = h
+    return h
+
+
+import threading as _threading
+
+_HANDLE_LOCK = _threading.Lock()
 from gguf.gguf_reader import GGUFReader
 
 
@@ -158,9 +202,19 @@ class SafeTensorLoader:
         else:
             folder_path = file_path
         self.file_handle_map = {}
+        self.file_path_map = {}
         self.tensor_file_map = {}
         self.tensor_type_map = {}
         self.tensor_device_map = {}
+
+        # the walk and the key listing of every shard, once per folder: a
+        # loader re-created after a layer (handles dropped to free the mmaps)
+        # takes the maps from here and opens the handles lazily in load_tensor
+        self._mmaps = {}
+        cached = _FILE_MAP_CACHE.get(folder_path)
+        if cached is not None:
+            self.file_path_map, self.tensor_file_map = cached
+            return
 
         found_safetensor = False
         for root, _, files in os.walk(folder_path):
@@ -169,6 +223,7 @@ class SafeTensorLoader:
                 if file.endswith(".safetensors"):
                     found_safetensor = True
                     file_path = os.path.join(root, file)
+                    self.file_path_map[file] = file_path
                     if file not in self.file_handle_map:
                         try:
                             handle = safe_open(file_path, framework="pt")
@@ -188,14 +243,71 @@ class SafeTensorLoader:
 
         if not found_safetensor:
             raise FileNotFoundError(f"No Safetensor files found in {folder_path}")
+        _FILE_MAP_CACHE[folder_path] = (self.file_path_map, self.tensor_file_map)
+
+    def _handle(self, file: str):
+        f = self.file_handle_map.get(file)
+        if f is None:
+            path = self.file_path_map.get(file)
+            if path is None:
+                raise FileNotFoundError(f"File {file} not found in Safetensor files")
+            with _HANDLE_LOCK:
+                f = self.file_handle_map.get(file)
+                if f is None:
+                    f = safe_open(path, framework="pt")
+                    self.file_handle_map[file] = f
+        return f
+
+    def _for_experts(self, expert_count: int, fn) -> None:
+        """fn(exp_id) for every expert, on KT_LOAD_THREADS threads (the
+        handles are read-only mmaps; each expert fills its own list slot)."""
+        if _LOAD_THREADS > 1 and expert_count > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(min(_LOAD_THREADS, expert_count)) as ex:
+                list(ex.map(fn, range(expert_count)))
+        else:
+            for exp_id in range(expert_count):
+                fn(exp_id)
+
+    def _mmap_view(self, path: str, key: str):
+        """A tensor over the file's mmap, or None when the dtype is not one of
+        the plain ones (the caller falls back to get_tensor)."""
+        ent = _st_full_header(path).get(key)
+        if ent is None:
+            return None
+        dtype, shape, off, n = ent
+        tdt = _ST_DTYPES.get(dtype)
+        if tdt is None:
+            return None
+        mm = self._mmaps.get(path)
+        if mm is None:
+            with _HANDLE_LOCK:
+                mm = self._mmaps.get(path)
+                if mm is None:
+                    import mmap
+
+                    fd = os.open(path, os.O_RDONLY)
+                    try:
+                        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+                    finally:
+                        os.close(fd)
+                    self._mmaps[path] = mm
+        if n == 0:
+            return torch.empty(shape, dtype=tdt)
+        t = torch.frombuffer(mm, dtype=torch.uint8, count=n, offset=off)
+        return t.view(tdt).reshape(shape)
 
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
             raise KeyError(f"Key {key} not found in Safetensor files")
         file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+        if _NOCOPY and device == "cpu":
+            path = self.file_path_map.get(file)
+            t = self._mmap_view(path, key) if path else None
+            if t is not None:
+                return t
+        f = self._handle(file)
         tensor = f.get_tensor(key)
         return tensor.to(device)
 
@@ -208,9 +320,10 @@ class SafeTensorLoader:
         will reclaim the page cache. gc.collect() is called here to trigger
         immediate reclamation rather than waiting for the next GC cycle.
         """
-        import gc
         self.file_handle_map.clear()
-        gc.collect()
+        # the mmap views the loader handed out die with the wrapper's lists
+        # (deleted after the C++ load); the mapping goes with the last view
+        getattr(self, "_mmaps", {}).clear()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """
@@ -464,18 +577,6 @@ class FP8SafeTensorLoader(SafeTensorLoader):
         _, gate, up, down = self.MOE_FORMATS[self._detected_format]
         return gate, up, down
 
-    def load_tensor(self, key: str, device: str = "cpu"):
-        if key not in self.tensor_file_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
-        tensor = f.get_tensor(key)
-        if device == "cpu":
-            return tensor
-        return tensor.to(device)
-
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load FP8 expert weights and their scale tensors.
 
@@ -505,7 +606,7 @@ class FP8SafeTensorLoader(SafeTensorLoader):
         up_scales = [None] * expert_count
         down_scales = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             gate_w_key = f"{experts_prefix}.{exp_id}.{gate_name}.weight"
             up_w_key = f"{experts_prefix}.{exp_id}.{up_name}.weight"
             down_w_key = f"{experts_prefix}.{exp_id}.{down_name}.weight"
@@ -533,6 +634,8 @@ class FP8SafeTensorLoader(SafeTensorLoader):
             gate_scales[exp_id] = gate_scale.contiguous()
             up_scales[exp_id] = up_scale.contiguous()
             down_scales[exp_id] = down_scale.contiguous()
+
+        self._for_experts(expert_count, _load_one)
 
         return {
             "gate": gate_weights,
@@ -616,18 +719,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         _, gate, up, down = self.MOE_FORMATS[self._detected_format]
         return gate, up, down
 
-    def load_tensor(self, key: str, device: str = "cpu"):
-        if key not in self.tensor_file_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        file = self.tensor_file_map[key]
-        f = self.file_handle_map.get(file)
-        if f is None:
-            raise FileNotFoundError(f"File {file} not found in Safetensor files")
-        tensor = f.get_tensor(key)
-        if device == "cpu":
-            return tensor
-        return tensor.to(device)
-
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load BF16 expert weights (no scales needed)."""
         if self._detected_format == "packed":
@@ -653,7 +744,7 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         up_weights = [None] * expert_count
         down_weights = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             gate_w_key = f"{experts_prefix}.{exp_id}.{gate_name}.weight"
             up_w_key = f"{experts_prefix}.{exp_id}.{up_name}.weight"
             down_w_key = f"{experts_prefix}.{exp_id}.{down_name}.weight"
@@ -661,6 +752,8 @@ class BF16SafeTensorLoader(SafeTensorLoader):
             gate_weights[exp_id] = self.load_tensor(gate_w_key, device).contiguous()
             up_weights[exp_id] = self.load_tensor(up_w_key, device).contiguous()
             down_weights[exp_id] = self.load_tensor(down_w_key, device).contiguous()
+
+        self._for_experts(expert_count, _load_one)
 
         return {
             "gate": gate_weights,
@@ -1175,7 +1268,7 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
         up_scales = [None] * expert_count
         down_scales = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             gate_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device).contiguous()
             up_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.qweight", device).contiguous()
             down_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.qweight", device).contiguous()
@@ -1183,6 +1276,8 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
             gate_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
             up_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
             down_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
+
+        self._for_experts(expert_count, _load_one)
 
         print(f"[GPTQSafeTensorLoader] Loaded {expert_count} experts from {experts_prefix}")
         return {
@@ -1277,7 +1372,7 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
         up_scales = [None] * expert_count
         down_scales = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             for proj, dst in (
                 (gate_name, gate_weights),
                 (up_name, up_weights),
@@ -1297,6 +1392,8 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
                 dst[exp_id] = self._ue8m0_to_bf16(
                     s, reject_non_finite=reject_non_finite_scales
                 )
+
+        self._for_experts(expert_count, _load_one)
 
         print(f"[MXFP4SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
         return {
@@ -1376,7 +1473,7 @@ class NVFP4SafeTensorLoader(SafeTensorLoader):
         up_scales = [None] * expert_count
         down_scales = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             for proj, wdst, sdst in (
                 (gate_name, gate_weights, gate_scales),
                 (up_name, up_weights, up_scales),
@@ -1390,6 +1487,8 @@ class NVFP4SafeTensorLoader(SafeTensorLoader):
                 bs = self.load_tensor(f"{prefix}.{exp_id}.{proj}.weight_scale", device)
                 gs = self.load_tensor(f"{prefix}.{exp_id}.{proj}.weight_scale_2", device)
                 sdst[exp_id] = self._fold_scales_to_bf16(bs, gs)
+
+        self._for_experts(expert_count, _load_one)
 
         print(f"[NVFP4SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
         return {
@@ -1449,7 +1548,7 @@ class MXFP8SafeTensorLoader(SafeTensorLoader):
         up_scales = [None] * expert_count
         down_scales = [None] * expert_count
 
-        for exp_id in range(expert_count):
+        def _load_one(exp_id):
             for proj, dst in (
                 (gate_name, gate_weights),
                 (up_name, up_weights),
@@ -1469,6 +1568,8 @@ class MXFP8SafeTensorLoader(SafeTensorLoader):
                 if s.dtype != torch.uint8:
                     s = s.view(torch.uint8)
                 dst[exp_id] = s
+
+        self._for_experts(expert_count, _load_one)
 
         print(f"[MXFP8SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
         return {
