@@ -28,12 +28,13 @@
 
 #include "../../cpu_backend/worker_pool.h"
 #include "../sft_profile.hpp"
+#include "bf16-moe.hpp"
+#include "fp4-moe.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "la/avx_kernels.hpp"
 #include "la/bf16_dweight.hpp"
-#include "fp4-moe.hpp"
 #include "moe.hpp"
 
 // =====================================================
@@ -311,6 +312,12 @@ struct ForwardCache {
  */
 struct SFTSharedPools {
   struct PerNuma {
+    // BF16 LoRA CPU-recompute scratch. Only one layer/phase on a TP
+    // partition may use these pools, like the shared activation cache.
+    void* recompute_a = nullptr;
+    size_t recompute_a_bytes = 0;
+    void* recompute_c = nullptr;
+    size_t recompute_c_bytes = 0;
     void* fwd_work = nullptr;
     size_t fwd_work_bytes = 0;
     void* bwd_work = nullptr;
@@ -350,6 +357,8 @@ struct SFTSharedPools {
 
   ~SFTSharedPools() {
     for (auto& p : pools) {
+      free(p.recompute_a);
+      free(p.recompute_c);
       if (p.fwd_work) {
         free(p.fwd_work);
         p.fwd_work = nullptr;
@@ -426,6 +435,39 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
  private:
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
+
+  static GeneralMOEConfig base_config(const MOESFTConfig& config) {
+    GeneralMOEConfig base = config;
+    base.reuse_recompute_workspace =
+        std::is_same_v<T, amx::GemmKernel224BF16> &&
+        (std::is_same_v<Base, AMX_MOE_TP<T>> || std::is_same_v<Base, AMX_BF16_MOE_TP<T>>) && !SkipLoRA &&
+        config.lora_rank > 0 && !config.full_weight_grad && config.share_cache_pool && config.num_gpu_experts == 0;
+    return base;
+  }
+
+  void bind_recompute_workspace() {
+    if (!config_.reuse_recompute_workspace) return;
+    // Use the kernel's padded allocation sizes, including per-expert alignment.
+    // Gate and up run concurrently; every other base GEMM phase runs after a
+    // synchronous do_work_stealing_job barrier and may overwrite their scratch.
+    const size_t a_bytes = std::max({Base::gate_up_ba_pool_bytes_, Base::down_ba_pool_bytes_, backward_ba_pool_bytes_});
+    const size_t c_bytes = std::max(
+        {Base::gate_bc_pool_bytes_ + Base::up_bc_pool_bytes_, Base::down_bc_pool_bytes_, backward_bc_pool_bytes_});
+    auto& shared = SFTSharedPools::instance();
+    std::lock_guard<std::mutex> guard(shared.mu);
+    shared.ensure_numa_count(tp_part_idx + 1);
+    auto& p = shared.pools[tp_part_idx];
+    void* a = SFTSharedPools::acquire(p.recompute_a, p.recompute_a_bytes, a_bytes, kAmxAlignment);
+    void* c = SFTSharedPools::acquire(p.recompute_c, p.recompute_c_bytes, c_bytes, kAmxAlignment);
+    // Reacquire on every forward/backward: another layer can grow the pools.
+    // BufferA/C objects are rebound from these views before their phase uses them.
+    Base::gate_up_ba_pool_ = Base::down_ba_pool_ = backward_ba_pool_ = a;
+    Base::gate_bc_pool_ = Base::down_bc_pool_ = backward_bc_pool_ = c;
+    Base::up_bc_pool_ = static_cast<char*>(c) + Base::gate_bc_pool_bytes_;
+    SFT_POOL_LOG("recompute_work", config_.layer_idx, tp_part_idx, 0, cache_stack_top_, forward_pool_bytes_,
+                 cache_pool_bytes_, backward_pool_bytes_, a_bytes + c_bytes, "a=%p a_bytes=%zu c=%p c_bytes=%zu", a,
+                 p.recompute_a_bytes, c, p.recompute_c_bytes);
+  }
 
   static inline void* alloc_aligned(size_t align, size_t bytes) {
     if (bytes == 0) return nullptr;
@@ -736,7 +778,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
-      : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
+      : Base(base_config(config), tp_part_idx), sft_config_(config) {
     printf(
         "Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s share_backward_bb %s share_cache_pool %s\n",
         config.layer_idx, tp_part_idx, numa_node_of_cpu(sched_getcpu()), SkipLoRA ? "true" : "false",
@@ -828,6 +870,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @param alloc_cache Whether to allocate cache buffers (for backward pass)
    */
   void alloc_forward_buffers(bool alloc_cache) {
+    bind_recompute_workspace();
     // 1. Working buffers → shared pool (across all layers on same NUMA)
     size_t work_required = 0;
     work_required += round_up(lora_ba_pool_bytes_, kAmxAlignment);
@@ -866,7 +909,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     assign(&lora_intermediate_bf16_pool_, lora_intermediate_bf16_pool_bytes_);
 
     // 2. Cache buffers → per-instance pool
-    if (alloc_cache) {
+    if (alloc_cache || config_.reuse_recompute_workspace) {
       const size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
       const size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
       const size_t cache_down_lora_u_bytes = cache_slot_bytes_down_lora_u_ * max_cache_depth_;
@@ -899,6 +942,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       cache_assign(&cache_intermediate_pool_, cache_intermediate_bytes);
       cache_assign(&cache_down_lora_u_pool_, cache_down_lora_u_bytes);
       cache_assign(&cache_down_output_pool_, cache_down_output_bytes_);
+
+      if (config_.reuse_recompute_workspace) {
+        // The initial no-save forward uses the same physical storage without
+        // publishing a valid backward cache. No legacy output pages are touched.
+        m_local_gate_output_ = static_cast<ggml_bf16_t*>(cache_gate_output_pool_);
+        m_local_up_output_ = static_cast<ggml_bf16_t*>(cache_up_output_pool_);
+        m_local_down_output_ = static_cast<ggml_bf16_t*>(cache_down_output_pool_);
+      }
 
       // Initialize cache stack pointers (use size_t to prevent int overflow)
       for (int i = 0; i < max_cache_depth_; i++) {
@@ -938,11 +989,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Includes: gradient buffers + backward working buffers
    */
   void alloc_backward_buffers() {
+    bind_recompute_workspace();
     // Allocate backward-phase buffers from a single resizable pool (like forward_pool_).
     size_t required = 0;
     required += round_up(grad_buffer_bytes_, kAmxAlignment) * 3;  // grad_intermediate, grad_gate_output, grad_up_output
-    required += round_up(backward_ba_pool_bytes_, kAmxAlignment);
-    required += round_up(backward_bc_pool_bytes_, kAmxAlignment);
+    if (!config_.reuse_recompute_workspace) {
+      required += round_up(backward_ba_pool_bytes_, kAmxAlignment);
+      required += round_up(backward_bc_pool_bytes_, kAmxAlignment);
+    }
     required += round_up(grad_output_bf16_pool_bytes_, kAmxAlignment);
     required += round_up(base_grad_output_bf16_pool_bytes_, kAmxAlignment);
     required += round_up(dweight_shared_panel_pool_bytes_, kAmxAlignment);
@@ -975,8 +1029,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
     grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
 
-    assign(&backward_ba_pool_, backward_ba_pool_bytes_);
-    assign(&backward_bc_pool_, backward_bc_pool_bytes_);
+    if (!config_.reuse_recompute_workspace) {
+      assign(&backward_ba_pool_, backward_ba_pool_bytes_);
+      assign(&backward_bc_pool_, backward_bc_pool_bytes_);
+    }
     assign(&grad_output_bf16_pool_, grad_output_bf16_pool_bytes_);
     assign(&base_grad_output_bf16_pool_, base_grad_output_bf16_pool_bytes_);
     assign(&dweight_shared_panel_pool_, dweight_shared_panel_pool_bytes_);
@@ -1312,20 +1368,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     profiler_.record(SFTProfileStage::FwdInputPack, stage_start);
 
     if constexpr (kSupportsDirectFullFTCache) {
-      if (use_direct_fullft_cache) {
+      if (use_direct_fullft_cache || config_.reuse_recompute_workspace) {
         stage_start = profiler_.start();
-        ForwardCache& cache = (cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1] : push_cache();
-        prepare_cache_metadata(cache, qlen, k, expert_ids, weights, activated_expert);
+        ForwardCache& cache = !save_for_backward       ? cache_stack_[0]
+                              : (cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1]
+                                                       : push_cache();
+        if (save_for_backward) prepare_cache_metadata(cache, qlen, k, expert_ids, weights, activated_expert);
         bind_direct_cache_outputs(cache, activated_expert);
-        cache.valid = true;
+        cache.valid = save_for_backward;
         direct_cache = &cache;
         profiler_.record(SFTProfileStage::FwdCacheMetadata, stage_start);
 
-        stage_start = profiler_.start();
-        copy_input_to_cache(cache, input, qlen);
-        profiler_.record_bytes(SFTProfileStage::FwdCacheInput,
-                               static_cast<uint64_t>(qlen) * config_.hidden_size * sizeof(ggml_bf16_t));
-        profiler_.record(SFTProfileStage::FwdCacheInput, stage_start);
+        if (save_for_backward) {
+          stage_start = profiler_.start();
+          copy_input_to_cache(cache, input, qlen);
+          profiler_.record_bytes(SFTProfileStage::FwdCacheInput,
+                                 static_cast<uint64_t>(qlen) * config_.hidden_size * sizeof(ggml_bf16_t));
+          profiler_.record(SFTProfileStage::FwdCacheInput, stage_start);
+        }
       }
     }
 
@@ -3677,6 +3737,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       down_lora_grad_a_accum_pool_bytes_ = 0;
     }
 
+    if (config_.reuse_recompute_workspace) {
+      const size_t safe_tokens = round_up(Base::pool_count_, M_STEP);
+      // Bwd down finishes converting C to BF16 before bwd gate/up starts.
+      backward_bc_pool_bytes_ =
+          std::max(T::BufferC::required_size(safe_tokens, H), T::BufferC::required_size(safe_tokens, I)) +
+          static_cast<size_t>(config_.expert_num) * kAmxAlignment;
+    }
+
     // ★ Bug #18 fix: Cache buffers use aligned_alloc instead of shared_mem_buffer_numa ★
     // The base class AMX_MOE_BASE::init() also calls shared_mem_buffer_numa.alloc(), and
     // SharedMemBuffer is designed to let multiple callers share the same memory pool.
@@ -4849,13 +4917,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   }
 
   void bind_direct_cache_outputs(ForwardCache& cache, int activated_expert) {
+    size_t offset = 0;
     for (int i = 0; i < activated_expert; ++i) {
       const int expert_idx = m_expert_id_map_[i];
-      const size_t offset = cache_offsets_[i];
       m_local_gate_output_ptr_[expert_idx] = cache.gate_output_cache + offset * config_.intermediate_size;
       m_local_up_output_ptr_[expert_idx] = cache.up_output_cache + offset * config_.intermediate_size;
       m_local_down_output_ptr_[expert_idx] = cache.down_output_cache + offset * config_.hidden_size;
       direct_cache_intermediate_ptrs_[expert_idx] = cache.intermediate_cache + offset * config_.intermediate_size;
+      offset += m_local_num_[expert_idx];
     }
   }
 
@@ -6016,7 +6085,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       grad_intermediate_total += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size));
     }
 
-    char* grad_gate_up_bc_ptr = (char*)backward_bc_pool_ + grad_intermediate_total;
+    // backward_down_amx has completed, including every reader of its C output.
+    // Reuse C from offset zero and rebind the packed gate/up input view as well.
+    char* grad_gate_up_bc_ptr =
+        (char*)backward_bc_pool_ + (config_.reuse_recompute_workspace ? 0 : grad_intermediate_total);
+    char* gate_up_input_ptr = static_cast<char*>(Base::down_ba_pool_);
 
     for (int task_id = 0; task_id < activated_expert; task_id++) {
       int expert_idx = m_expert_id_map_[task_id];
@@ -6029,6 +6102,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       grad_gate_up_bc_[expert_idx]->max_m = local_max_m;
       grad_gate_up_bc_[expert_idx]->set_data(grad_gate_up_bc_ptr);
       grad_gate_up_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
+      if (config_.reuse_recompute_workspace) {
+        down_ba_[expert_idx]->max_m = local_max_m;
+        down_ba_[expert_idx]->set_data(gate_up_input_ptr);
+        gate_up_input_ptr += align64(Base::buffer_a_required_size(local_max_m, config_.intermediate_size));
+      }
     }
 
     // Allocate LoRA intermediate buffers from shared pools (for LoRA backward pass)
