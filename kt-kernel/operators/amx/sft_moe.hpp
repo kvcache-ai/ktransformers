@@ -438,10 +438,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   static GeneralMOEConfig base_config(const MOESFTConfig& config) {
     GeneralMOEConfig base = config;
+    // The Python wrapper can route requested GPU experts through CPU while
+    // preserving the legacy gradient lifecycle. Keep that path's layout too.
     base.reuse_recompute_workspace =
         std::is_same_v<T, amx::GemmKernel224BF16> &&
         (std::is_same_v<Base, AMX_MOE_TP<T>> || std::is_same_v<Base, AMX_BF16_MOE_TP<T>>) && !SkipLoRA &&
-        config.lora_rank > 0 && !config.full_weight_grad && config.share_cache_pool && config.num_gpu_experts == 0;
+        config.lora_rank > 0 && !config.full_weight_grad && config.share_cache_pool && config.num_gpu_experts == 0 &&
+        config.authoritative_optimizer_grads;
     return base;
   }
 

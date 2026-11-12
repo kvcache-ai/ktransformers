@@ -8,7 +8,10 @@ extensions as well. Every tensor includes all six expert LoRA gradients.
 import argparse
 import itertools
 import os
+from pathlib import Path
+import subprocess
 import sys
+import tempfile
 
 import pytest
 import torch
@@ -34,7 +37,7 @@ def _random(shape, generator, scale=0.04):
     return (torch.randn(shape, generator=generator) * scale).bfloat16().contiguous()
 
 
-def _layer(cpu, *, shared, rank, top_k, dropout, layer, max_len):
+def _layer(cpu, *, shared, rank, top_k, dropout, layer, max_len, authoritative=True):
     generator = torch.Generator().manual_seed(1729 + layer)
     weights = {
         "gate_proj": _random((E, I, H), generator),
@@ -53,7 +56,7 @@ def _layer(cpu, *, shared, rank, top_k, dropout, layer, max_len):
     config.lora_alpha = 2.0 * rank
     config.lora_dropout = dropout
     config.full_weight_grad = False
-    config.authoritative_optimizer_grads = True
+    config.authoritative_optimizer_grads = authoritative
     config.share_backward_bb = True
     config.share_cache_pool = shared
     config.physical_to_logical_map = mapping.data_ptr()
@@ -62,7 +65,9 @@ def _layer(cpu, *, shared, rank, top_k, dropout, layer, max_len):
     config.pool = cpu.backend_
     moe = ext.moe.AMXBF16_SFT_MOE(config)
     moe.load_weights()
-    grads = {name: torch.full_like(weights[name], 7.0) for name in NAMES}
+    # Legacy callers initialize the full gradient buffers themselves. The
+    # authoritative lifecycle must also clear poisoned inactive-expert values.
+    grads = {name: torch.full_like(weights[name], 7.0 if authoritative else 0.0) for name in NAMES}
     return moe, weights, grads, mapping
 
 
@@ -127,14 +132,14 @@ def _check(actual, expected, exact):
             torch.testing.assert_close(a, b, rtol=1e-2, atol=1e-5, msg=name)
 
 
-def run_case(tp, threads, top_k, rank, ga, dropout):
+def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True):
     torch.set_num_threads(1)
     worker = ext.WorkerPoolConfig()
     worker.subpool_count = tp
     worker.subpool_numa_map = [0] * tp
     worker.subpool_thread_count = [threads] * tp
     cpu = ext.CPUInfer(worker)
-    options = dict(rank=rank, top_k=top_k, dropout=dropout)
+    options = dict(rank=rank, top_k=top_k, dropout=dropout, authoritative=authoritative)
     # The second layer grows the process-shared arenas; returning to layer 0
     # must reacquire every borrowed pointer. Nonaligned lengths stress padding.
     shapes = ((17, 32), (129, 160), (63, 64))
@@ -192,12 +197,33 @@ def test_bf16_recompute_buffers(case):
     run_case(*case)
 
 
+@pytest.mark.cpu
+@pytest.mark.parametrize("policy", ("enabled", "legacy"))
+def test_bf16_recompute_workspace_policy(policy):
+    if ext is None or not hasattr(ext.moe, "AMXBF16_SFT_MOE"):
+        pytest.skip("BF16 SFT kernel unavailable")
+    # Pool logging is initialized once per process. Exercise each allocation
+    # policy in a fresh process, including the legacy gradient lifecycle.
+    subprocess.run([sys.executable, __file__, "--check-workspace-policy", policy], check=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--dump")
     parser.add_argument("--compare")
+    parser.add_argument("--check-workspace-policy", choices=("enabled", "legacy"))
     args = parser.parse_args()
+    if args.check_workspace_policy:
+        enabled = args.check_workspace_policy == "enabled"
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "pools.log"
+            os.environ["SFT_POOL_LOG"] = "1"
+            os.environ["SFT_POOL_LOG_FILE"] = str(log)
+            run_case(1, 1, 8, 8, 1, 0.0, authoritative=enabled)
+            assert ("recompute_work" in log.read_text()) == enabled
+        print(f"PASS workspace policy {args.check_workspace_policy}", flush=True)
+        sys.exit(0)
     cases = list(itertools.product((1, 2), (1, 4), (1, 8), (8, 16, 32), (1, 4), (0.0, 0.1))) if args.matrix else CASES
     reference = torch.load(args.compare, weights_only=True) if args.compare else None
     result = {}
