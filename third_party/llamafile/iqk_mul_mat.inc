@@ -1290,14 +1290,25 @@ __m512i inline load_iq4nl_values_512() {
     return _mm512_inserti32x8(_mm512_castsi256_si512(val256), val256, 1);
 }
 
+// The table is the signed IQ4_NL one (|v| <= 127): mul_mat_iqX_k_q8_K_AVX512 takes the products
+// as maddubs(|v|, sign(q8, v)), so two adjacent ones stay within int16 (2*127*127). The unsigned
+// table (+128, up to 241) with a -128*d min term overflowed maddubs' saturating int16 sums.
+inline __m512i load_iq4nl_values_signed_512() {
+    static const int8_t kvalues[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+    auto val128 = _mm_loadu_si128((const __m128i *)kvalues);
+    auto val256 = MM256_SET_M128I(val128, val128);
+    return _mm512_inserti32x8(_mm512_castsi256_si512(val256), val256, 1);
+}
+
 struct DequantizerIQ4XS final : public BaseDequantizer<block_iq4_xs> {
-    DequantizerIQ4XS(const void * vx, size_t bx) : BaseDequantizer(vx, bx), values(load_iq4nl_values_512()) {}
+    DequantizerIQ4XS(const void * vx, size_t bx) : BaseDequantizer(vx, bx), values(load_iq4nl_values_signed_512()) {}
     template <typename Q8>
     inline void new_block(int i, const Q8& q8, __m256 * accd, __m512i * scales) {
+        (void)q8;
+        (void)accd;
         d = GGML_FP16_TO_FP32(x[i].d);
         prepare(x[i].qs);
         auto scales128 = siq4.make_scales(*(const uint32_t *)x[i].scales_l, x[i].scales_h);
-        s8k.accum_mins(scales128, q8, i, -128.f*d, accd);
         auto scales256 = MM256_SET_M128I(scales128, scales128);
         auto all_scales = _mm512_inserti32x8(_mm512_castsi256_si512(scales256), scales256, 1);
         scales[0] = _mm512_shuffle_epi8(all_scales, shuffles[0]);
@@ -1583,11 +1594,25 @@ static void mul_mat_iqX_k_q8_K_AVX512(int n, const void * vx, size_t bx, const D
 
             deq.new_block(i, q8, accm, scales);
 
+            // signed weights: maddubs(|v|, q8 with v's sign), bounded by 2*127*127 per int16 lane
+            __m512i absv[4];
+            __mmask64 negv[4];
+            for (int k = 0; k < 4; ++k) {
+                absv[k] = _mm512_abs_epi8(deq.bits.values[k]);
+                negv[k] = _mm512_movepi8_mask(deq.bits.values[k]);
+            }
+            const __m512i zero = _mm512_setzero_si512();
+
             for (int iy = 0; iy < nrc_y; ++iy) {
-                const __m512i p1 = _mm512_maddubs_epi16(deq.bits.values[0], q8.load_quants64(iy, i, 0));
-                const __m512i p2 = _mm512_maddubs_epi16(deq.bits.values[1], q8.load_quants64(iy, i, 1));
-                const __m512i p3 = _mm512_maddubs_epi16(deq.bits.values[2], q8.load_quants64(iy, i, 2));
-                const __m512i p4 = _mm512_maddubs_epi16(deq.bits.values[3], q8.load_quants64(iy, i, 3));
+                __m512i qy[4];
+                for (int k = 0; k < 4; ++k) {
+                    const __m512i q = q8.load_quants64(iy, i, k);
+                    qy[k] = _mm512_mask_sub_epi8(q, negv[k], zero, q);
+                }
+                const __m512i p1 = _mm512_maddubs_epi16(absv[0], qy[0]);
+                const __m512i p2 = _mm512_maddubs_epi16(absv[1], qy[1]);
+                const __m512i p3 = _mm512_maddubs_epi16(absv[2], qy[2]);
+                const __m512i p4 = _mm512_maddubs_epi16(absv[3], qy[3]);
                 auto sumi = _mm512_dpwssd_epi32(_mm512_dpwssd_epi32(_mm512_dpwssd_epi32(_mm512_dpwssd_epi32(_mm512_setzero_si512(),
                                     p1, scales[0]), p2, scales[1]), p3, scales[2]), p4, scales[3]);
                 accd[iy] = _mm512_fmadd_ps(_mm512_set1_ps(deq.d*q8.scale(iy, i)), _mm512_cvtepi32_ps(sumi), accd[iy]);
@@ -1980,6 +2005,78 @@ static void mul_mat_qX_K_q8_K_T(int n, const void * vx, size_t bx, const DataInf
             info.store(ix, iy, hsum_float_8(accd[iy]));
         }
 
+    }
+}
+
+// IQ4_XS on vanilla AVX2 without int16 saturation. DequantizerIQ4XS above maps
+// the codes through an unsigned LUT (values up to 241) into maddubs, whose two
+// adjacent u8*s8 products are summed into a saturating int16: with two large
+// activations of the same sign the pair exceeds 32767 (e.g. 241*127*2 = 61214).
+// Here the LUT stays signed (|v| <= 127) and each product runs as
+// maddubs(|v|, sign(q8, v)), bounded by 2*127*127 = 32258, so no -128*d min
+// term is needed either.
+struct DequantizerIQ4XS_Signed final : public BaseDequantizer<block_iq4_xs> {
+    DequantizerIQ4XS_Signed(const void * vx, size_t bx) : BaseDequantizer(vx, bx), values(load_values()) {}
+    inline __m256i new_block(int i) {
+        d = GGML_FP16_TO_FP32(x[i].d);
+        auto scales128 = siq4.make_scales(*(const uint32_t *)x[i].scales_l, x[i].scales_h);
+        return MM256_SET_M128I(scales128, scales128);
+    }
+    inline void prepare(int i, int j) {
+        bits.prepare16(x[i].qs, j);
+        for (int k = 0; k < 4; ++k) bits.values[k] = _mm256_shuffle_epi8(values, bits.values[k]);
+    }
+    static __m256i load_values() {
+        static const int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+        auto val128 = _mm_loadu_si128((const __m128i *)kvalues_iq4nl);
+        return MM256_SET_M128I(val128, val128);
+    }
+
+    Q4Bits bits;
+    ScaleIQ4XS siq4;
+    const __m256i values;
+};
+
+template <typename Q8, typename Bits>
+inline void multiply_add_signed(const Bits& bits, const __m256i * scales, int j, int i, const Q8& q8, __m256i * sumi) {
+    __m256i absv[4];
+    for (int k = 0; k < 4; ++k) absv[k] = _mm256_sign_epi8(bits.values[k], bits.values[k]);
+    for (int iy = 0; iy < Q8::nrc_y; ++iy) {
+        __m256i p[4];
+        for (int k = 0; k < 4; ++k) {
+            auto qy = _mm256_sign_epi8(q8.load_quants(iy, i, 4*j+k), bits.values[k]);
+            p[k] = _mm256_madd_epi16(scales[k], _mm256_maddubs_epi16(absv[k], qy));
+        }
+        auto sum = _mm256_add_epi32(_mm256_add_epi32(p[0], p[2]), _mm256_add_epi32(p[1], p[3]));
+        sumi[iy] = j == 0 ? sum : _mm256_add_epi32(sumi[iy], sum);
+    }
+}
+
+template <int nrc_y>
+static void mul_mat_iq4xs_q8_K_signed(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
+    assert(n % QK_K == 0);
+    const int nb = n / QK_K;
+    Q8<nrc_y> q8(info);
+    DequantizerIQ4XS_Signed deq(vx, bx);
+    __m256  accd[nrc_y];
+    __m256i scales[4];
+    for (int ix = 0; ix < nrc_x; ++ix) {
+        for (int iy = 0; iy < nrc_y; ++iy) accd[iy] = _mm256_setzero_ps();
+        deq.new_row(ix);
+        for (int i = 0; i < nb; ++i) {
+            auto all_scales = deq.new_block(i);
+            __m256i sumi[nrc_y];
+            for (int j = 0; j < QK_K/128; ++j) {
+                deq.prepare(i, j);
+                set_scales_8(all_scales, j, scales);
+                multiply_add_signed(deq.bits, scales, j, i, q8, sumi);
+            }
+            for (int iy = 0; iy < nrc_y; ++iy) {
+                const __m256 vd = _mm256_set1_ps(deq.d*q8.scale(iy, i));
+                accd[iy] = _mm256_fmadd_ps(vd, _mm256_cvtepi32_ps(sumi[iy]), accd[iy]);
+            }
+        }
+        for (int iy = 0; iy < nrc_y; ++iy) info.store(ix, iy, hsum_float_8(accd[iy]));
     }
 }
 #endif  // Zen4 or vanilla AVX2
@@ -2905,7 +3002,16 @@ template <typename Dequantizer> void MulMat::set_functions(MulMat& m) {
             m.funcs[7] = mul_mat_qX_K_q8_K_AVX512<Dequantizer, 8>;
             }
 #else
-            if constexpr (std::is_same_v<Dequantizer, DequantizerQ2K> ||
+            if constexpr (std::is_same_v<Dequantizer, DequantizerIQ4XS_Signed>) {
+                m.funcs[0] = mul_mat_iq4xs_q8_K_signed<1>;
+                m.funcs[1] = mul_mat_iq4xs_q8_K_signed<2>;
+                m.funcs[2] = mul_mat_iq4xs_q8_K_signed<3>;
+                m.funcs[3] = mul_mat_iq4xs_q8_K_signed<4>;
+                m.funcs[4] = mul_mat_iq4xs_q8_K_signed<5>;
+                m.funcs[5] = mul_mat_iq4xs_q8_K_signed<6>;
+                m.funcs[6] = mul_mat_iq4xs_q8_K_signed<7>;
+                m.funcs[7] = mul_mat_iq4xs_q8_K_signed<8>;
+            } else if constexpr (std::is_same_v<Dequantizer, DequantizerQ2K> ||
                           std::is_same_v<Dequantizer, DequantizerQ3K> ||
                           std::is_same_v<Dequantizer, DequantizerQ6K>) {
                 m.funcs[0] = mul_mat_qY_K_q8_K_T<Dequantizer, 1>;
@@ -3207,7 +3313,11 @@ bool MulMat::set_mul_mat(int typeA, int typeB, int ne00, MulMat& mm, int Ny) {
             break;
         case GGML_TYPE_IQ4_XS:
             assert (ne00 % QK_K == 0);
+#ifdef HAVE_FANCY_SIMD
             MulMat::set_functions<DequantizerIQ4XS>(mm);
+#else
+            MulMat::set_functions<DequantizerIQ4XS_Signed>(mm);
+#endif
             break;
         case GGML_TYPE_IQ2_XXS:
             assert (ne00 % QK_K == 0);
