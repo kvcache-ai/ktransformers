@@ -297,6 +297,10 @@ struct GeneralMOEConfig {
   bool share_backward_bb = false;
   bool share_cache_pool = false;
 
+  // Internal allocation policy selected by the SFT constructor, before base
+  // buffers are allocated. Not exposed as a Python/YAML configuration option.
+  bool reuse_recompute_workspace = false;
+
   // for llamafile
   int m_block = 4;
   int group_min_len = 0;
