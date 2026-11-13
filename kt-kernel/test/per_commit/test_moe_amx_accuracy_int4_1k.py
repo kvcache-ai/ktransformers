@@ -22,6 +22,8 @@ try:
     import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
 
     kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
+    # Weights are generated on CUDA when available (original behaviour) and on the CPU otherwise.
+    _WEIGHT_INIT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     HAS_DEPS = True
 except ImportError as e:
     HAS_DEPS = False
@@ -106,7 +108,7 @@ def test_moe_amx_int4_1k_accuracy():
             torch.randn(
                 (expert_num, intermediate_size, hidden_size),
                 dtype=torch.bfloat16,
-                device="cuda",
+                device=_WEIGHT_INIT_DEVICE,
             )
             .to("cpu")
             .contiguous()
@@ -115,7 +117,7 @@ def test_moe_amx_int4_1k_accuracy():
             torch.randn(
                 (expert_num, intermediate_size, hidden_size),
                 dtype=torch.bfloat16,
-                device="cuda",
+                device=_WEIGHT_INIT_DEVICE,
             )
             .to("cpu")
             .contiguous()
@@ -124,7 +126,7 @@ def test_moe_amx_int4_1k_accuracy():
             torch.randn(
                 (expert_num, hidden_size, intermediate_size),
                 dtype=torch.bfloat16,
-                device="cuda",
+                device=_WEIGHT_INIT_DEVICE,
             )
             .to("cpu")
             .contiguous()

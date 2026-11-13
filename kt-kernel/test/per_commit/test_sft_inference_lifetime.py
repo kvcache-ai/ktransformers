@@ -115,3 +115,51 @@ def test_capture_does_not_query_captured_events(runtime, monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     submit(2)
     assert len(wrapper._inference_inflight) == 1
+
+
+def _xpu_hidden_states(rows, width):
+    """An ``xpu`` input for ``submit_forward_inference``'s device-type branch.
+
+    That branch only reads ``hidden_states.device`` before handing the batch to ``submit_forward``,
+    which this file stubs out anyway, so a device stand-in is enough on a host without an Intel GPU.
+    """
+    if getattr(torch, "xpu", None) is not None and torch.xpu.is_available():
+        return torch.ones(rows, width, dtype=torch.bfloat16, device="xpu")
+    return SimpleNamespace(device=torch.device("xpu"))
+
+
+def test_xpu_inference_takes_the_synchronous_fallback(runtime, monkeypatch):
+    """torch.xpu has no ExternalStream/Event/record_stream, so xpu must not enter the stream path."""
+    wrapper, _, _, recorded = runtime
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("xpu must not touch the torch.cuda stream API")
+
+    monkeypatch.setattr(torch.cuda, "ExternalStream", forbidden)
+    monkeypatch.setattr(torch.cuda, "stream", forbidden)
+    monkeypatch.setattr(torch.cuda, "Event", forbidden)
+
+    expected = torch.full((2, 4), 3.0, dtype=torch.bfloat16)
+    submitted, synced = [], []
+    wrapper.submit_forward = lambda *args, **kwargs: submitted.append((args, kwargs))
+
+    def sync_forward(output_device=None):
+        synced.append(output_device)
+        return expected
+
+    wrapper.sync_forward = sync_forward
+    hidden = _xpu_hidden_states(2, 4)
+
+    BaseSFTMoEWrapper.submit_forward_inference(
+        wrapper, hidden, torch.zeros(2, 2, dtype=torch.int64), torch.ones(2, 2), 1
+    )
+    assert len(submitted) == 1
+    assert submitted[0][0][0] is hidden
+    assert submitted[0][1] == {"save_for_backward": False}
+    assert wrapper._pending_inference_fallback is True
+    assert not hasattr(wrapper, "_pending_inference_buffer")
+
+    assert BaseSFTMoEWrapper.sync_forward_inference(wrapper, 1) is expected
+    assert synced == [hidden.device] and synced[0].type == "xpu"
+    assert wrapper._pending_inference_fallback is False
+    assert wrapper._inference_inflight == [] and recorded == []

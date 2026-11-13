@@ -693,6 +693,7 @@ If you prefer manual installation without the `install.sh` script:
 | `CPUINFER_ENABLE_AMX` | `ON`, `OFF` | Enable Intel AMX support |
 | `CPUINFER_ENABLE_ONEDNN_VNNI` | `ON`, `OFF` | Enable oneDNN INT8 BRGEMM on non-AMX AVX512 CPUs |
 | `CPUINFER_ONEDNN_SOURCE_DIR` | Path | Optional oneDNN >= 3.9 source tree |
+| `CPUINFER_USE_XPU` | `0`, `1` | Intel XPU (torch.xpu) stream bridge via SYCL/Level Zero (default: auto-detect; see [Intel XPU](#intel-xpu-arc--data-center-gpu)) |
 | `CPUINFER_BUILD_TYPE` | `Release`, `Debug`, `RelWithDebInfo` | Build type (default: `Release`) |
 | `CPUINFER_PARALLEL` | Number | Parallel build jobs (default: auto-detect) |
 | `CPUINFER_VERBOSE` | `0`, `1` | Verbose build output (default: `0`) |
@@ -735,6 +736,45 @@ pip install -e .
 # Standard installation
 pip install .
 ```
+
+### Intel XPU (Arc / Data Center GPU)
+
+With a PyTorch XPU build, kt-kernel schedules its CPU expert kernels directly from `torch.xpu` streams (the same
+asynchronous `submit_with_cuda_stream` / `sync_with_cuda_stream` path CUDA uses). The CPU kernels are still compiled
+with the host compiler; only `cpu_backend/xpu_stream_bridge.cpp` is compiled against the SYCL and Level Zero headers
+and linked with `libsycl` / `libze_loader` (no icpx involved).
+
+**Prerequisites:**
+- PyTorch with XPU support: `python -c "import torch; print(torch.xpu.is_available())"` prints `True`
+- Intel oneAPI SYCL headers: `source /opt/intel/oneapi/setvars.sh`, or `export CPUINFER_SYCL_ROOT=<oneAPI compiler root>`
+- Level Zero headers and loader: `sudo apt install level-zero-dev`
+
+**Build.** `./install.sh build` (the default x86 path) turns the bridge on automatically when
+`torch.xpu.is_available()` and the SYCL/Level Zero dev files are present, and builds CPU-only (with a message)
+otherwise. It is left off for multi-variant (distribution) builds, which must stay importable on hosts with no
+SYCL runtime; `--manual` leaves the choice to the auto-detection in `setup.py`. A plain `pip install .` cannot auto-detect it either, because pip's build isolation
+hides torch from the build interpreter — pass `CPUINFER_USE_XPU=1` as below, or add `--no-build-isolation`.
+Use `--no-deps`: this project pins `torch==2.9.1`, so a plain install would replace your XPU torch with the
+PyPI build and `torch.xpu.is_available()` would become False.
+```bash
+source /opt/intel/oneapi/setvars.sh
+CPUINFER_USE_XPU=1 pip install . --no-deps
+```
+
+**Verify:**
+```bash
+python -c "import kt_kernel; print(kt_kernel.kt_kernel_ext.gpu_backend)"   # prints: xpu
+```
+
+**Runtime knobs:**
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `KT_XPU_BRIDGE` | `l0` (default), `host_task` | Stream bridge mode: `l0` orders CPU work with Level Zero events (~12 µs per edge); `host_task` uses SYCL host tasks (slower; also selected automatically while an XPU graph is being recorded) |
+| `KT_XPU_BRIDGE_EVENTS` | integer >= 2 (default `1024`) | Level Zero event ring size per queue (`l0` mode) |
+
+If the extension was built without `CPUINFER_USE_XPU=1`, `kt_kernel` still works with `xpu` tensors but falls back to
+synchronous submission and logs a one-time warning asking you to rebuild.
 
 ## Error Troubleshooting
 
