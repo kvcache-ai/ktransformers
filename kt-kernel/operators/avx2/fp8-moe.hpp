@@ -71,12 +71,14 @@ struct GemmKernelAVX2FP8 {
   };
 
   // ========================================================================
-  // BufferB: FP8 weights [N, K] + float32 scales [N/BS, K/BS]
-  // Row-major, no packing. from_mat = memcpy.
+  // BufferB: FP8 weights [N, K] + float32 scales [N/BS, K/BS] + pre-decoded FP32 weights [N, K]
+  // Row-major, no packing. from_mat = memcpy + pre-decode.
+  // Pre-decoded weights avoid on-the-fly FP8→FP32 decode in every GEMM call.
   // ========================================================================
   struct BufferB {
-    uint8_t* b = nullptr;  // FP8 weights
-    float* d = nullptr;    // Block-wise scales
+    uint8_t* b = nullptr;      // FP8 weights (original)
+    float* d = nullptr;        // Block-wise scales
+    float* predecoded = nullptr; // Pre-decoded FP32 weights [N, K]
     size_t n = 0;
     size_t k = 0;
     int block_size = BLOCK_SIZE;
@@ -85,13 +87,18 @@ struct GemmKernelAVX2FP8 {
     BufferB(size_t n_, size_t k_, int bs, void* ptr) : n(n_), k(k_), block_size(bs) {
       b = (uint8_t*)ptr;
       size_t weight_bytes = n * k;
+      size_t n_blocks_n = div_up((int)n, bs);
+      size_t n_blocks_k = div_up((int)k, bs);
+      size_t scale_bytes = n_blocks_n * n_blocks_k * sizeof(float);
       d = (float*)((uint8_t*)ptr + weight_bytes);
+      predecoded = (float*)((uint8_t*)ptr + weight_bytes + scale_bytes);
     }
 
     static size_t required_size(size_t n, size_t k, int bs) {
       size_t n_blocks_n = div_up((int)n, bs);
       size_t n_blocks_k = div_up((int)k, bs);
-      return n * k + n_blocks_n * n_blocks_k * sizeof(float);
+      // FP8 weights + scales + pre-decoded FP32 weights
+      return n * k + n_blocks_n * n_blocks_k * sizeof(float) + n * k * sizeof(float);
     }
 
     void from_mat(const uint8_t* src_weights, const float* src_scales, int ith, int nth) {
@@ -106,6 +113,22 @@ struct GemmKernelAVX2FP8 {
       int nb_end = div_up(n_end, block_size);
       std::memcpy(d + nb_start * n_blocks_k, src_scales + nb_start * n_blocks_k,
                   (size_t)(nb_end - nb_start) * n_blocks_k * sizeof(float));
+
+      // Pre-decode FP8 weights to FP32 for this thread's N range
+      // This runs once during weight loading, avoiding decode in every GEMM
+      ensure_fp8_lut_initialized();
+      for (int ni = n_start; ni < n_end; ni++) {
+        const uint8_t* src_row = src_weights + (size_t)ni * k;
+        float* dst_row = predecoded + (size_t)ni * k;
+        int ki = 0;
+        for (; ki + 8 <= (int)k; ki += 8) {
+          __m256 dec = fp8x8_to_fp32x8(src_row + ki);
+          _mm256_storeu_ps(dst_row + ki, dec);
+        }
+        for (; ki < (int)k; ki++) {
+          dst_row[ki] = fp8_to_fp32_scalar(src_row[ki]);
+        }
+      }
     }
   };
 
@@ -146,6 +169,7 @@ struct GemmKernelAVX2FP8 {
 
 // ============================================================================
 // AVX2 FP8 GEMM: C[m,n] = sum_k (A[m,k] * dequant(B[n,k])) * scale[n/BS, k/BS]
+// Uses pre-decoded FP32 weights from BufferB::predecoded to avoid on-the-fly decode.
 // ============================================================================
 
 static inline void gemm_fp8(
@@ -155,7 +179,9 @@ static inline void gemm_fp8(
     GemmKernelAVX2FP8::BufferC& c,
     int ith, int nth) {
 
-  ensure_fp8_lut_initialized();
+  // Pre-decoded weights should be available (populated in from_mat during load_weights)
+  // Fallback to on-the-fly decode only if predecoded is null (should not happen in normal use)
+  const bool use_predecoded = b.predecoded != nullptr;
 
   auto [n_start, n_end] = split_range(n, ith, nth);
   const int block_size = b.block_size;
@@ -163,6 +189,7 @@ static inline void gemm_fp8(
 
   for (int ni = n_start; ni < n_end; ni++) {
     const uint8_t* b_row = b.b + (size_t)ni * k;
+    const float* b_predecoded_row = use_predecoded ? b.predecoded + (size_t)ni * k : nullptr;
     const int n_block_idx = ni / block_size;
 
     for (int mi = 0; mi < m; mi++) {
@@ -181,19 +208,113 @@ static inline void gemm_fp8(
         __m256 acc4 = _mm256_setzero_ps();
 
         int ki = 0;
+        if (use_predecoded) {
+          // Use pre-decoded FP32 weights - direct load, no decode needed
+          for (; ki + 32 <= k_len; ki += 32) {
+            acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
+                                    _mm256_loadu_ps(b_predecoded_row + kb + ki), acc1);
+            acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 8),
+                                    _mm256_loadu_ps(b_predecoded_row + kb + ki + 8), acc2);
+            acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 16),
+                                    _mm256_loadu_ps(b_predecoded_row + kb + ki + 16), acc3);
+            acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 24),
+                                    _mm256_loadu_ps(b_predecoded_row + kb + ki + 24), acc4);
+          }
+          for (; ki + 8 <= k_len; ki += 8) {
+            acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
+                                    _mm256_loadu_ps(b_predecoded_row + kb + ki), acc1);
+          }
+        } else {
+          // Fallback: on-the-fly decode (should not happen)
+          for (; ki + 32 <= k_len; ki += 32) {
+            acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
+                                    fp8x8_to_fp32x8(b_row + kb + ki), acc1);
+            acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 8),
+                                    fp8x8_to_fp32x8(b_row + kb + ki + 8), acc2);
+            acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 16),
+                                    fp8x8_to_fp32x8(b_row + kb + ki + 16), acc3);
+            acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 24),
+                                    fp8x8_to_fp32x8(b_row + kb + ki + 24), acc4);
+          }
+          for (; ki + 8 <= k_len; ki += 8) {
+            acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
+                                    fp8x8_to_fp32x8(b_row + kb + ki), acc1);
+          }
+        }
+
+        float block_sum = hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc1, acc3),
+                                                   _mm256_add_ps(acc2, acc4)));
+
+        // Scalar tail
+        if (use_predecoded) {
+          for (; ki < k_len; ki++) {
+            block_sum += GGML_BF16_TO_FP32(a_row[kb + ki]) * b_predecoded_row[kb + ki];
+          }
+        } else {
+          for (; ki < k_len; ki++) {
+            block_sum += GGML_BF16_TO_FP32(a_row[kb + ki]) * fp8_to_fp32_scalar(b_row[kb + ki]);
+          }
+        }
+
+        sum += block_sum * scale;
+      }
+
+      c.data[mi * n + ni] = sum;
+    }
+  }
+}
+
+// ============================================================================
+// AVX2 FP8 GEMM with external pre-decoded weights
+// ============================================================================
+
+static inline void gemm_fp8_with_predecoded(
+    int m, int n, int k,
+    GemmKernelAVX2FP8::BufferA& a,
+    GemmKernelAVX2FP8::BufferB& b,
+    GemmKernelAVX2FP8::BufferC& c,
+    const float* predecoded_weights,  // [n, k] row-major pre-decoded FP32 weights
+    const float* scales,              // [n/BS, k/BS] block-wise scales
+    int ith, int nth) {
+
+  auto [n_start, n_end] = split_range(n, ith, nth);
+  const int block_size = b.block_size;
+  const int n_blocks_k = div_up(k, block_size);
+
+  for (int ni = n_start; ni < n_end; ni++) {
+    const float* b_predecoded_row = predecoded_weights + (size_t)ni * k;
+    const int n_block_idx = ni / block_size;
+
+    for (int mi = 0; mi < m; mi++) {
+      const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
+      float sum = 0.0f;
+
+      for (int kb = 0; kb < k; kb += block_size) {
+        int k_len = std::min(block_size, k - kb);
+        int k_block_idx = kb / block_size;
+        float scale = scales[n_block_idx * n_blocks_k + k_block_idx];
+
+        // Accumulate within this block
+        __m256 acc1 = _mm256_setzero_ps();
+        __m256 acc2 = _mm256_setzero_ps();
+        __m256 acc3 = _mm256_setzero_ps();
+        __m256 acc4 = _mm256_setzero_ps();
+
+        int ki = 0;
+        // Use pre-decoded FP32 weights - direct load, no decode needed
         for (; ki + 32 <= k_len; ki += 32) {
           acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
-                                  fp8x8_to_fp32x8(b_row + kb + ki), acc1);
+                                  _mm256_loadu_ps(b_predecoded_row + kb + ki), acc1);
           acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 8),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 8), acc2);
+                                  _mm256_loadu_ps(b_predecoded_row + kb + ki + 8), acc2);
           acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 16),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 16), acc3);
+                                  _mm256_loadu_ps(b_predecoded_row + kb + ki + 16), acc3);
           acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 24),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 24), acc4);
+                                  _mm256_loadu_ps(b_predecoded_row + kb + ki + 24), acc4);
         }
         for (; ki + 8 <= k_len; ki += 8) {
           acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
-                                  fp8x8_to_fp32x8(b_row + kb + ki), acc1);
+                                  _mm256_loadu_ps(b_predecoded_row + kb + ki), acc1);
         }
 
         float block_sum = hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc1, acc3),
@@ -201,7 +322,7 @@ static inline void gemm_fp8(
 
         // Scalar tail
         for (; ki < k_len; ki++) {
-          block_sum += GGML_BF16_TO_FP32(a_row[kb + ki]) * fp8_to_fp32_scalar(b_row[kb + ki]);
+          block_sum += GGML_BF16_TO_FP32(a_row[kb + ki]) * b_predecoded_row[kb + ki];
         }
 
         sum += block_sum * scale;

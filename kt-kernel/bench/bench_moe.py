@@ -6,7 +6,7 @@ import subprocess
 import platform
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
-from kt_kernel import kt_kernel_ext
+import kt_kernel_ext
 import torch
 from tqdm import tqdm
 

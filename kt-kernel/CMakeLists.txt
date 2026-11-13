@@ -174,12 +174,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Use header-only fmt to avoid needing to link libfmt (fix undefined symbol vprint)
 add_compile_definitions(FMT_HEADER_ONLY)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
-if(NOT KTRANSFORMERS_USE_SYCL)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+    if(NOT KTRANSFORMERS_USE_SYCL)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+    endif()
 endif()
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenMP REQUIRED)
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
@@ -696,6 +698,39 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile SOURCE_DIR4)
+
+# Add AVX2/F16C flags to llamafile AVX2-specific source files
+set(LLAMAFILE_AVX2_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/iqk_mul_mat_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/iqk_mul_mat_amd_zen4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_mixmul_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_mixmul_amd_zen4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_sgemm_amd_avx2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile/tinyblas_cpu_sgemm_amd_zen4.cpp
+)
+
+foreach(f ${LLAMAFILE_AVX2_FILES})
+    if(EXISTS "${f}")
+        set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
+    endif()
+endforeach()
+
+# Add AVX2/F16C/FMA flags to local source files that include AVX2 headers
+set(KT_AVX2_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ext_bindings.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe-sft-tp.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/operators/avx2/offload_engine.cpp
+)
+
+foreach(f ${KT_AVX2_FILES})
+    if(EXISTS "${f}")
+        set_source_files_properties(${f} PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c -mfma")
+    endif()
+endforeach()
+
+# AVX2 operators directory (for offload_engine.cpp and other AVX2-specific .cpp files)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/avx2 SOURCE_DIR_AVX2)
+
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # message(STATUS "SOURCE_DIR3: ${SOURCE_DIR3}")
 
@@ -726,7 +761,7 @@ message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 
 
-set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
+set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7} ${SOURCE_DIR_AVX2})
 
 # Gradient clipping must propagate NaN/Inf even though the other KT kernels use fast-math.
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/bf16_sumsq.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
@@ -996,10 +1031,15 @@ endif()
 
 
 
-find_library(NUMA_LIBRARY NAMES numa)
-if(NUMA_LIBRARY)
-    message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
+if(APPLE)
+    # On macOS, NUMA is not available - build without NUMA support
+    message(STATUS "macOS detected - building without NUMA support")
 else()
-    message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
+    find_library(NUMA_LIBRARY NAMES numa)
+    if(NUMA_LIBRARY)
+        message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
+    else()
+        message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
+    endif()
 endif()
