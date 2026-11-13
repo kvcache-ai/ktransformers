@@ -132,7 +132,7 @@ def _check(actual, expected, exact):
             torch.testing.assert_close(a, b, rtol=1e-2, atol=1e-5, msg=name)
 
 
-def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True):
+def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True, layer_factory=None):
     torch.set_num_threads(1)
     worker = ext.WorkerPoolConfig()
     worker.subpool_count = tp
@@ -143,8 +143,9 @@ def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True):
     # The second layer grows the process-shared arenas; returning to layer 0
     # must reacquire every borrowed pointer. Nonaligned lengths stress padding.
     shapes = ((17, 32), (129, 160), (63, 64))
-    legacy = [_layer(cpu, shared=False, layer=i, max_len=m, **options) for i, (_, m) in enumerate(shapes)]
-    shared = [_layer(cpu, shared=True, layer=i, max_len=m, **options) for i, (_, m) in enumerate(shapes)]
+    make_layer = layer_factory or _layer
+    legacy = [make_layer(cpu, shared=False, layer=i, max_len=m, **options) for i, (_, m) in enumerate(shapes)]
+    shared = [make_layer(cpu, shared=True, layer=i, max_len=m, **options) for i, (_, m) in enumerate(shapes)]
     exact = tp == 1 and threads == 1
     records = {}
     for micro in range(ga):
@@ -155,15 +156,19 @@ def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True):
             b = _forward(legacy[i], batch, top_k, False)
             _check({"initial": a}, {"initial": b}, exact)
             records[f"m{micro}.l{i}.initial"] = a
-        for i in reversed(range(len(shapes))):
-            results = []
-            for layers in (legacy, shared):
+        # Finish each model's reverse traversal before switching layouts. FP8
+        # repacks synchronously and caches the owner by layer ID; two independent
+        # instances with the same ID must not run adjacent backward calls.
+        results = [{}, {}]
+        for index, layers in enumerate((legacy, shared)):
+            for i in reversed(range(len(shapes))):
                 out = _forward(layers[i], batches[i], top_k, True)
                 values = _backward(layers[i], batches[i], micro > 0, ga)
                 values["forward"] = out
-                results.append(values)
-            _check(results[1], results[0], exact)
-            records.update({f"m{micro}.l{i}.{key}": value for key, value in results[1].items()})
+                results[index][i] = values
+        for i in range(len(shapes)):
+            _check(results[1][i], results[0][i], exact)
+            records.update({f"m{micro}.l{i}.{key}": value for key, value in results[1][i].items()})
     for i, (old, new) in enumerate(zip(legacy, shared)):
         updates = []
         for layer in (old, new):
