@@ -30,6 +30,7 @@
 #include "../sft_profile.hpp"
 #include "bf16-moe.hpp"
 #include "fp4-moe.hpp"
+#include "fp8-moe.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
@@ -440,17 +441,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     GeneralMOEConfig base = config;
     // The Python wrapper can route requested GPU experts through CPU while
     // preserving the legacy gradient lifecycle. Keep that path's layout too.
-    base.reuse_recompute_workspace =
-        std::is_same_v<T, amx::GemmKernel224BF16> &&
-        (std::is_same_v<Base, AMX_MOE_TP<T>> || std::is_same_v<Base, AMX_BF16_MOE_TP<T>>) && !SkipLoRA &&
-        config.lora_rank > 0 && !config.full_weight_grad && config.share_cache_pool && config.num_gpu_experts == 0 &&
-        config.authoritative_optimizer_grads;
+    constexpr bool supported_bf16 = std::is_same_v<T, amx::GemmKernel224BF16> &&
+                                    (std::is_same_v<Base, AMX_MOE_TP<T>> || std::is_same_v<Base, AMX_BF16_MOE_TP<T>>);
+    constexpr bool supported_fp8 = std::is_same_v<T, amx::GemmKernel224FP8> && std::is_same_v<Base, AMX_FP8_MOE_TP<T>>;
+    base.reuse_recompute_workspace = (supported_bf16 || supported_fp8) && !SkipLoRA && config.lora_rank > 0 &&
+                                     !config.full_weight_grad && config.share_cache_pool &&
+                                     config.num_gpu_experts == 0 && config.authoritative_optimizer_grads;
     return base;
   }
 
   void bind_recompute_workspace() {
     if (!config_.reuse_recompute_workspace) return;
-    // Use the kernel's padded allocation sizes, including per-expert alignment.
+    // Use the kernel's padded allocation sizes, including per-expert alignment
+    // and both FP8 BufferC planes (c and reduce_buf). set_data() rebinds both
+    // planes after the phase sets each expert's current max_m.
     // Gate and up run concurrently; every other base GEMM phase runs after a
     // synchronous do_work_stealing_job barrier and may overwrite their scratch.
     const size_t a_bytes = std::max({Base::gate_up_ba_pool_bytes_, Base::down_ba_pool_bytes_, backward_ba_pool_bytes_});
@@ -1332,6 +1336,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     };
     constexpr bool kSupportsDirectFullFTCache = std::is_same_v<T, amx::GemmKernel224BF16>;
+    constexpr bool kSupportsDirectActivationStorage = kSupportsDirectFullFTCache || kIsFP8Backend;
     const bool use_direct_fullft_cache =
         kSupportsDirectFullFTCache && save_for_backward && sft_config_.full_weight_grad && lora_rank_ == 0;
     ForwardCache* direct_cache = nullptr;
@@ -1370,7 +1375,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     });
     profiler_.record(SFTProfileStage::FwdInputPack, stage_start);
 
-    if constexpr (kSupportsDirectFullFTCache) {
+    if constexpr (kSupportsDirectActivationStorage) {
       if (use_direct_fullft_cache || config_.reuse_recompute_workspace) {
         stage_start = profiler_.start();
         ForwardCache& cache = !save_for_backward       ? cache_stack_[0]
