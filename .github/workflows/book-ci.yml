@@ -10,6 +10,9 @@ on:
     branches:
       - main
       # - server_support
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test
@@ -19,13 +22,15 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install Rust
         run: |
           rustup set profile minimal
           rustup toolchain install stable
           rustup default stable
       - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v2
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0
         with:
           mdbook-version: "latest"
       # - name: Run tests
