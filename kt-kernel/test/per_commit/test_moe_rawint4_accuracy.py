@@ -29,6 +29,23 @@ max_len = 512
 group_size = 128
 validation_iter = 3
 CPUINFER_PARAM = 16
+SINGLE_SUBPOOL_THREADS = 8
+
+
+def make_cpu_infer(threads=CPUINFER_PARAM):
+    """CPUInfer backed by a single NUMA subpool.
+
+    The CPU MoE maps one TP part to each NUMA subpool, so the number of TP parts
+    (and the per-TP k dimension) depends on the host NUMA topology. RAWINT4
+    requires k to stay aligned to the quantization group_size, so pin the pool to
+    a single subpool (TP=1) to keep this accuracy test independent of the host
+    NUMA count.
+    """
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 1
+    cfg.subpool_numa_map = [0]
+    cfg.subpool_thread_count = [min(threads, SINGLE_SUBPOOL_THREADS)]
+    return kt_kernel_ext.CPUInfer(cfg)
 
 
 def load_amx_utils():
@@ -169,7 +186,7 @@ def available_backends():
 
 def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen, quant_group_size=group_size):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
-    cpu_infer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
+    cpu_infer = make_cpu_infer()
 
     with torch.inference_mode():
         gate_bf16 = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(
@@ -284,6 +301,34 @@ def test_rawint4_accuracy():
     for backend_name, backend_cls, threshold in backends:
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=1)
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=16)
+
+
+@pytest.mark.cpu
+def test_rawint4_rejects_unaligned_tp_split():
+    """A TP split that breaks the RAWINT4 group_size grid must fail loudly.
+
+    With 8 subpools the CPU MoE uses 8 TP parts, so intermediate_size=512
+    becomes k=64 for the down projection -- smaller than group_size=128. The
+    kernel must reject this instead of computing a misaligned layout.
+    """
+    if not hasattr(kt_kernel_ext.moe, "AVX2RawInt4_MOE"):
+        pytest.skip("AVX2RawInt4_MOE is not available")
+
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 8
+    cfg.subpool_numa_map = [0] * 8
+    cfg.subpool_thread_count = [2] * 8
+    cpu_infer = kt_kernel_ext.CPUInfer(cfg)
+
+    config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+    config.max_len = max(max_len, 1)
+    config.quant_config.bits = 4
+    config.quant_config.group_size = group_size
+    config.quant_config.zero_point = False
+    config.pool = cpu_infer.backend_
+
+    with pytest.raises(RuntimeError, match="group_size"):
+        kt_kernel_ext.moe.AVX2RawInt4_MOE(config)
 
 
 def test_amxint4_kgroup_accuracy():
