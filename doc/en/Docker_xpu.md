@@ -17,7 +17,7 @@
    cd ktransformers
    ```
 
-2. Build the Docker image using the XPU-specific [Dockerfile.xpu](../../Dockerfile.xpu):
+2. Build the Docker image using the XPU-specific [Dockerfile.xpu](../../archive/Dockerfile.xpu):
 
    ```bash
    sudo http_proxy=$HTTP_PROXY \

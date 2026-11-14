@@ -225,4 +225,4 @@ python -m ktransformers.local_chat --model_path <your model path> --gguf_path <y
 
 ### 更多常见问题解答
 
-[详见](./FAQ.md)
+[详见](../en/FAQ.md)

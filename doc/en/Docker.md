@@ -12,7 +12,7 @@ docker pull approachingai/ktransformers:0.2.1
 **Notice**: In this image, we compile the ktransformers in AVX512 instuction CPUs, if your cpu not support AVX512, it is suggested to recompile and install ktransformers in the /workspace/ktransformers directory within the container.
 
 ## Building docker image locally
- - Download Dockerfile in [there](../../Dockerfile)
+ - Download Dockerfile in [there](../../archive/Dockerfile)
 
  - finish, execute
    ```bash
