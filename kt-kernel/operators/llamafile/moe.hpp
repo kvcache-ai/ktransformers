@@ -836,62 +836,113 @@ class LLAMA_MOE_TP {
     }
 #endif
 
-    m_block = QK_K;
-    nth = config_.hidden_size / m_block;
-    pool->do_work_stealing_job(
-        nth * activated_expert, nullptr,
-        [&](int task_id) {
-          int64_t expert_idx = m_expert_id_map_[task_id / nth];
-          int ith = task_id % nth;
-          void* down_input_ptr = m_local_down_input_ptr_[expert_idx];
+    // Small windows (decode batches, speculative verify): a task owns kFuseRows hidden rows,
+    // computes them for every active expert, then merges them per token in route order. The
+    // rows never leave the core that made them and the separate merge job (one task per token
+    // reading every expert's rows back) goes away. Same dot products and the same per-element
+    // sum order as the two-job path below: bit-identical.
+    constexpr int kFuseMaxQlen = 8;
+    constexpr int kFuseRows = 64;
+    if (qlen <= kFuseMaxQlen && config_.hidden_size % kFuseRows == 0) {
+      const int H = config_.hidden_size;
+      pool->do_work_stealing_job(
+          H / kFuseRows, nullptr,
+          [&](int ith) {
+            for (int a = 0; a < activated_expert; a++) {
+              int64_t expert_idx = m_expert_id_map_[a];
+              void* down_input_ptr = m_local_down_input_ptr_[expert_idx];
+              auto expert_offset = expert_idx * config_.hidden_size * config_.intermediate_size;
+              auto m_block_offset = ith * kFuseRows * config_.intermediate_size;
+              void* down_proj_ptr = (uint8_t*)m_local_down_proj_ + (expert_offset + m_block_offset) *
+                                                                       ggml_type_size((ggml_type)config_.down_type) /
+                                                                       ggml_blck_size((ggml_type)config_.down_type);
+              float* down_output_ptr = m_local_down_output_ptr_[expert_idx] + ith * kFuseRows;
+              llamafile_sgemm(kFuseRows, m_local_num_[expert_idx],
+                              config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_proj_ptr,
+                              config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_input_ptr,
+                              config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_output_ptr,
+                              config_.hidden_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.down_type,
+                              kt_effective_vec_dot_type((ggml_type)config_.down_type), GGML_TYPE_F32,
+                              GGML_PREC_DEFAULT);
+            }
+            const int e0 = ith * kFuseRows, e1 = e0 + kFuseRows;
+            for (int i = 0; i < qlen; i++) {
+              for (int e = e0; e < e1; e++) {
+                m_output_fp32_[i][e] = 0;
+              }
+              for (int j = 0; j < k; j++) {
+                if (config_.should_skip_expert(expert_ids[i * k + j])) {
+                  continue;
+                }
+                for (int e = e0; e < e1; e++) {
+                  m_output_fp32_[i][e] +=
+                      m_local_down_output_ptr_[expert_ids[i * k + j]][m_local_pos_[i][j] * H + e] * weights[i * k + j];
+                }
+              }
+              for (int e = e0; e < e1; e++) {
+                output[i * H + e] = m_output_fp32_[i][e];
+              }
+            }
+          },
+          nullptr);
+    } else {
+      m_block = QK_K;
+      nth = config_.hidden_size / m_block;
+      pool->do_work_stealing_job(
+          nth * activated_expert, nullptr,
+          [&](int task_id) {
+            int64_t expert_idx = m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            void* down_input_ptr = m_local_down_input_ptr_[expert_idx];
 
-          auto expert_offset = expert_idx * config_.hidden_size * config_.intermediate_size;
-          auto m_block_offset = ith * m_block * config_.intermediate_size;
+            auto expert_offset = expert_idx * config_.hidden_size * config_.intermediate_size;
+            auto m_block_offset = ith * m_block * config_.intermediate_size;
 
-          void* down_proj_ptr = (uint8_t*)m_local_down_proj_ + (expert_offset + m_block_offset) *
-                                                                   ggml_type_size((ggml_type)config_.down_type) /
-                                                                   ggml_blck_size((ggml_type)config_.down_type);
+            void* down_proj_ptr = (uint8_t*)m_local_down_proj_ + (expert_offset + m_block_offset) *
+                                                                     ggml_type_size((ggml_type)config_.down_type) /
+                                                                     ggml_blck_size((ggml_type)config_.down_type);
 
-          float* down_output_ptr = m_local_down_output_ptr_[expert_idx] + ith * m_block;
-          llamafile_sgemm(m_block, m_local_num_[expert_idx],
-                          config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_proj_ptr,
-                          config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_input_ptr,
-                          config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_output_ptr,
-                          config_.hidden_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.down_type,
-                          kt_effective_vec_dot_type((ggml_type)config_.down_type), GGML_TYPE_F32,
-                          GGML_PREC_DEFAULT);
-        },
-        nullptr);
+            float* down_output_ptr = m_local_down_output_ptr_[expert_idx] + ith * m_block;
+            llamafile_sgemm(m_block, m_local_num_[expert_idx],
+                            config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_proj_ptr,
+                            config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_input_ptr,
+                            config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_output_ptr,
+                            config_.hidden_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.down_type,
+                            kt_effective_vec_dot_type((ggml_type)config_.down_type), GGML_TYPE_F32,
+                            GGML_PREC_DEFAULT);
+          },
+          nullptr);
 
 #ifdef FORWARD_TIME_PROFILE
-    {
-      auto now_time = std::chrono::high_resolution_clock::now();
-      down_time = std::chrono::duration_cast<std::chrono::microseconds>(now_time - last).count();
-      last = now_time;
-    }
+      {
+        auto now_time = std::chrono::high_resolution_clock::now();
+        down_time = std::chrono::duration_cast<std::chrono::microseconds>(now_time - last).count();
+        last = now_time;
+      }
 #endif
 
-    pool->do_work_stealing_job(
-        qlen, nullptr,
-        [&](int i) {
-          for (int e = 0; e < config_.hidden_size; e++) {
-            m_output_fp32_[i][e] = 0;
-          }
-          for (int j = 0; j < k; j++) {
-            if (config_.should_skip_expert(expert_ids[i * k + j])) {
-              continue;
+      pool->do_work_stealing_job(
+          qlen, nullptr,
+          [&](int i) {
+            for (int e = 0; e < config_.hidden_size; e++) {
+              m_output_fp32_[i][e] = 0;
+            }
+            for (int j = 0; j < k; j++) {
+              if (config_.should_skip_expert(expert_ids[i * k + j])) {
+                continue;
+              }
+              for (int e = 0; e < config_.hidden_size; e++) {
+                m_output_fp32_[i][e] +=
+                    m_local_down_output_ptr_[expert_ids[i * k + j]][m_local_pos_[i][j] * config_.hidden_size + e] *
+                    weights[i * k + j];
+              }
             }
             for (int e = 0; e < config_.hidden_size; e++) {
-              m_output_fp32_[i][e] +=
-                  m_local_down_output_ptr_[expert_ids[i * k + j]][m_local_pos_[i][j] * config_.hidden_size + e] *
-                  weights[i * k + j];
+              output[i * config_.hidden_size + e] = m_output_fp32_[i][e];
             }
-          }
-          for (int e = 0; e < config_.hidden_size; e++) {
-            output[i * config_.hidden_size + e] = m_output_fp32_[i][e];
-          }
-        },
-        nullptr);
+          },
+          nullptr);
+    }
 #ifdef FORWARD_TIME_PROFILE
     {
       auto now_time = std::chrono::high_resolution_clock::now();
