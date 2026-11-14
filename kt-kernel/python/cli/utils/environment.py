@@ -286,6 +286,26 @@ def _parse_cuda_visible_devices(cuda_visible: str) -> list[int]:
     return sorted(set(indices))  # Remove duplicates and sort
 
 
+def cuda_visible_devices_for(selected_gpus: list[int]) -> str:
+    """Build a CUDA_VISIBLE_DEVICES value for GPUs selected from detect_gpus().
+
+    detect_gpus() renumbers the GPUs left visible by an existing
+    CUDA_VISIBLE_DEVICES as 0, 1, 2, ..., so the selected ids are mapped back
+    to the GPUs they refer to before they replace the variable.
+    """
+    gpu_ids = list(selected_gpus)
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible:
+        try:
+            visible_indices = _parse_cuda_visible_devices(cuda_visible)
+        except ValueError:
+            # detect_gpus() did not filter either, so the ids are already physical
+            visible_indices = None
+        if visible_indices and all(0 <= gpu_id < len(visible_indices) for gpu_id in gpu_ids):
+            gpu_ids = [visible_indices[gpu_id] for gpu_id in gpu_ids]
+    return ",".join(str(gpu_id) for gpu_id in gpu_ids)
+
+
 def detect_cpu_info() -> CPUInfo:
     """Detect CPU information including instruction sets and NUMA topology."""
     name = "Unknown"
