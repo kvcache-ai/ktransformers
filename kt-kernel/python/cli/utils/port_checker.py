@@ -11,7 +11,7 @@ def is_port_available(host: str, port: int) -> bool:
     """Check if a port is available on the given host.
 
     Args:
-        host: Host address (e.g., "0.0.0.0", "127.0.0.1")
+        host: IPv4 or IPv6 address (e.g., "0.0.0.0", "127.0.0.1", "::1")
         port: Port number to check
 
     Returns:
@@ -19,7 +19,8 @@ def is_port_available(host: str, port: int) -> bool:
     """
     try:
         bind_host = "" if host == "0.0.0.0" else host
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
             if sys.platform != "win32":
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((bind_host, port))
