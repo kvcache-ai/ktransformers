@@ -310,6 +310,40 @@ build_step() {
     echo ""
     # Skip the x86-only AMX/AVX512 detection below.
     :
+  elif [ "$HOST_ARCH" = "riscv64" ] || [ "$HOST_ARCH" = "riscv" ]; then
+    # RISC-V (riscv64) auto-detect path.  The build requires RVV 1.0; on
+    # openEuler 24.03 the default gcc 12 lacks riscv_vector.h, so prefer
+    # gcc-toolset-14 (and its bundled binutils) when present.
+    echo "RISC-V features:"
+    ISA=$(grep -m1 '^isa' /proc/cpuinfo 2>/dev/null | cut -d: -f2)
+    echo "  isa = $ISA"
+
+    export CPUINFER_CPU_INSTRUCT=NATIVE
+    export CPUINFER_ENABLE_AMX=OFF
+    export CPUINFER_ENABLE_AVX512=OFF
+    export CPUINFER_ENABLE_AVX512_VNNI=OFF
+    export CPUINFER_ENABLE_AVX512_BF16=OFF
+    export CPUINFER_ENABLE_AVX512_VBMI=OFF
+    export CPUINFER_ENABLE_KML=OFF
+    export CPUINFER_ENABLE_BLIS=OFF
+
+    # Toolchain selection: gcc >= 13 with riscv_vector.h is required.
+    if [ -z "${CC:-}" ] && [ -x /opt/openEuler/gcc-toolset-14/root/usr/bin/gcc ]; then
+      export CC=/opt/openEuler/gcc-toolset-14/root/usr/bin/gcc
+      export CXX=/opt/openEuler/gcc-toolset-14/root/usr/bin/g++
+      # Use the toolset's assembler: system binutils 2.41 rejects rv64isa
+      # specs containing zaamo/zalrsc that the compiler passes through.
+      export KT_RV_TOOLCHAIN_PREFIX=/opt/openEuler/gcc-toolset-14/root/usr/bin
+      echo "Using gcc-toolset-14 toolchain: $CC"
+    fi
+
+    echo ""
+    echo "Configuration (riscv64):"
+    echo "  CPUINFER_CPU_INSTRUCT   = $CPUINFER_CPU_INSTRUCT (rv64gcv / RVV 1.0)"
+    echo "  CC = ${CC:-default}  CXX = ${CXX:-default}"
+    echo ""
+    # Skip the x86-only AMX/AVX512 detection below.
+    :
   else
 
   # detect_cpu_features returns "has_amx has_avx512f has_avx512_vnni has_avx512_bf16 has_avx512_vbmi"
@@ -402,7 +436,7 @@ build_step() {
   echo ""
   echo "To use manual configuration instead, run: $0 build --manual"
   echo ""
-  fi  # end aarch64-vs-x86 branch
+  fi  # end aarch64/riscv64-vs-x86 branch
   else
   # Manual mode - validate user configuration (no exports)
   if [ -z "$CPUINFER_CPU_INSTRUCT" ] || [ -z "$CPUINFER_ENABLE_AMX" ]; then

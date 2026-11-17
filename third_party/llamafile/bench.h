@@ -11,15 +11,29 @@
 
 #include "micros.h"
 
+// Architecture-agnostic compiler barrier. The original x86 inline asm
+// ("" ::: "memory") only expresses a memory clobber, which the standard
+// [atomic_thread_fence] sequence point / asm volatile with memory clobber
+// below reproduces on every target, including RISC-V.
+#if defined(__GNUC__) || defined(__clang__)
+#define KT_BENCH_BARRIER() __asm__ volatile("" ::: "memory")
+#else
+#define KT_BENCH_BARRIER()                                   \
+    do {                                                     \
+        static char _kt_barrier_sink;                        \
+        asm volatile("" : : "r"(&_kt_barrier_sink) : "memory"); \
+    } while (0)
+#endif
+
 #define BENCH(x)                                                                       \
     do {                                                                               \
         x;                                                                             \
-        __asm__ volatile("" ::: "memory");                                             \
+        KT_BENCH_BARRIER();                                                            \
         long long start = micros();                                                    \
         for (int i = 0; i < ITERATIONS; ++i) {                                         \
-            __asm__ volatile("" ::: "memory");                                         \
+            KT_BENCH_BARRIER();                                                        \
             x;                                                                         \
-            __asm__ volatile("" ::: "memory");                                         \
+            KT_BENCH_BARRIER();                                                        \
         }                                                                              \
         printf("%9lld us %s\n", (micros() - start + ITERATIONS - 1) / ITERATIONS, #x); \
     } while (0)

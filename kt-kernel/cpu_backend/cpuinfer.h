@@ -32,6 +32,9 @@
 
 #include "./vendors/vendor.h"
 #include "llama.cpp/ggml-impl.h"
+#if defined(__riscv) && !defined(KT_GGML_COMPAT_H)
+#include "kt_ggml_compat.h"
+#endif
 #include "task_queue.h"
 #include "worker_pool.h"
 
