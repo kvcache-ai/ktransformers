@@ -27,6 +27,9 @@ bool llamafile_sgemm(long, long, long, const void*, long, const void*, long, voi
 bool llamafile_mixmul(const struct ggml_compute_params*, const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*, struct ggml_tensor*);
 size_t llamafile_mixmul_needs(const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*);
 
+bool llamafile_sgemm_rv64(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
+bool llamafile_mixmul_rv64(const struct ggml_compute_params*, const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*, struct ggml_tensor*);
+
 bool llamafile_sgemm_unsupported(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
 bool llamafile_sgemm_amd_avx(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
 bool llamafile_sgemm_amd_fma(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
@@ -60,9 +63,20 @@ bool iqk_mul_mat_moe_zen4(long, long, long, int, int, const void*, const void*, 
 bool iqk_mul_mat_moe_arm82(long, long, long, int, int, const void*, const void*, float*, long, long, const void*, int, int);
 bool iqk_mul_mat_moe_unsupported(long, long, long, int, int, const void*, const void*, float*, long, long, const void*, int, int);
 
+#if defined(__riscv) && __riscv_xlen == 64
+// RISC-V: libggml-cpu.so also exports an older llamafile_sgemm; a dynamic
+// loader would interpose it over ours.  Alias the name to our rv64 backend
+// so kt-kernel's internal calls bind directly to llamafile_sgemm_rv64.
+bool llamafile_sgemm_rv64(long m, long n, long k, const void* a, long lda, const void* b, long ldb, void* c, long ldc, int ith, int nth, int task_type, int a_type, int b_type, int c_type, int precision);
+#define llamafile_sgemm llamafile_sgemm_rv64
+#else
 bool llamafile_sgemm(long m, long n, long k, const void* a, long lda, const void* b, long ldb, void* c, long ldc, int ith, int nth, int task_type, int a_type, int b_type, int c_type, int precision);
+#endif
 bool llamafile_mixmul(const struct ggml_compute_params*, const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*, struct ggml_tensor*);
 size_t llamafile_mixmul_needs(const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*);
+
+bool llamafile_sgemm_rv64(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
+bool llamafile_mixmul_rv64(const struct ggml_compute_params*, const struct ggml_tensor*, const struct ggml_tensor*, const struct ggml_tensor*, struct ggml_tensor*);
 
 bool llamafile_sgemm_unsupported(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);
 bool llamafile_sgemm_amd_avx(long, long, long, const void*, long, const void*, long, void*, long, int, int, int, int, int, int, int);

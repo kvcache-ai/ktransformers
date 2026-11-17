@@ -55,7 +55,16 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
         case GGML_TYPE_F32: {
             if (Btype != GGML_TYPE_F32)
                 return NOT_SUPPORTED;
-#if defined(__AVX512F__)
+#if defined(KT_RVV)
+            // The kernel steps by the runtime VLMAX (4 lanes at VLEN=128,
+            // more on wider hardware), so k must be an exact multiple of it.
+            if (k % (long)__riscv_vsetvlmax_e32m1())
+                return NOT_SUPPORTED;
+            tinyBLAS<0, 4, vfloat32m1_t, vfloat32m1_t, float, float, TC> tb{
+                k, (const float*)A, lda, (const float*)B, ldb, C, ldc, ith, nth};
+            tb.matmul(m, n, task);
+            return true;
+#elif defined(__AVX512F__)
             if (k % 16)
                 return NOT_SUPPORTED;
             tinyBLAS<0, 16, __m512, __m512, float, float, TC> tb{
@@ -82,7 +91,24 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
         }
 
         case GGML_TYPE_BF16: {
-#if defined(__AVX512BF16__)
+#if defined(KT_RVV)
+            if (k % (long)__riscv_vsetvlmax_e32m1())
+                return NOT_SUPPORTED;
+            if (Btype == GGML_TYPE_F32 && n < 2) {
+                tinyBLAS<0, 4, vfloat32m1_t, vfloat32m1_t, ggml_bf16_t, float, TC> tb{
+                    k, (const ggml_bf16_t*)A, lda, (const float*)B, ldb, C, ldc, ith, nth};
+                tb.matmul(m, n, task);
+                return true;
+            }
+            if (Btype == GGML_TYPE_F32)
+                return WANT_QUANTIZATION;
+            if (Btype != GGML_TYPE_BF16)
+                return NOT_SUPPORTED;
+            tinyBLAS<0, 4, vfloat32m1_t, vfloat32m1_t, ggml_bf16_t, ggml_bf16_t, TC> tb{
+                k, (const ggml_bf16_t*)A, lda, (const ggml_bf16_t*)B, ldb, C, ldc, ith, nth};
+            tb.matmul(m, n, task);
+            return true;
+#elif defined(__AVX512BF16__)
             if (k % 32)
                 return NOT_SUPPORTED;
             if (Btype == GGML_TYPE_F32 && n < 2) {
@@ -137,7 +163,24 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
         }
 
         case GGML_TYPE_F16: {
-#if defined(__AVX512F__)
+#if defined(KT_RVV)
+            if (k % (long)__riscv_vsetvlmax_e32m1())
+                return NOT_SUPPORTED;
+            if (Btype == GGML_TYPE_F32 && n < 2) {
+                tinyBLAS<0, 4, vfloat32m1_t, vfloat32m1_t, ggml_fp16_t, float, TC> tb{
+                    k, (const ggml_fp16_t*)A, lda, (const float*)B, ldb, C, ldc, ith, nth};
+                tb.matmul(m, n, task);
+                return true;
+            }
+            if (Btype == GGML_TYPE_F32)
+                return WANT_QUANTIZATION;
+            if (Btype != GGML_TYPE_F16)
+                return NOT_SUPPORTED;
+            tinyBLAS<0, 4, vfloat32m1_t, vfloat32m1_t, ggml_fp16_t, ggml_fp16_t, TC> tb{
+                k, (const ggml_fp16_t*)A, lda, (const ggml_fp16_t*)B, ldb, C, ldc, ith, nth};
+            tb.matmul(m, n, task);
+            return true;
+#elif defined(__AVX512F__)
             if (k % 16)
                 return NOT_SUPPORTED;
             if (Btype == GGML_TYPE_F32 && n < 2) {
@@ -222,7 +265,12 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
                 return WANT_QUANTIZATION;
             if (Btype != GGML_TYPE_Q8_0)
                 return NOT_SUPPORTED;
-#if defined(__AVX2__) || defined(__AVX512F__)
+#if defined(KT_RVV)
+            tinyBLAS_Q0_RVV<0, block_q8_0, block_q8_0, TC> tb{
+                k, (const block_q8_0*)A, lda, (const block_q8_0*)B, ldb, C, ldc, ith, nth};
+            tb.matmul(m, n, task);
+            return true;
+#elif defined(__AVX2__) || defined(__AVX512F__)
             tinyBLAS_Q0_AVX2<0, block_q8_0, block_q8_0, TC> tb{
                 k, (const block_q8_0*)A, lda, (const block_q8_0*)B, ldb, C, ldc, ith, nth};
             tb.matmul(m, n, task);
@@ -242,7 +290,12 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
                 return WANT_QUANTIZATION;
             if (Btype != GGML_TYPE_Q8_0)
                 return NOT_SUPPORTED;
-#if defined(__AVX2__) || defined(__AVX512F__)
+#if defined(KT_RVV)
+            tinyBLAS_Q0_RVV<0, block_q4_0, block_q8_0, TC> tb{
+                k, (const block_q4_0*)A, lda, (const block_q8_0*)B, ldb, C, ldc, ith, nth};
+            tb.matmul(m, n, task);
+            return true;
+#elif defined(__AVX2__) || defined(__AVX512F__)
             tinyBLAS_Q0_AVX2<0, block_q4_0, block_q8_0, TC> tb{
                 k, (const block_q4_0*)A, lda, (const block_q8_0*)B, ldb, C, ldc, ith, nth};
             tb.matmul(m, n, task);
