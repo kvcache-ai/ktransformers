@@ -8,6 +8,7 @@
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "mlp.h"
+#include "kt_ggml_compat.h"
 
 MLP::MLP(MLPConfig config) {
   config_ = config;

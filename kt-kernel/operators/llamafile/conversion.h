@@ -10,6 +10,7 @@
 #ifndef CPUINFER_CONVERSION_H
 #define CPUINFER_CONVERSION_H
 
+#include <cstdio>
 #include <memory.h>
 
 #include "llama.cpp/ggml-quants.h"
@@ -31,7 +32,15 @@ inline void from_float(const float* input, void* output, int size, ggml_type typ
   if (type == ggml_type::GGML_TYPE_F32) {
     memcpy(output, input, size * sizeof(float));
   } else {
-    ggml_internal_get_type_traits(type).from_float(input, output, size);
+    // kt_ggml_type_traits_compat::from_float comes from the CPU trait table.
+    // On the RV build it is populated at ggml_cpu_init(); guard anyway so a
+    // missing entry degrades to a clear error instead of a NULL call.
+    const auto& traits = ggml_internal_get_type_traits(type);
+    if (traits.from_float != nullptr) {
+      traits.from_float(input, output, size);
+    } else {
+      fprintf(stderr, "kt-kernel: no from_float for ggml type %d\n", (int)type);
+    }
   }
 }
 

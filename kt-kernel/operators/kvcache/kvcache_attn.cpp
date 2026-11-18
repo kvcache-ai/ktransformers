@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include "ggml-impl.h"
+#include "kt_ggml_compat.h"
 #include "kvcache.h"
 #include "llamafile/sgemm.h"
 

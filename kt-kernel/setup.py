@@ -256,6 +256,16 @@ class CMakeBuild(build_ext):
                 if any(f in flags for f in ["avx512_vpopcntdq", "avx512vpopcntdq"]):
                     info["features"].add("AVX512_VPOPCNTDQ")
 
+            elif "riscv" in info["arch"] or "riscv" in cpuinfo.split("isa", 1)[-1][:120].lower():
+                # RISC-V: /proc/cpuinfo has an "isa" line, e.g.
+                # rv64imafdcv_..._zve64d_..._zvl128b. RVV 1.0 => "v" after
+                # the base ISA string and the zve* extensions.
+                info["vendor"] = "riscv"
+                m = re.search(r"^isa\s*:\s*(\S+)", cpuinfo, re.IGNORECASE | re.MULTILINE)
+                isa = (m.group(1) if m else "").lower()
+                if isa.startswith("rv64") and ("v" in isa[:5] or "_zve64d" in isa):
+                    info["features"].add("RVV")
+
             elif sysname == "Darwin":
                 # macOS: Apple Silicon (arm64) vs Intel
                 arch = platform.machine().lower()
@@ -626,10 +636,16 @@ class CMakeBuild(build_ext):
 
         # CPU feature flags mapping: if user specified CPUINFER_CPU_INSTRUCT, honor it;
         # else auto-pick based on detection (x86 only)
-        cmake_args += cpu_feature_flags()
         d = self.detect_cpu_info()
         print(f"Detected CPU info: {d}")
         cpu_mode = os.environ.get("CPUINFER_CPU_INSTRUCT", "NATIVE").upper()
+
+        if d.get("vendor") == "riscv" or "riscv" in d.get("arch", ""):
+            # RISC-V: no x86 feature flags; CMakeLists picks -march=rv64gcv and
+            # the RVV operator backends itself.
+            print("-- RISC-V host detected; using rv64gcv (RVV 1.0) backend")
+        else:
+            cmake_args += cpu_feature_flags()
 
         # Vendor / feature specific toggles
         # AMD MoE: explicit env overrides; otherwise default ON on AMD CPU
@@ -658,7 +674,11 @@ class CMakeBuild(build_ext):
         # - Otherwise, only auto-enable when CPU mode actually wants AVX512
         #   (NATIVE/FANCY/AVX512). In AVX2 mode we do NOT enable this, so
         #   RAWINT4 / K2 kernels are not compiled.
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512", "KTRANSFORMERS_CPU_USE_AMX_AVX512"):
+        is_riscv = d.get("vendor") == "riscv" or "riscv" in d.get("arch", "")
+        if is_riscv:
+            # RISC-V host: skip all AVX512/AMX auto-enable logic
+            print("-- RISC-V host: skipping AMX/AVX512 feature detection")
+        elif not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512", "KTRANSFORMERS_CPU_USE_AMX_AVX512"):
             if cpu_mode in ("NATIVE", "FANCY", "AVX512") and ("AMX" in d["features"] or "AVX512" in d["features"]):
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
                 print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
@@ -671,35 +691,39 @@ class CMakeBuild(build_ext):
         avx512_extension_enabled = False
         allow_avx512_ext_auto = cpu_mode in ("NATIVE", "FANCY", "AVX512")
 
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VNNI", "LLAMA_AVX512_VNNI"):
-            if allow_avx512_ext_auto and "AVX512_VNNI" in d["features"]:
-                cmake_args.append("-DLLAMA_AVX512_VNNI=ON")
-                print("-- AVX512_VNNI detected; enabling (-DLLAMA_AVX512_VNNI=ON)")
-                avx512_extension_enabled = True
+        if is_riscv:
+            # Fine-grained flags don't apply on RISC-V (already skipped above)
+            avx512_extension_enabled = False
         else:
-            avx512_extension_enabled = True
-
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_BF16", "LLAMA_AVX512_BF16"):
-            if allow_avx512_ext_auto and "AVX512_BF16" in d["features"]:
-                cmake_args.append("-DLLAMA_AVX512_BF16=ON")
-                print("-- AVX512_BF16 detected; enabling (-DLLAMA_AVX512_BF16=ON)")
+            if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VNNI", "LLAMA_AVX512_VNNI"):
+                if allow_avx512_ext_auto and "AVX512_VNNI" in d["features"]:
+                    cmake_args.append("-DLLAMA_AVX512_VNNI=ON")
+                    print("-- AVX512_VNNI detected; enabling (-DLLAMA_AVX512_VNNI=ON)")
+                    avx512_extension_enabled = True
+            else:
                 avx512_extension_enabled = True
-        else:
-            avx512_extension_enabled = True
 
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VBMI", "LLAMA_AVX512_VBMI"):
-            if allow_avx512_ext_auto and "AVX512_VBMI" in d["features"]:
-                cmake_args.append("-DLLAMA_AVX512_VBMI=ON")
-                print("-- AVX512_VBMI detected; enabling (-DLLAMA_AVX512_VBMI=ON)")
+            if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_BF16", "LLAMA_AVX512_BF16"):
+                if allow_avx512_ext_auto and "AVX512_BF16" in d["features"]:
+                    cmake_args.append("-DLLAMA_AVX512_BF16=ON")
+                    print("-- AVX512_BF16 detected; enabling (-DLLAMA_AVX512_BF16=ON)")
+                    avx512_extension_enabled = True
+            else:
                 avx512_extension_enabled = True
-        else:
-            avx512_extension_enabled = True
 
-        # If any AVX512 extension is enabled, ensure base AVX512 is also enabled
-        if avx512_extension_enabled and cpu_mode in ("NATIVE", "FANCY", "AVX512") and "AVX512" in d["features"]:
-            if not any("LLAMA_AVX512=ON" in a for a in cmake_args):
-                cmake_args.append("-DLLAMA_AVX512=ON")
-                print("-- AVX512 extensions enabled; also enabling base AVX512F (-DLLAMA_AVX512=ON)")
+            if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VBMI", "LLAMA_AVX512_VBMI"):
+                if allow_avx512_ext_auto and "AVX512_VBMI" in d["features"]:
+                    cmake_args.append("-DLLAMA_AVX512_VBMI=ON")
+                    print("-- AVX512_VBMI detected; enabling (-DLLAMA_AVX512_VBMI=ON)")
+                    avx512_extension_enabled = True
+            else:
+                avx512_extension_enabled = True
+
+            # If any AVX512 extension is enabled, ensure base AVX512 is also enabled
+            if avx512_extension_enabled and cpu_mode in ("NATIVE", "FANCY", "AVX512") and "AVX512" in d["features"]:
+                if not any("LLAMA_AVX512=ON" in a for a in cmake_args):
+                    cmake_args.append("-DLLAMA_AVX512=ON")
+                    print("-- AVX512 extensions enabled; also enabling base AVX512F (-DLLAMA_AVX512=ON)")
 
         # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
         # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)

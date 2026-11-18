@@ -52,7 +52,18 @@
 // #include "log.h"
 #include "flags.h"
 #include "sgemm.h"
+
+#include <vector>
 // #include <cosmo.h>
+
+// Pull in the CPU vec-dot declarations (including ggml_vec_dot_mxfp4_q8_0,
+// used by the MXFP4 case in tinyblas_cpu_sgemm.inc) and ggml_compute_params.
+// The pinned third_party/llama.cpp is a flat b3173-lineage tree, so these
+// live under llama.cpp/ in the include root.
+#if defined(__riscv)
+#include "llama.cpp/ggml-quants.h"
+#include "kt_ggml_compute_params.h"
+#endif
 
 #pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wignored-attributes"
@@ -71,6 +82,27 @@
 #define VECTOR_REGISTERS 32
 #else
 #define VECTOR_REGISTERS 16
+#endif
+
+// ---------------------------------------------------------------------------
+// RISC-V Vector Extension (RVV 1.0) support.  VLEN=128 hardware maps a
+// vfloat32m1_t to 4 lanes, the same tiling SSE uses; larger VLEN still works
+// because the RVV intrinsics below always pass an explicit vl.
+// ---------------------------------------------------------------------------
+#if defined(__riscv) && defined(__riscv_v_intrinsic)
+#include "rv64_vec_math.hpp"
+#define KT_RVV 1
+// RVV has 32 architectural vector registers; use the wide tiling like AVX512.
+#define KT_RVV_VECTOR_REGS 32
+#endif
+
+// llama.cpp b3173+ removed ggml_task_type; kt-kernel's llamafile operators
+// still pass GGML_TASK_TYPE_COMPUTE to llamafile_sgemm.  Provide the enum so
+// the shared tinyblas sources compile against either ggml generation.
+#if defined(__riscv) && !defined(GGML_TASK_TYPE_COMPUTE)
+#define GGML_TASK_TYPE_INIT 0
+#define GGML_TASK_TYPE_COMPUTE 1
+#define GGML_TASK_TYPE_FINALIZE 2
 #endif
 
 #if 0
@@ -265,6 +297,30 @@ inline __m512 madder(__m512bh x, __m512bh y, __m512 z, __m512* _) {
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+// RISC-V RVV VECTORIZED ARITHMETIC OPERATIONS
+// vfloat32m1_t is the tinyBLAS vector workhorse on rv64.  The add/sub/mul/
+// madd/madder/hsum overloads below mirror the AVX512 ones.  All RVV intrinsics
+// need an active vector length; we always use the full register (vlmax).
+#if defined(KT_RVV)
+namespace rvvops {
+inline size_t vl() { return __riscv_vsetvlmax_e32m1(); }
+inline vfloat32m1_t add(vfloat32m1_t x, vfloat32m1_t y) { return rvv::vadd_f32(x, y, vl()); }
+inline vfloat32m1_t sub(vfloat32m1_t x, vfloat32m1_t y) { return rvv::vsub_f32(x, y, vl()); }
+inline vfloat32m1_t mul(vfloat32m1_t x, vfloat32m1_t y) { return rvv::vmul_f32(x, y, vl()); }
+inline vfloat32m1_t madd(vfloat32m1_t a, vfloat32m1_t b, vfloat32m1_t c) {
+    return rvv::vfmacc_f32(c, a, b, vl());
+}
+inline vfloat32m1_t madder(vfloat32m1_t a, vfloat32m1_t b, vfloat32m1_t c, vfloat32m1_t* e) {
+    vfloat32m1_t p = rvv::vmul_f32(a, b, vl());
+    vfloat32m1_t y = rvv::vsub_f32(p, *e, vl());
+    vfloat32m1_t t = rvv::vadd_f32(c, y, vl());
+    *e = rvv::vsub_f32(rvv::vsub_f32(t, c, vl()), y, vl());
+    return t;
+}
+}  // namespace rvvops
+#endif  // KT_RVV
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 // VECTORIZED HORIZONTAL SUM
 
 #if defined(__ARM_NEON)
@@ -403,6 +459,67 @@ inline __m512bh load(const float* p) {
     return _mm512_cvtne2ps_pbh(_mm512_loadu_ps(p + 16), _mm512_loadu_ps(p));
 }
 #endif  // __AVX512BF16__
+
+#if defined(KT_RVV)
+// Route the generic templates (madd/madder) to the RVV overloads.
+template <>
+inline vfloat32m1_t madd(vfloat32m1_t a, vfloat32m1_t b, vfloat32m1_t c) {
+    return rvvops::madd(a, b, c);
+}
+template <>
+inline vfloat32m1_t madder(vfloat32m1_t a, vfloat32m1_t b, vfloat32m1_t c, vfloat32m1_t* e) {
+    return rvvops::madder(a, b, c, e);
+}
+
+inline float hsum(vfloat32m1_t x) {
+    return rvv::vhsum_f32m1(x);
+}
+
+template <>
+inline vfloat32m1_t load(const float* p) {
+    return rvv::vload_f32(p, __riscv_vsetvlmax_e32m1());
+}
+template <>
+inline vfloat32m1_t load(const ggml_bf16_t* p) {
+    // widen bf16 -> f32: (uint32)u16 << 16 reinterpreted as float
+    size_t vl = __riscv_vsetvlmax_e32m1();
+    vuint16m1_t u = __riscv_vle16_v_u16m1((const uint16_t*)p, vl);
+    vuint32m2_t w = __riscv_vwaddu_vx_u32m2(u, 0, vl);
+    w = __riscv_vsll_vx_u32m2(w, 16, vl);
+    return __riscv_vreinterpret_v_u32m1_f32m1(__riscv_vget_v_u32m2_u32m1(w, 0));
+}
+template <>
+inline vfloat32m1_t load(const ggml_fp16_t* p) {
+    // fp16 -> f32 without zvfh: integer bit manipulation (IEEE half decode).
+    // f16: sign[15] exp[14:10] mant[9:0] -> f32: sign exp(m+112) mant<<13.
+    // sign<<16 puts bit15->bit31 cleanly; exp/mant use <<13 so bit10->bit23.
+    // exp 31 (inf/NaN) is reconstructed explicitly below (the +112 rebias would
+    // wrap the exponent field). exp 0 (zero/denormal) is flushed to zero, with
+    // the sign preserved so -0.0 stays -0.0.
+    size_t vl = __riscv_vsetvlmax_e32m1();
+    vuint16m1_t h = __riscv_vle16_v_u16m1((const uint16_t*)p, vl);
+    vuint32m2_t w = __riscv_vwaddu_vx_u32m2(h, 0, vl);
+    // Extract the sign bit BEFORE stripping it from w; then mask w so the
+    // (w<<13) exp window is not contaminated by the sign (bit15 -> bit28).
+    vuint32m2_t sign = __riscv_vand_vx_u32m2(__riscv_vsll_vx_u32m2(w, 16, vl), 0x80000000u, vl);
+    w = __riscv_vand_vx_u32m2(w, 0x7fffu, vl);
+    vuint32m2_t expm1 = __riscv_vand_vx_u32m2(__riscv_vsll_vx_u32m2(w, 13, vl), 0x7f800000u, vl);
+    vuint32m2_t mant = __riscv_vand_vx_u32m2(__riscv_vsll_vx_u32m2(w, 13, vl), 0x007fffffu, vl);
+    // biased exp = (h_exp + 112) << 23 = (h_exp<<23) + (112<<23); expm1 already
+    // holds h_exp<<23, so adding (112<<23) rebias; mant stays in place.
+    vuint32m2_t bits = __riscv_vor_vv_u32m2(sign, __riscv_vadd_vx_u32m2(expm1, 0x38000000u, vl), vl);
+    bits = __riscv_vor_vv_u32m2(bits, mant, vl);
+    const vuint32m2_t h_exp = __riscv_vand_vx_u32m2(w, 0x7c00, vl);
+    // exp == 31: sign | 0x7f800000 | mant (inf when mant==0, NaN otherwise).
+    vbool16_t infnan = __riscv_vmseq_vx_u32m2_b16(h_exp, 0x7c00, vl);
+    vuint32m2_t special = __riscv_vor_vv_u32m2(sign, __riscv_vor_vx_u32m2(mant, 0x7f800000u, vl), vl);
+    bits = __riscv_vmerge_vvm_u32m2(bits, special, infnan, vl);
+    // exp == 0: flush zero/denormals to zero, preserving the sign bit.
+    vbool16_t denorm = __riscv_vmseq_vx_u32m2_b16(h_exp, 0, vl);
+    bits = __riscv_vmerge_vvm_u32m2(bits, sign, denorm, vl);
+    return __riscv_vreinterpret_v_u32m1_f32m1(__riscv_vget_v_u32m2_u32m1(bits, 0));
+}
+#endif  // KT_RVV
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FLOATING POINT OUTPUT STREAMING
@@ -614,6 +731,65 @@ class tinyBLAS {
 
     template <int RM, int RN, int PRECISE>
     NOINLINE void gemm(long m0, long m, long n0, long n) {
+#if defined(KT_RVV)
+        // GCC forbids RVV scalable vector types as array elements, so the
+        // accumulators live in a thread-local scratch buffer.  The stride is
+        // derived from the *runtime* VLMAX (not a fixed 4 lanes), so this is
+        // correct on VLEN > 128 hardware too.  Callers guarantee k % vl == 0.
+        constexpr int KT_NACC = RN * RM;
+        static thread_local std::vector<unsigned char> kt_acc_buf;
+        const size_t vl = __riscv_vsetvlmax_e32m1();
+        const size_t acc_bytes = (((vl * sizeof(float)) + 15) / 16) * 16;
+        const size_t acc_buf_bytes = (size_t)KT_NACC * acc_bytes;
+        if (kt_acc_buf.size() < 2 * acc_buf_bytes)
+            kt_acc_buf.resize(2 * acc_buf_bytes);
+        unsigned char* CvBuf = kt_acc_buf.data();
+        unsigned char* CeBuf = CvBuf + acc_buf_bytes;
+        long ytiles = RM > 1 ? (m - m0) / RM : 1;
+        long xtiles = RN > 1 ? (n - n0) / RN : 1;
+        long tiles = xtiles * ytiles;
+        long duty = (tiles + nth - 1) / nth;
+        long start = duty * ith;
+        long end = start + duty;
+        if (end > tiles)
+            end = tiles;
+        for (long job = start; job < end; ++job) {
+            long ii = m0 + job / xtiles * RM;
+            long jj = n0 + job % xtiles * RN;
+            for (int t = 0; t < KT_NACC; ++t) {
+                __riscv_vse32_v_f32m1((float*)(CvBuf + (size_t)t * acc_bytes),
+                                      __riscv_vfmv_v_f_f32m1(0.0f, vl), vl);
+                __riscv_vse32_v_f32m1((float*)(CeBuf + (size_t)t * acc_bytes),
+                                      __riscv_vfmv_v_f_f32m1(0.0f, vl), vl);
+            }
+            for (long l = 0; l < k; l += (long)vl)
+#pragma GCC unroll 100
+                for (int j = 0; j < RN; ++j)
+#pragma GCC unroll 100
+                    for (int i = 0; i < RM; ++i) {
+                        V a = load<V>(INDEX(A, lda, ii + i, l));
+                        V b = load<V>(INDEX(B, ldb, jj + j, l));
+                        float* cvp = (float*)(CvBuf + (size_t)(j * RM + i) * acc_bytes);
+                        float* cep = (float*)(CeBuf + (size_t)(j * RM + i) * acc_bytes);
+                        V cv = __riscv_vle32_v_f32m1(cvp, vl);
+                        V ce = __riscv_vle32_v_f32m1(cep, vl);
+                        if (PRECISE)
+                            cv = madder(a, b, cv, &ce);
+                        else
+                            cv = madd(a, b, cv);
+                        __riscv_vse32_v_f32m1(cvp, cv, vl);
+                        if (PRECISE)
+                            __riscv_vse32_v_f32m1(cep, ce, vl);
+                    }
+#pragma GCC unroll 100
+            for (int j = 0; j < RN; ++j)
+#pragma GCC unroll 100
+                for (int i = 0; i < RM; ++i)
+                    store(INDEX(C, ldc, jj + j, ii + i),
+                          hsum(__riscv_vle32_v_f32m1(
+                              (const float*)(CvBuf + (size_t)(j * RM + i) * acc_bytes), vl)));
+        }
+#else
         long ytiles = RM > 1 ? (m - m0) / RM : 1;
         long xtiles = RN > 1 ? (n - n0) / RN : 1;
         long tiles = xtiles * ytiles;
@@ -646,6 +822,7 @@ class tinyBLAS {
                 for (int i = 0; i < RM; ++i)
                     store(INDEX(C, ldc, jj + j, ii + i), hsum(Cv[j][i]));
         }
+#endif
     }
 
     const TA* const A;
@@ -1050,5 +1227,137 @@ class tinyBLAS_Q0_AVX2 {
     const int nth;
 };
 #endif  // __AVX2__
+
+// RISC-V RVV quantized (Q4_0/Q8_0 x Q8_0) matrix multiplication.  Follows the
+// same blocked-tile scheme as tinyBLAS_Q0_AVX2: per (RM,RN) tile accumulate
+// scale * dot(int8 dequant(a), int8 b) over k blocks.  Uses vint8m1_t/vint16m2_t
+// widening dot via vmv/vmacc on 32-bit, then converts to float.
+#if defined(KT_RVV)
+template <int CONFIG, typename TA, typename TB, typename TC>
+class tinyBLAS_Q0_RVV {
+   public:
+    tinyBLAS_Q0_RVV(long k, const TA* A, long lda, const TB* B, long ldb, TC* C, long ldc, int ith, int nth)
+        : A(A), B(B), C(C), k(k), lda(lda), ldb(ldb), ldc(ldc), ith(ith), nth(nth) {
+    }
+
+    void matmul(long m, long n, int task) {
+        if (task == GGML_TASK_TYPE_COMPUTE)
+            mnpack(0, m, 0, n);
+    }
+
+   private:
+    void mnpack(long m0, long m, long n0, long n) {
+        long mc, nc, mp, np;
+        // Conservative 1x2 / 2x1 tiling: 32 arch registers but LMUL=2
+        // intermediates, keep tiles small for register pressure safety.
+        // NOTE: every branch here must genuinely reduce the problem range;
+        // recursing with an empty m or n range (m == m0 || n == n0) would
+        // loop forever, so bail out early on degenerate ranges.
+        if (m <= m0 || n <= n0)
+            return;
+        if (MIN(m - m0, 2) >= 2 && MIN(n - n0, 2) >= 2) {
+            mc = 2;
+            nc = 2;
+            gemm<2, 2>(m0, m, n0, n);
+        } else if (MIN(m - m0, 2) >= 2) {
+            mc = 2;
+            nc = 1;
+            gemm<2, 1>(m0, m, n0, n);
+        } else if (MIN(n - n0, 2) >= 2) {
+            mc = 1;
+            nc = 2;
+            gemm<1, 2>(m0, m, n0, n);
+        } else if (m - m0 >= 1 && n - n0 >= 1) {
+            mc = 1;
+            nc = 1;
+            gemm<1, 1>(m0, m, n0, n);
+        } else {
+            return;
+        }
+        mp = m0 + (m - m0) / mc * mc;
+        np = n0 + (n - n0) / nc * nc;
+        if (mp == m0 && np == n0)
+            return;  // no progress possible; avoids infinite recursion
+        mnpack(mp, m, n0, np);
+        mnpack(m0, m, np, n);
+    }
+
+    template <int RM, int RN>
+    NOINLINE void gemm(long m0, long m, long n0, long n) {
+        long ytiles = RM > 1 ? (m - m0) / RM : 1;
+        long xtiles = RN > 1 ? (n - n0) / RN : 1;
+        long tiles = xtiles * ytiles;
+        long duty = (tiles + nth - 1) / nth;
+        long start = duty * ith;
+        long end = start + duty;
+        if (end > tiles) end = tiles;
+        for (long job = start; job < end; ++job) {
+            long ii = m0 + job / xtiles * RM;
+            long jj = n0 + job % xtiles * RN;
+            float Cv[RN][RM] = {};
+            for (long l = 0; l < k; ++l)
+                for (int j = 0; j < RN; ++j)
+                    for (int i = 0; i < RM; ++i)
+                        Cv[j][i] += dot(INDEX(A, lda, ii + i, l), INDEX(B, ldb, jj + j, l));
+            for (int j = 0; j < RN; ++j)
+                for (int i = 0; i < RM; ++i)
+                    store(INDEX(C, ldc, jj + j, ii + i), Cv[j][i]);
+        }
+    }
+
+    // dequantize int8 q8_0 block (32 elems) to f32 with scale, dot with b
+    inline float dot(const block_q8_0* a, const block_q8_0* b) {
+        const size_t vlmax8 = __riscv_vsetvlmax_e8m1();
+        vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vlmax8);
+        const int8_t* pa = a->qs;
+        const int8_t* pb = b->qs;
+        for (int off = 0; off < 32; off += (int)vlmax8) {
+            size_t vl = __riscv_vsetvl_e8m1(32 - off);
+            vint8m1_t va = __riscv_vle8_v_i8m1(pa + off, vl);
+            vint8m1_t vb = __riscv_vle8_v_i8m1(pb + off, vl);
+            vint16m2_t prod = __riscv_vwmul_vv_i16m2(va, vb, vl);
+            acc = __riscv_vwredsum_vs_i16m2_i32m1(prod, acc, vl);
+        }
+        long s = __riscv_vmv_x_s_i32m1_i32(acc);
+        return unhalf(a->d) * unhalf(b->d) * (float)s;
+    }
+
+    // q4_0 block: nibbles in [0,15] -> signed by subtracting 8
+    inline float dot(const block_q4_0* a, const block_q8_0* b) {
+        const size_t vlmax8 = __riscv_vsetvlmax_e8m1();
+        vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vlmax8);
+        const uint8_t* pa = a->qs;
+        const int8_t* pb = b->qs;
+        for (int off = 0; off < 16; off += (int)vlmax8) {
+            size_t vl = __riscv_vsetvl_e8m1(16 - off);
+            vuint8m1_t raw = __riscv_vle8_v_u8m1(pa + off, vl);
+            vint8m1_t lo = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(
+                                                    __riscv_vand_vx_u8m1(raw, 0x0f, vl)),
+                                                8, vl);
+            vint8m1_t hi = __riscv_vsub_vx_i8m1(__riscv_vreinterpret_v_u8m1_i8m1(
+                                                    __riscv_vsrl_vx_u8m1(raw, 4, vl)),
+                                                8, vl);
+            vint8m1_t vb_lo = __riscv_vle8_v_i8m1(pb + off, vl);
+            vint8m1_t vb_hi = __riscv_vle8_v_i8m1(pb + 16 + off, vl);
+            vint16m2_t p1 = __riscv_vwmul_vv_i16m2(lo, vb_lo, vl);
+            vint16m2_t p2 = __riscv_vwmul_vv_i16m2(hi, vb_hi, vl);
+            vint16m2_t p = __riscv_vadd_vv_i16m2(p1, p2, vl);
+            acc = __riscv_vwredsum_vs_i16m2_i32m1(p, acc, vl);
+        }
+        long s = __riscv_vmv_x_s_i32m1_i32(acc);
+        return unhalf(a->d) * unhalf(b->d) * (float)s;
+    }
+
+    const TA* const A;
+    const TB* const B;
+    TC* const C;
+    const long k;
+    const long lda;
+    const long ldb;
+    const long ldc;
+    const int ith;
+    const int nth;
+};
+#endif  // KT_RVV
 
 }  // namespace
