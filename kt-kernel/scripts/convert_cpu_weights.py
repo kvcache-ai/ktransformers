@@ -60,7 +60,7 @@ def load_model_config(input_path: str, input_type: str = None) -> Dict:
 
     Args:
         input_path: Path to directory containing config.json
-        input_type: Input weight type (fp8/fp16/bf16/awq), used to validate FP8 config
+        input_type: Input weight type (fp8/fp16/bf16/awq/mxfp4/mxfp8/rawint4), used to validate quantization config
 
     Returns:
         Dictionary with model configuration
@@ -104,19 +104,19 @@ def load_model_config(input_path: str, input_type: str = None) -> Dict:
             f"num_hidden_layers must be a positive integer, got {num_hidden_layers!r}"
         )
 
-    # For FP8 input, extract and validate quantization_config
-    if input_type == "fp8":
+    # For quantized input types, extract and validate quantization_config
+    if input_type in ["fp8", "mxfp4", "mxfp8", "rawint4"]:
         quant_config = config.get("quantization_config") or text_cfg.get("quantization_config")
         if quant_config is None:
             raise ValueError(
-                "FP8 input type specified but 'quantization_config' not found in config.json. "
+                f"{input_type.upper()} input type specified but 'quantization_config' not found in config.json. "
                 "Expected quantization_config with weight_block_size field."
             )
 
         weight_block_size = quant_config.get("weight_block_size")
         if weight_block_size is None:
             raise ValueError(
-                "FP8 quantization_config found but 'weight_block_size' field is missing. "
+                f"{input_type.upper()} quantization_config found but 'weight_block_size' field is missing. "
                 "Expected format: 'weight_block_size': [128, 128]"
             )
 
@@ -126,10 +126,17 @@ def load_model_config(input_path: str, input_type: str = None) -> Dict:
                 "Expected a list of two integers, e.g., [128, 128]"
             )
 
-        model_config["fp8_weight_block_size"] = weight_block_size
-        print(f"FP8 quantization config detected:")
+        model_config[f"{input_type}_weight_block_size"] = weight_block_size
+        print(f"{input_type.upper()} quantization config detected:")
         print(f"  format: {quant_config.get('fmt', 'unknown')}")
         print(f"  weight_block_size: {weight_block_size}")
+
+        # For MXFP4/MXFP8, also check for scale_block_size (microscaling)
+        if input_type in ["mxfp4", "mxfp8"]:
+            scale_block_size = quant_config.get("scale_block_size")
+            if scale_block_size:
+                model_config[f"{input_type}_scale_block_size"] = scale_block_size
+                print(f"  scale_block_size: {scale_block_size}")
     return model_config
 
 
@@ -589,6 +596,91 @@ class AWQToColumnMajorConverter(ConverterBase):
         return output_tensors
 
 
+class RAWINT4ToColumnMajorConverter(ConverterBase):
+    """Convert raw INT4 safetensors to NUMA-sliced column-major format.
+
+    Unlike AWQ, RAWINT4 weights are stored without interleaving - they are
+    directly packed INT4 values in row-major order.
+    """
+
+    def _convert_layer_experts(self, layer_idx: int, expert_ids: List[int]) -> Dict[str, torch.Tensor]:
+        """Convert all experts in a layer to column major format"""
+        output_tensors = {}
+
+        start_time = time.time()
+        print(f"Converting layer {layer_idx} with {len(expert_ids)} experts...")
+
+        # Pre-compute projection name mappings
+        proj_mappings = {"up_proj": "ffn_up_exps", "gate_proj": "ffn_gate_exps", "down_proj": "ffn_down_exps"}
+
+        # Batch process all experts to reduce nested loops
+        for proj_name, out_proj in proj_mappings.items():
+            # Load all expert tensors for this projection at once
+            expert_weights = []
+            expert_scales = []
+            expert_qzeros = []
+            valid_experts = []
+            has_qzeros = True
+
+            for expert_id in expert_ids:
+                weight_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.weight"
+                scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.scales"
+                qzeros_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.qzeros"
+
+                if weight_key in self.tensor_file_map:
+                    weight = self._load_tensor(weight_key)
+                    scales = self._load_tensor(scale_key) if scale_key in self.tensor_file_map else None
+                    qzeros = self._load_tensor(qzeros_key) if qzeros_key in self.tensor_file_map else None
+
+                    expert_weights.append(weight)
+                    expert_scales.append(scales)
+                    expert_qzeros.append(qzeros)
+                    valid_experts.append(expert_id)
+                    if qzeros is None:
+                        has_qzeros = False
+
+            if not valid_experts:
+                continue
+
+            print(f"  Processing {proj_name}: {len(valid_experts)} experts")
+
+            weights_stack = torch.stack([w for w in expert_weights if w is not None], dim=0)
+
+            batch_size = 128
+
+            for batch_start in range(0, len(valid_experts), batch_size):
+                batch_end = min(batch_start + batch_size, len(valid_experts))
+                weights_batch = weights_stack[batch_start:batch_end].to("cuda")
+
+                # RAWINT4: weights are already INT4 packed (I32), no AWQ interleaving to reverse
+                # Just unpack row-major INT4 -> transpose to column-major -> pack
+                iweights_batch = unpack(weights_batch)  # Row-major unpack
+
+                # For RAWINT4, qzeros might also be packed without interleaving
+                izeros_batch = None
+                if has_qzeros:
+                    qzeros_stack = torch.stack(expert_qzeros, dim=0)
+                    qzeros_batch = qzeros_stack[batch_start:batch_end].to("cuda")
+                    izeros_batch = unpack(qzeros_batch)
+
+                qweights_1d_batch, qzeros_1d_batch = pack_column_major_1d(iweights_batch, izeros_batch)
+
+                for idx in range(batch_start, batch_end):
+                    expert_id = valid_experts[idx]
+                    batch_idx = idx - batch_start
+                    if expert_scales[idx] is not None:
+                        output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.scale"] = expert_scales[idx].flatten()
+                    output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.weight"] = qweights_1d_batch[batch_idx].cpu()
+                    if qzeros_1d_batch is not None:
+                        output_tensors[f"blk.{layer_idx}.{out_proj}.{expert_id}.qzeros"] = qzeros_1d_batch[batch_idx].cpu()
+
+            gc.collect()
+
+        elapsed = time.time() - start_time
+        print(f"  Generated {len(output_tensors)} column-major 1D tensors in {elapsed:.2f}s")
+        return output_tensors
+
+
 class OnlineQuantConverter(ConverterBase):
     """Convert FP8/FP16/BF16 weights to quantized format using AMXMoEWrapper.
 
@@ -622,11 +714,25 @@ class OnlineQuantConverter(ConverterBase):
         else:
             self._scratch_path = output_path
 
-        # For FP8, get block size from model_config
+        # For quantized input types, get block sizes from model_config
         if input_type == "fp8":
             self.fp8_block_size = model_config.get("fp8_weight_block_size", [128, 128])
         else:
             self.fp8_block_size = None
+
+        if input_type == "mxfp4":
+            self.mxfp4_weight_block_size = model_config.get("mxfp4_weight_block_size", [128, 128])
+            self.mxfp4_scale_block_size = model_config.get("mxfp4_scale_block_size", [32, 32])
+        else:
+            self.mxfp4_weight_block_size = None
+            self.mxfp4_scale_block_size = None
+
+        if input_type == "mxfp8":
+            self.mxfp8_weight_block_size = model_config.get("mxfp8_weight_block_size", [128, 128])
+            self.mxfp8_scale_block_size = model_config.get("mxfp8_scale_block_size", [32, 32])
+        else:
+            self.mxfp8_weight_block_size = None
+            self.mxfp8_scale_block_size = None
 
     def close(self):
         """Close file handles and clean up tmpfs scratch directory"""
@@ -662,6 +768,86 @@ class OnlineQuantConverter(ConverterBase):
 
         # Dequantize: convert to bf16 and multiply by scale_inv
         dequantized = fp8_reshaped.to(torch.bfloat16) * scale_inv_reshaped
+
+        # Reshape back to [H, W]
+        dequantized = dequantized.view(H, W).contiguous()
+
+        return dequantized
+
+    def _dequantize_mxfp4_blockwise(self, mxfp4_weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize MXFP4 weight with microscaling.
+
+        MXFP4 uses 4-bit floats with a shared scale per block (microscaling).
+        The weight is packed as uint8 (2 FP4 values per byte).
+
+        Args:
+            mxfp4_weight: MXFP4 weight tensor of shape [H, W] (packed uint8)
+            scale: Scale tensor of shape [H//scale_block_h, W//scale_block_w] (FP8/E8M0)
+
+        Returns:
+            Dequantized BF16 weight tensor of shape [H*2, W] (unpacked)
+        """
+        H, W = mxfp4_weight.shape
+        scale_block_h, scale_block_w = self.mxfp4_scale_block_size
+
+        num_scale_blocks_h = H // scale_block_h
+        num_scale_blocks_w = W // scale_block_w
+
+        # Unpack uint8 -> 2x FP4 values (each 4 bits)
+        # mxfp4_weight is [H, W] where each byte contains 2 FP4 values
+        # After unpacking: [H, W*2]
+        weight_unpacked = torch.zeros((H, W * 2), dtype=torch.uint8, device=mxfp4_weight.device)
+        weight_unpacked[:, 0::2] = (mxfp4_weight >> 4) & 0xF  # High nibble
+        weight_unpacked[:, 1::2] = mxfp4_weight & 0xF         # Low nibble
+
+        # Reshape to blocks: [num_scale_blocks_h, scale_block_h, num_scale_blocks_w, scale_block_w*2]
+        weight_reshaped = weight_unpacked.view(num_scale_blocks_h, scale_block_h, num_scale_blocks_w, scale_block_w * 2)
+
+        # Reshape scale for broadcasting: [num_scale_blocks_h, 1, num_scale_blocks_w, 1]
+        scale_reshaped = scale.view(num_scale_blocks_h, 1, num_scale_blocks_w, 1)
+
+        # Convert FP4 to FP32 then multiply by scale
+        # FP4 (E2M1) values: 0-15 map to specific float values
+        # For simplicity, use a lookup table
+        fp4_to_fp32 = torch.tensor([
+            0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,  # Positive
+            -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0  # Negative (with sign bit)
+        ], dtype=torch.float32, device=mxfp4_weight.device)
+
+        weight_fp32 = fp4_to_fp32[weight_reshaped]
+        dequantized = weight_fp32.to(torch.bfloat16) * scale_reshaped.to(torch.bfloat16)
+
+        # Reshape back to [H, W*2]
+        dequantized = dequantized.view(H, W * 2).contiguous()
+
+        return dequantized
+
+    def _dequantize_mxfp8_blockwise(self, mxfp8_weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize MXFP8 weight with microscaling.
+
+        MXFP8 uses FP8 (E4M3 or E5M2) with a shared scale per block (microscaling).
+
+        Args:
+            mxfp8_weight: MXFP8 weight tensor of shape [H, W] (FP8)
+            scale: Scale tensor of shape [H//scale_block_h, W//scale_block_w] (FP8/E8M0)
+
+        Returns:
+            Dequantized BF16 weight tensor of shape [H, W]
+        """
+        H, W = mxfp8_weight.shape
+        scale_block_h, scale_block_w = self.mxfp8_scale_block_size
+
+        num_scale_blocks_h = H // scale_block_h
+        num_scale_blocks_w = W // scale_block_w
+
+        # Reshape to blocks: [num_scale_blocks_h, scale_block_h, num_scale_blocks_w, scale_block_w]
+        weight_reshaped = mxfp8_weight.view(num_scale_blocks_h, scale_block_h, num_scale_blocks_w, scale_block_w)
+
+        # Reshape scale for broadcasting: [num_scale_blocks_h, 1, num_scale_blocks_w, 1]
+        scale_reshaped = scale.view(num_scale_blocks_h, 1, num_scale_blocks_w, 1)
+
+        # Dequantize: convert to bf16 and multiply by scale
+        dequantized = weight_reshaped.to(torch.bfloat16) * scale_reshaped.to(torch.bfloat16)
 
         # Reshape back to [H, W]
         dequantized = dequantized.view(H, W).contiguous()
@@ -879,7 +1065,7 @@ class OnlineQuantConverter(ConverterBase):
                 if down_key not in self.tensor_file_map:
                     raise KeyError(f"Missing down weight for layer {layer_idx}, expert {expert_id}")
 
-                if self.input_type == "fp8":
+                if self.input_type in ["fp8", "mxfp4", "mxfp8"]:
                     for proj in ["gate_proj", "up_proj", "down_proj"]:
                         scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj}.weight_scale_inv"
                         if scale_key not in self.tensor_file_map:
@@ -951,6 +1137,75 @@ class OnlineQuantConverter(ConverterBase):
                 gate_proj = _batch_dequant("gate_proj")
                 up_proj = _batch_dequant("up_proj")
                 down_proj = _batch_dequant("down_proj")
+
+            elif self.input_type in ["mxfp4", "mxfp8"]:
+                # Batched MXFP4/MXFP8 dequantization with microscaling
+                CHUNK = 64  # experts per GPU chunk
+
+                def _batch_dequant_mx(proj_name):
+                    from torch.profiler import record_function
+
+                    weight_list = []
+                    scale_list = []
+                    t_load = time.time()
+                    with record_function(f"{self.input_type}_load_cpu_{proj_name}"):
+                        for eid in expert_ids:
+                            weight_list.append(
+                                self._load_tensor(f"model.layers.{layer_idx}.mlp.experts.{eid}.{proj_name}.weight")
+                            )
+                            scale_list.append(
+                                self._load_tensor(
+                                    f"model.layers.{layer_idx}.mlp.experts.{eid}.{proj_name}.weight_scale_inv"
+                                )
+                            )
+                    load_elapsed = time.time() - t_load
+                    total_bytes = sum(t.nelement() * t.element_size() for t in weight_list) + sum(
+                        t.nelement() * t.element_size() for t in scale_list
+                    )
+                    speed_gbs = total_bytes / load_elapsed / 1e9 if load_elapsed > 0 else float("inf")
+                    print(
+                        f"    {proj_name}: loaded {len(weight_list)} experts "
+                        f"({total_bytes / 1e6:.1f} MB) in {load_elapsed:.3f}s "
+                        f"= {speed_gbs:.2f} GB/s disk read"
+                    )
+
+                    bf16_chunks = []
+                    t_dequant = time.time()
+                    for i in range(0, len(weight_list), CHUNK):
+                        chunk_idx = i // CHUNK
+                        with record_function(f"{self.input_type}_stack_{proj_name}_chunk{chunk_idx}"):
+                            chunk_weight = torch.stack(weight_list[i : i + CHUNK])  # [C, M, N]
+                            chunk_scale = torch.stack(scale_list[i : i + CHUNK])  # [C, sm, sn]
+                            C, M, N = chunk_weight.shape
+                            _, sm, sn = chunk_scale.shape
+
+                        with record_function(f"{self.input_type}_to_cuda_{proj_name}_chunk{chunk_idx}"):
+                            flat_weight = chunk_weight.reshape(C * M, N).contiguous().cuda()
+                            flat_scale = chunk_scale.reshape(C * sm, sn).contiguous().cuda()
+                            del chunk_weight, chunk_scale
+
+                        with record_function(f"{self.input_type}_dequant_{proj_name}_chunk{chunk_idx}"):
+                            if self.input_type == "mxfp4":
+                                flat_bf16 = self._dequantize_mxfp4_blockwise(flat_weight, flat_scale)
+                            else:  # mxfp8
+                                flat_bf16 = self._dequantize_mxfp8_blockwise(flat_weight, flat_scale)
+                            del flat_weight, flat_scale
+
+                        with record_function(f"{self.input_type}_to_cpu_{proj_name}_chunk{chunk_idx}"):
+                            bf16_cpu = flat_bf16.cpu()
+                            del flat_bf16
+
+                        bf16_chunks.append(bf16_cpu.reshape(C, M, N))
+                    dequant_elapsed = time.time() - t_dequant
+
+                    with record_function(f"{self.input_type}_cat_{proj_name}"):
+                        result = torch.cat(bf16_chunks, dim=0).contiguous()
+                    print(f"    {proj_name}: dequant+transfer in {dequant_elapsed:.3f}s")
+                    return result
+
+                gate_proj = _batch_dequant_mx("gate_proj")
+                up_proj = _batch_dequant_mx("up_proj")
+                down_proj = _batch_dequant_mx("down_proj")
 
             else:
                 gate_weights = []
@@ -1106,9 +1361,9 @@ def main():
     parser.add_argument("--input-path", "-i", required=True, help="Input directory with safetensors")
     parser.add_argument(
         "--input-type",
-        choices=["awq", "fp8", "fp16", "bf16"],
+        choices=["awq", "fp8", "fp16", "bf16", "mxfp4", "mxfp8", "rawint4"],
         required=True,
-        help="Input weight type (awq/fp8/fp16/bf16)",
+        help="Input weight type (awq/fp8/fp16/bf16/mxfp4/mxfp8/rawint4)",
     )
     parser.add_argument("--output", "-o", required=True, help="Output directory for converted safetensors")
     parser.add_argument(
@@ -1189,8 +1444,9 @@ def main():
                 input_type=None,
                 merge_to_safetensor=merge_to_safetensor,
             )
-        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
+        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16", "mxfp4", "mxfp8"]:
             # Use OnlineQuantConverter for both INT4 and INT8 quantization
+            # MXFP4/MXFP8 are microscaling formats that get quantized to INT4/INT8
             converter = OnlineQuantConverter(
                 args.input_path,
                 args.output,
@@ -1201,6 +1457,17 @@ def main():
                 quant_method,
                 merge_to_safetensor,
                 save_backward_weights=args.save_backward_weights,
+            )
+        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type == "rawint4":
+            # RAWINT4: already quantized int4 weights, use direct converter
+            converter = RAWINT4ToColumnMajorConverter(
+                args.input_path,
+                args.output,
+                model_config,
+                args.cpuinfer_threads,
+                args.threadpool_count,
+                input_type=None,
+                merge_to_safetensor=merge_to_safetensor,
             )
         else:
             raise ValueError(

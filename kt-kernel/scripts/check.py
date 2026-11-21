@@ -81,43 +81,85 @@ def read_safetensor_keys_from_folder(folder_path) -> dict:
     return key_to_file_map
 
 
-def read_amx_tensor_from_folder(folder_path, keys) -> dict:
-    layer_list = [f"_layer_{i}" for i in range(3, 61)]
-    numa_list = ["_numa_0", "_numa_1"]
+import glob
 
-    down_list = [f"INT4_down_{i}_quant_.kt" for i in range(256)]
-    gate_list = [f"INT4_gate_{i}_quant_.kt" for i in range(256)]
-    up_list = [f"INT4_up_{i}_quant_.kt" for i in range(256)]
-    down_scale_list = [f"INT4_down_{i}_scale_.kt" for i in range(256)]
-    gate_scale_list = [f"INT4_gate_{i}_scale_.kt" for i in range(256)]
-    up_scale_list = [f"INT4_up_{i}_scale_.kt" for i in range(256)]
-    target = ["ffn_up_exps", "ffn_down_exps", "ffn_gate_exps"]
+
+def read_amx_tensor_from_folder(folder_path, keys) -> dict:
+    """Dynamically discover experts from the AMX folder structure instead of hardcoding 256."""
     tensor_file_map = {}
+
+    # Group keys by layer to avoid redundant filesystem scans
+    keys_by_layer = defaultdict(list)
     for key in keys:
-        layer = int(key.split(".")[1])
+        try:
+            layer = int(key.split(".")[1])
+        except (IndexError, ValueError):
+            continue
         if layer < 3:
             continue
-        layer_path = f"_layer_{layer}"
-        # concatenate the path layer/numa/(down|gate|up)_(0-255)_3670016Byte_quant_.kt
-        # store the path in the tensor_file_map
-        # key = key+'.idx.weight'
-        # scale_key = key+'.idx.scale'
-        for numa_idx, numa in enumerate(numa_list):
-            # TODO: 256 should be a variable
-            for i in range(256):
-                prefix_key = ".".join(key.split(".")[:-1])
+        keys_by_layer[layer].append(key)
 
-                experts_key = prefix_key + f".{i}.numa.{numa_idx}.weight"
-                scale_key = prefix_key + f".{i}.numa.{numa_idx}.scale"
-                if "down" in experts_key:
-                    tensor_file_map[experts_key] = os.path.join(folder_path, layer_path, numa, down_list[i])
-                    tensor_file_map[scale_key] = os.path.join(folder_path, layer_path, numa, down_scale_list[i])
-                elif "gate" in experts_key:
-                    tensor_file_map[experts_key] = os.path.join(folder_path, layer_path, numa, gate_list[i])
-                    tensor_file_map[scale_key] = os.path.join(folder_path, layer_path, numa, gate_scale_list[i])
-                elif "up" in experts_key:
-                    tensor_file_map[experts_key] = os.path.join(folder_path, layer_path, numa, up_list[i])
-                    tensor_file_map[scale_key] = os.path.join(folder_path, layer_path, numa, up_scale_list[i])
+    for layer, layer_keys in keys_by_layer.items():
+        layer_path = os.path.join(folder_path, f"_layer_{layer}")
+        if not os.path.exists(layer_path):
+            continue
+
+        # Discover NUMA folders
+        numa_folders = []
+        for item in os.listdir(layer_path):
+            if item.startswith("_numa_"):
+                try:
+                    numa_idx = int(item.split("_")[-1])
+                    numa_folders.append((numa_idx, item))
+                except ValueError:
+                    continue
+        numa_folders.sort(key=lambda x: x[0])
+
+        if not numa_folders:
+            continue
+
+        # Process each NUMA folder
+        for numa_idx, numa_folder in numa_folders:
+            numa_path = os.path.join(layer_path, numa_folder)
+
+            # Discover expert files dynamically using glob
+            for key in layer_keys:
+                prefix_key = ".".join(key.split(".")[:-1])
+                is_down = "down" in key
+                is_gate = "gate" in key
+                is_up = "up" in key
+
+                proj_name = "down" if is_down else ("gate" if is_gate else "up")
+
+                # Use glob to find all expert files for this projection
+                quant_pattern = os.path.join(numa_path, f"INT4_{proj_name}_*_quant_.kt")
+                scale_pattern = os.path.join(numa_path, f"INT4_{proj_name}_*_scale_.kt")
+
+                quant_files = sorted(glob.glob(quant_pattern))
+                scale_files = sorted(glob.glob(scale_pattern))
+
+                # Parse expert index from filename and build map
+                for quant_file in quant_files:
+                    filename = os.path.basename(quant_file)
+                    # Format: INT4_{proj}_{expert_idx}_*_quant_.kt
+                    try:
+                        expert_idx = int(filename.split("_")[2])
+                    except (ValueError, IndexError):
+                        continue
+
+                    experts_key = f"{prefix_key}.{expert_idx}.numa.{numa_idx}.weight"
+                    tensor_file_map[experts_key] = quant_file
+
+                for scale_file in scale_files:
+                    filename = os.path.basename(scale_file)
+                    try:
+                        expert_idx = int(filename.split("_")[2])
+                    except (ValueError, IndexError):
+                        continue
+
+                    scale_key = f"{prefix_key}.{expert_idx}.numa.{numa_idx}.scale"
+                    tensor_file_map[scale_key] = scale_file
+
     return tensor_file_map
 
 
