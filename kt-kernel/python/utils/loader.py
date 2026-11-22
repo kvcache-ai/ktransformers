@@ -12,6 +12,8 @@ import os
 import numpy as np
 import torch
 from enum import IntEnum
+from threading import Lock
+from weakref import WeakValueDictionary
 from safetensors import safe_open
 from gguf.gguf_reader import GGUFReader
 
@@ -146,9 +148,23 @@ class SafeTensorLoader:
     tensor_type_map: dict
     file_handle_map: dict
     tensor_device_map: dict
+    _shared_loaders = WeakValueDictionary()
+    _shared_loaders_lock = Lock()
 
     def __init__(self, file_path: str):
         self.__load_tensor_file_map(file_path)
+
+    @classmethod
+    def for_checkpoint(cls, file_path: str) -> SafeTensorLoader:
+        """Share a checkpoint index while a wrapper still owns it."""
+        resolved = os.path.realpath(file_path)
+        key = (cls, resolved)
+        with cls._shared_loaders_lock:
+            loader = cls._shared_loaders.get(key)
+            if loader is None:
+                loader = cls(resolved)
+                cls._shared_loaders[key] = loader
+            return loader
 
     def __load_tensor_file_map(self, file_path: str):
         file_path = os.path.abspath(file_path)

@@ -307,8 +307,6 @@ class AMXMoEWrapper(BaseMoEWrapper):
     Supports AMXINT4 and AMXINT8 quantization methods.
     """
 
-    _safetensor_loader_instance = None  # Singleton SafeTensorLoader
-
     def __init__(
         self,
         layer_idx: int,
@@ -385,11 +383,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
         if glob.glob(os.path.join(weight_path, "*.safetensors")):
             self.load_merged_weight = True
 
-        # Initialize SafeTensor loader (singleton)
         if self.load_merged_weight:
-            if AMXMoEWrapper._safetensor_loader_instance is None:
-                AMXMoEWrapper._safetensor_loader_instance = SafeTensorLoader(weight_path)
-            self.safetensor_loader = AMXMoEWrapper._safetensor_loader_instance
+            self.safetensor_loader = SafeTensorLoader.for_checkpoint(weight_path)
 
         # AMX-specific weight storage
         self.gate_weights = None

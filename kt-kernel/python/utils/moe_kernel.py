@@ -32,8 +32,6 @@ class GeneralMoEWrapper(BaseMoEWrapper):
     Supports MOE_INT4 and MOE_INT8 quantization methods.
     """
 
-    _safetensor_loader_instance = None  # Singleton SafeTensorLoader
-
     def __init__(
         self,
         layer_idx: int,
@@ -108,11 +106,8 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         if glob.glob(os.path.join(weight_path, "*.safetensors")):
             self.load_merged_weight = True
 
-        # Initialize SafeTensor loader (singleton)
         if self.load_merged_weight:
-            if GeneralMoEWrapper._safetensor_loader_instance is None:
-                GeneralMoEWrapper._safetensor_loader_instance = SafeTensorLoader(weight_path)
-            self.safetensor_loader = GeneralMoEWrapper._safetensor_loader_instance
+            self.safetensor_loader = SafeTensorLoader.for_checkpoint(weight_path)
 
         # moe-specific weight storage
         self.gate_weights = None
