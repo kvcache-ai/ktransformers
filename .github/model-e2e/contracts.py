@@ -145,11 +145,35 @@ def verify_candidate(root, request):
         )
         require(digest(path) == entry["sha256"], f"Wheel digest mismatch: {package}")
         with zipfile.ZipFile(path) as wheel:
-            metadata = [
-                name
-                for name in wheel.namelist()
-                if name.endswith(".dist-info/METADATA")
-            ]
+            names = set(wheel.namelist())
+            if package == "kt-kernel":
+                foreign_roots = {
+                    "deep_gemm",
+                    "flash_attn_origin",
+                    "include",
+                    "lib",
+                    "sgl_kernel",
+                    "sgl_kernel_kt.libs",
+                    "triton_kernels",
+                }
+                conflicts = sorted(
+                    name for name in names if name.partition("/")[0] in foreign_roots
+                )
+                require(
+                    not conflicts,
+                    "standalone kt-kernel must not own SGLang runtime: "
+                    + ", ".join(conflicts[:3]),
+                )
+            elif package == "sglang-kt":
+                require(
+                    {
+                        "sgl_kernel/payload_runtime.py",
+                        "sgl_kernel/_payload_manifest.py",
+                    }
+                    <= names,
+                    "sglang-kt must own the SGL payload runtime and manifest",
+                )
+            metadata = [name for name in names if name.endswith(".dist-info/METADATA")]
             require(len(metadata) == 1, "Expected one wheel METADATA")
             meta = BytesParser().parsebytes(wheel.read(metadata[0]))
             require(

@@ -48,13 +48,25 @@ def raw_wheels(tmp_path):
                 path = module / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fixture-data" * 20)
+            for name in (
+                "deep_gemm/__init__.py",
+                "triton_kernels/__init__.py",
+                "flash_attn_origin/__init__.py",
+                "include/fixture.h",
+                "lib/libfixture.so",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture-data" * 20)
             (dist / "LICENSE").write_text("SGL license fixture")
         path = raw / f"{package.replace('-', '_')}-1.0-{tag}.whl"
         carriers.pack(root, path)
     return raw
 
 
-def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch):
+def test_fresh_carriers_assign_sglang_runtime_without_shadowing_standalone_kt(
+    tmp_path, monkeypatch
+):
     raw = raw_wheels(tmp_path)
     monkeypatch.setattr(carriers, "binary_evidence", lambda roots: {"fixture": True})
     monkeypatch.setattr(carriers.subprocess, "check_output", lambda *args, **kwargs: "")
@@ -67,7 +79,29 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     assert {entry["version"] for entry in entries} == {"1.0"}
     kt = next(output.glob("kt_kernel-*.whl"))
     with zipfile.ZipFile(kt) as wheel:
-        assert wheel.read("sgl_kernel/payload_runtime.py") == b"fixture-data" * 20
+        names = wheel.namelist()
+        for namespace in (
+            "sgl_kernel",
+            "deep_gemm",
+            "triton_kernels",
+            "flash_attn_origin",
+            "include",
+            "lib",
+        ):
+            assert not any(
+                name == namespace or name.startswith(namespace + "/") for name in names
+            )
+        assert "sgl_kernel_kt_payload_core/payload.part" in names
+    with zipfile.ZipFile(next(output.glob("sglang_kt-*.whl"))) as wheel:
+        for name in (
+            "sgl_kernel/payload_runtime.py",
+            "deep_gemm/__init__.py",
+            "triton_kernels/__init__.py",
+            "flash_attn_origin/__init__.py",
+            "include/fixture.h",
+            "lib/libfixture.so",
+        ):
+            assert wheel.read(name) == b"fixture-data" * 20
         assert any(
             name.endswith("sgl-native-origin/LICENSE") for name in wheel.namelist()
         )
