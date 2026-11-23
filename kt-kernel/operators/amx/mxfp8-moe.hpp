@@ -139,13 +139,13 @@ struct GemmKernel224MXFP8SmallKGroup {
   // ActivationBF16: wraps a __m512bh (32 BF16 values = one k-group of activation)
   struct ActivationBF16 {
     __m512bh a;
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512 a_even;
     __m512 a_odd;
     inline static const __m512i odd_mask = _mm512_set1_epi32(0xFFFF0000);
 #endif
     __attribute__((always_inline)) ActivationBF16(__m512bh a_) : a(a_) {
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       a_even = _mm512_castsi512_ps(_mm512_slli_epi32((__m512i)a_, 16));
       a_odd = _mm512_castsi512_ps(_mm512_and_si512((__m512i)a_, odd_mask));
 #endif
@@ -154,7 +154,7 @@ struct GemmKernel224MXFP8SmallKGroup {
 
   // DequantizedWeight: decodes 32 FP8 E4M3fn bytes → 32 BF16 values
   struct DequantizedWeight {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512bh d;
 #else
     __m512 w_even;
@@ -205,7 +205,7 @@ struct GemmKernel224MXFP8SmallKGroup {
           _mm512_setr_epi64(0, 1, 4, 5, 2, 3, 6, 7), result);
       // Now: [BF16[0..7], BF16[8..15], BF16[16..23], BF16[24..31]] ✓
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       d = (__m512bh)result;
 #else
       w_even = _mm512_castsi512_ps(_mm512_slli_epi32(result, 16));
@@ -216,7 +216,7 @@ struct GemmKernel224MXFP8SmallKGroup {
 
   __attribute__((always_inline)) static inline __m512 mxfp8_dot_bf16(
       const DequantizedWeight& w, const ActivationBF16& act) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     return _mm512_dpbf16_ps(_mm512_setzero_ps(), act.a, w.d);
 #else
     __m512 dot = _mm512_mul_ps(act.a_odd, w.w_odd);

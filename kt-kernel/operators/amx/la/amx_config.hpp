@@ -13,9 +13,13 @@
 #else
 #define ALWAYS_INLINE inline
 #endif
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 
-#if !defined(__AVX512BF16__)
+#if !defined(__AVX512BF16__) && !defined(KT_ARM_SFT)
 #ifndef __m512bh
 #define __m512bh __m512i
 #endif
@@ -37,7 +41,7 @@ static ALWAYS_INLINE __m512 _mm512_dpbf16_ps_emulated(__m512 src, __m512i a, __m
 #endif
 #endif
 
-#if !defined(__AVX512VBMI__)
+#if !(defined(__AVX512VBMI__) || defined(KT_ARM_SFT))
 // VBMI emulation via AVX512F+BW
 static ALWAYS_INLINE __m512i _mm512_permutex2var_epi8_emulated(__m512i a, __m512i idx, __m512i b) {
   __m256i idx_lo_256 = _mm512_castsi512_si256(idx);
@@ -66,10 +70,18 @@ static ALWAYS_INLINE __m512i _mm512_permutex2var_epi8_emulated(__m512i a, __m512
 #ifndef HAVE_AMX
 #define HAVE_AMX
 #endif
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <emmintrin.h>
+#endif
 #include <stdlib.h>
 #include <sys/syscall.h>
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <tmmintrin.h>
+#endif
 #include <unistd.h>
 
 #include <array>

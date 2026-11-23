@@ -363,15 +363,15 @@ def get_mxfp4_runtime() -> MXFP4Runtime:
 
     extension = kt_kernel.kt_kernel_ext
     cpu_variant = str(getattr(extension, "__cpu_variant__", "")).lower()
-    # Two tiers ship MXFP4_SFT_MOE with the same Python contract: the AMX /
-    # AVX512-BF16 kernel and the AVX2 (FMA + F16C) kernel for Zen 2/3-class hosts.
     if cpu_variant in {"amx", "avx512_bf16"}:
         kernel = MXFP4_KERNEL
+    elif cpu_variant == "arm_sve_bf16":
+        kernel = "sve-bf16-mxfp4-g32"
     elif cpu_variant == "avx2":
         kernel = MXFP4_AVX2_KERNEL
     else:
         raise RuntimeError(
-            "MXFP4 SFT requires an AVX512-BF16 or AVX2 extension; "
+            "MXFP4 SFT requires an AVX512-BF16, AVX2 or ARM SVE BF16 extension; "
             f"loaded cpu_variant={cpu_variant or 'unknown'!r}"
         )
     moe_extension = getattr(extension, "moe", None)

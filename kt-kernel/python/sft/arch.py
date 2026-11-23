@@ -77,7 +77,7 @@ def get_moe_arch_config(config) -> MOEArchConfig:
     model_type = str(getattr(config, "model_type", ""))
     text_model_type = str(getattr(cfg, "model_type", ""))
 
-    if "DeepseekV4" in arch or model_type == "deepseek_v4":
+    if "DeepseekV4" in arch or text_model_type in {"deepseek_v4", "deepseek_v41_text"}:
         return MOEArchConfig(
             moe_layer_attr="mlp",
             router_attr="gate",
@@ -273,6 +273,8 @@ def move_non_experts_to_gpu(
     model: nn.Module,
     moe_config: MOEArchConfig | None = None,
     device: str = "cuda:0",
+    *,
+    shared_experts_on_cpu: bool = False,
 ) -> None:
     """Move non-expert parameters to GPU after loading (experts stay on CPU)."""
     if moe_config is None:
@@ -283,6 +285,12 @@ def move_non_experts_to_gpu(
 
     container, layers = _get_model_container_and_layers(model, purpose="placement")
 
+    if shared_experts_on_cpu and getattr(model.config, "model_type", "") != "deepseek_v41_text":
+        raise KTAMXConfigError("CPU shared-expert placement requires the DeepSeek V4.1 text model")
+    for name in ("rotary_emb", "engram_hash_state"):
+        module = getattr(container, name, None)
+        if module is not None:
+            module.to(device)
     if hasattr(container, "embed_tokens"):
         container.embed_tokens.to(device)
     if hasattr(container, "norm"):
@@ -296,8 +304,8 @@ def move_non_experts_to_gpu(
         output_embeddings.to(device)
 
     for layer in layers:
-        for name in ("attn_hc", "ffn_hc"):
-            if hasattr(layer, name):
+        for name in ("attn_hc", "ffn_hc", "engram"):
+            if getattr(layer, name, None) is not None:
                 getattr(layer, name).to(device)
         if hasattr(layer, "self_attn"):
             layer.self_attn.to(device)
@@ -328,7 +336,7 @@ def move_non_experts_to_gpu(
         ):
             shared_module = getattr(moe_module, shared_attr, None)
             if shared_module is not None:
-                shared_module.to(device)
+                shared_module.to("cpu" if shared_experts_on_cpu else device)
 
     logger.info(f"Moved non-expert parameters to {device}")
 

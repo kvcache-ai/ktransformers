@@ -8,7 +8,11 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -27,7 +31,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
 #include "amx/fp8_tp_staging.hpp"
 #include "amx/la/amx.hpp"
 #else
@@ -187,6 +191,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
   static typename Base::PartFactory make_sft_part_factory(const MOESFTConfig& full_config) {
+    if constexpr (requires { T::kIntermediateAlignment; }) {
+      if (full_config.pool != nullptr) {
+        const int partitions = full_config.pool->config.subpool_count;
+        if (partitions > 0 && full_config.intermediate_size % partitions == 0 &&
+            (full_config.intermediate_size / partitions) % T::kIntermediateAlignment != 0) {
+          throw std::invalid_argument("SFT intermediate size per TP partition must be aligned to kernel N_STEP");
+        }
+      }
+    }
     if constexpr (uses_rawint4_kgroup_weights()) {
       if (full_config.share_backward_bb) {
         throw std::invalid_argument(
@@ -384,7 +397,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   void load_fp8_weights_with_tp_staging() {
-#if !defined(__AVX512F__)
+#if !(defined(__AVX512F__) || defined(KT_ARM_SFT))
     throw std::runtime_error("block-FP8 SFT TP staging needs an AVX-512 build");
 #else
     amx::validate_block_fp8_tp_source(config);
@@ -978,7 +991,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     auto merge_fn = [this, output, incremental, &tp_count_ref, &local_output_numa_ref, &tp_configs_ref](int token_nth) {
       float* merge_to = local_output_numa_ref[0] + token_nth * tp_configs_ref[0].hidden_size;
-#if !defined(__AVX512F__)
+#if !(defined(__AVX512F__) || defined(KT_ARM_SFT))
       ggml_bf16_t* out_row = (ggml_bf16_t*)output + (size_t)token_nth * config.hidden_size;
       for (int e = 0; e < config.hidden_size; e += 8) {
         __m256 acc = _mm256_loadu_ps(merge_to + e);
@@ -1469,7 +1482,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
             ggml_bf16_t* dst = out + (size_t)token_id * hidden_size;
 
             int h = 0;
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
             for (; h + 32 <= hidden_size; h += 32) {
               __m512 sum0, sum1;
               avx512_32xbf16_to_32xfp32((__m512i*)(src0 + h), &sum0, &sum1);
@@ -1530,7 +1543,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 ggml_bf16_t* ud = out_up_a + dst_base;
 
                 int h = 0;
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
                 for (; h + 32 <= hidden_size; h += 32) {
                   __m512 gs0 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h);
                   __m512 gs1 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h + 16);
@@ -1629,7 +1642,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
             const float* s3 = (tp_count > 3) ? part_grad_weights_[3] : nullptr;
 
             size_t i = begin;
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
             for (; i + 16 <= end; i += 16) {
               __m512 v = _mm512_loadu_ps(s0 + i);
               if (s1) v = _mm512_add_ps(v, _mm512_loadu_ps(s1 + i));

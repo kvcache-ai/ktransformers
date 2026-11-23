@@ -320,3 +320,30 @@ def test_static_baseline_can_match_the_expert_forward_kernel(adapter_export):
     tensors = load_file(output / "experts" / "adapter_model.safetensors")
     for name, tensor in tensors.items():
         assert torch.all(tensor == (0 if ".lora_B." in name else 1))
+
+
+def test_v41_cache_preserves_packed_engram(native_cache, tmp_path):
+    root, _ = native_cache
+    path = root / "config.json"
+    config = json.loads(path.read_text())
+    quant = config.pop("quantization_config")
+    quant.update(weight_block_size=[32, 32], expert_dtype="fp4")
+    quant.pop("fmt")
+    config.update(model_type="deepseek_v41_text", engram_layer_ids=[0], engram_num_embeddings=[4], engram_head_dim=32)
+    path.write_text(json.dumps({"model_type": "deepseek_v41", "quantization_config": quant, "text_config": config}))
+    shard = root / "source.safetensors"
+    tensors = load_file(shard)
+    tensors["layers.0.engram.embed.weight"] = torch.ones(4, 32).to(torch.float8_e4m3fn)
+    tensors["layers.0.engram.embed.scale"] = torch.ones(4, 1).to(torch.float8_e8m0fnu)
+    tensors["image_start"] = torch.ones(32)
+    save_file(tensors, shard)
+    (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": dict.fromkeys(tensors, shard.name)}))
+    cfg = SimpleNamespace(kt_weight_path=str(root), kt_non_expert_weight_path=str(tmp_path / "v41-cache"))
+    plan = resolve_native_load_plan(cfg, str(root))
+    assert plan.mapped_parameters == {
+        "model.engram_tables.0.weight": (shard.name, "layers.0.engram.embed.weight"),
+        "model.engram_tables.0.weight_scale_inv": (shard.name, "layers.0.engram.embed.scale"),
+    }
+    assert set(plan.mapped_parameters).issubset(plan.weight_keys)
+    assert set(load_file(plan.checkpoint_files[0])).isdisjoint(plan.mapped_parameters)
+    assert "image_start" not in plan.weight_keys

@@ -8,7 +8,7 @@
 
 #include "amx_config.hpp"
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
 namespace rawint4 {
 
 // Pair order matches gate/up AVX dot accumulation: g0,g1,u0,u1,...

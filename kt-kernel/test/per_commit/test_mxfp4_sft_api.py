@@ -56,6 +56,13 @@ def test_mxfp4_runtime_contract(monkeypatch):
         assert runtime.weight_layout == backend.MXFP4_WEIGHT_LAYOUT
 
 
+def test_mxfp4_sve_runtime(monkeypatch):
+    _install_fake_runtime(monkeypatch, variant="arm_sve_bf16")
+    runtime = backend.get_mxfp4_runtime()
+    assert runtime.kernel == "sve-bf16-mxfp4-g32"
+    assert runtime.weight_layout == backend.MXFP4_WEIGHT_LAYOUT
+
+
 def test_mxfp4_runtime_rejects_wrong_isa_and_stale_extension(monkeypatch):
     _install_fake_runtime(monkeypatch, variant="avx512_vnni")
     with pytest.raises(RuntimeError, match="requires an AVX512-BF16"):

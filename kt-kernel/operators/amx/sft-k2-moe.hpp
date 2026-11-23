@@ -671,7 +671,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   }
 
   static bool backward_workspace_v2_env_enabled() {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     return true;
 #else
     return false;
@@ -679,7 +679,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   }
 
   static bool down_base_backward_bf16_matmat_enabled() {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_DOWN_BASE_BWD_BF16_MATMAT");
       return value == nullptr || value[0] == '\0' || value[0] != '0';
@@ -691,7 +691,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   }
 
   static bool gate_up_base_backward_bf16_matmat_enabled() {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_GATE_UP_BASE_BWD_BF16_MATMAT");
       return value == nullptr || value[0] == '\0' || value[0] != '0';
@@ -813,7 +813,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       bf16_dot2_scalar(input, a0, a1, hidden, out0, out1);
       return;
     }
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512 acc0 = _mm512_setzero_ps();
     __m512 acc1 = _mm512_setzero_ps();
     int h = 0;
@@ -857,7 +857,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       bf16_dot8_scalar(input, lora_a, hidden, out);
       return;
     }
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512 acc0 = _mm512_setzero_ps();
     __m512 acc1 = _mm512_setzero_ps();
     __m512 acc2 = _mm512_setzero_ps();
@@ -931,7 +931,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       down_bprop_rank2_scalar(grad_down_row, expert_down_b, hidden, out0, out1);
       return;
     }
-#if defined(__AVX512BW__)
+#if (defined(__AVX512BW__) || defined(KT_ARM_SFT))
     alignas(64) static const uint16_t even_idx_values[32] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30,
                                                              0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
     alignas(64) static const uint16_t odd_idx_values[32] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
@@ -1016,7 +1016,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       down_bprop_rank8_scalar(grad_down_row, expert_down_b, hidden, out);
       return;
     }
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
     alignas(64) static const int32_t byte_offsets_values[16] = {0,   16,  32,  48,  64,  80,  96,  112,
                                                                 128, 144, 160, 176, 192, 208, 224, 240};
     const __m512i byte_offsets = _mm512_load_si512(reinterpret_cast<const __m512i*>(byte_offsets_values));
@@ -1088,7 +1088,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       accumulate_down_lora_b_rank2_scalar(grad_down_row, u0_scaled, u1_scaled, hidden, grad_b);
       return;
     }
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
     alignas(64) static const int32_t idx_lo_values[16] = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
     alignas(64) static const int32_t idx_hi_values[16] = {8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31};
     const __m512i idx_lo = _mm512_load_si512(reinterpret_cast<const __m512i*>(idx_lo_values));
@@ -1183,7 +1183,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       accumulate_gate_up_lora_b_rank2_scalar(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, out0, out1);
       return;
     }
-#if defined(__AVX512BW__) && defined(__AVX512F__)
+#if (defined(__AVX512BW__) || defined(KT_ARM_SFT)) && (defined(__AVX512F__) || defined(KT_ARM_SFT))
     alignas(64) static const uint16_t even_idx_values[32] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30,
                                                              0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
     alignas(64) static const uint16_t odd_idx_values[32] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
@@ -1351,7 +1351,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       accumulate_gate_up_a_input_rank2_scalar(input_row, a0, a1, gu0, gu1, hidden, grad_input_row, grad_a0, grad_a1);
       return;
     }
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
     const __m512 gu0_vec = _mm512_set1_ps(gu0);
     const __m512 gu1_vec = _mm512_set1_ps(gu1);
     int h = 0;
@@ -1414,7 +1414,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       accumulate_lora_a_input_rank8_scalar(input_row, lora_a, gu_scaled, width, grad_dst, grad_a);
       return;
     }
-#if defined(__AVX512F__)
+#if (defined(__AVX512F__) || defined(KT_ARM_SFT))
     const __m512 gu0 = _mm512_set1_ps(gu_scaled[0]);
     const __m512 gu1 = _mm512_set1_ps(gu_scaled[1]);
     const __m512 gu2 = _mm512_set1_ps(gu_scaled[2]);
@@ -1509,7 +1509,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
   }
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   static inline __m512bh interleave_bf16_pairs(__m512bh values) {
     alignas(64) static constexpr uint16_t pair_indices[32] = {
         0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23,
@@ -2945,7 +2945,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   static void write_bf16_array(void* dst, const float* src, size_t count) {
     if (dst == nullptr) return;
     auto* out = reinterpret_cast<ggml_bf16_t*>(dst);
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     size_t i = 0;
     if (bf16_write_vec_enabled()) {
       for (; i + 15 < count; i += 16) {
@@ -2982,7 +2982,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
   static void scale_bf16_row_to_bf16(const ggml_bf16_t* src, ggml_bf16_t* dst, int count, float scale) {
     int i = 0;
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     const __m512 scale_v = _mm512_set1_ps(scale);
     for (; i + 31 < count; i += 32) {
       __m512 lo, hi;
@@ -3023,7 +3023,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const bool use_bf16_matmat = gate_up_base_backward_bf16_matmat_enabled();
     if (profile != nullptr && use_bf16_matmat) profile->gate_up_base_kernel = "bf16_matmat";
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     if (use_bf16_matmat) {
       const int nth = T::recommended_nth(hidden);
       pool->do_work_stealing_job(
@@ -3284,7 +3284,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       const bool use_bf16_matmat = layout.total_tokens >= 10 && config_.pool != nullptr &&
                                       down_base_backward_bf16_matmat_enabled();
       if (profile != nullptr && use_bf16_matmat) profile->down_base_kernel = "bf16_matmat";
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       if (use_bf16_matmat) {
         auto pool = config_.pool->get_subpool(tp_part_idx);
         const int nth = T::recommended_nth(inter_size);
@@ -3888,7 +3888,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   void compute_tp_down_backward_workspace_v2(
       const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
       ggml_bf16_t* grad_down, float* grad_inter, float* down_du, void* grad_down_lora_a,
@@ -4251,7 +4251,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
     try {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       if (external_workspace != nullptr && backward_workspace_v2_eligible()) {
         BackwardWorkspaceV2 workspace =
             make_backward_workspace_v2(external_workspace, external_workspace_bytes, qlen, k);

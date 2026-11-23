@@ -53,7 +53,7 @@ struct GemmKernel224MXFP4SmallKGroup {
       0x00, 0x3F, 0x3F, 0x3F, 0x40, 0x40, 0x40, 0x40,   //  0..7  positive
       0x80, 0xBF, 0xBF, 0xBF, 0xC0, 0xC0, 0xC0, 0xC0};  //  8..15 negative
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   // Natural lane-local order emitted by the grouped decoder below. Keeping
   // decoded values in this order removes per-output-row 16-bit interleaves;
   // the much smaller activation is permuted once before the N-row loop.
@@ -97,7 +97,7 @@ struct GemmKernel224MXFP4SmallKGroup {
     return _mm512_inserti64x4(_mm512_castsi256_si512(q0), q1, 1);
   }
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   // Decode one complete 32-value group with a word-indexed LUT. Expanding the
   // low/high nibbles directly to word indices avoids the byte lookups and
   // byte-to-word unpack chain used by the PSHUFB decoder. Two independent
@@ -121,14 +121,14 @@ struct GemmKernel224MXFP4SmallKGroup {
 
   struct ActivationBF16 {
     __m512bh a;
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512 a_even;
     __m512 a_odd;
     inline static const __m512i odd_mask = _mm512_set1_epi32(0xFFFF0000);
 #endif
 
     __attribute__((always_inline)) ActivationBF16(__m512bh a_) : a(a_) {
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       a_even = _mm512_castsi512_ps(_mm512_slli_epi32((__m512i)a_, 16));
       a_odd = _mm512_castsi512_ps(_mm512_and_si512((__m512i)a_, odd_mask));
 #endif
@@ -136,7 +136,7 @@ struct GemmKernel224MXFP4SmallKGroup {
   };
 
   struct DequantizedWeight {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     __m512bh d;
 #else
     __m512 w_even;
@@ -147,7 +147,7 @@ struct GemmKernel224MXFP4SmallKGroup {
 #endif
 
     __attribute__((always_inline)) DequantizedWeight(__m128i w) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       d = (__m512bh)mxfp4_to_bf16_32(w);
 #else
       __m128i lo = _mm_and_si128(w, lo_mask);
@@ -164,7 +164,7 @@ struct GemmKernel224MXFP4SmallKGroup {
 
   __attribute__((always_inline)) static inline __m512 mxfp4_dot_bf16(const DequantizedWeight& w,
                                                                      const ActivationBF16& act) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     return _mm512_dpbf16_ps(_mm512_setzero_ps(), act.a, w.d);
 #else
     __m512 dot = _mm512_mul_ps(act.a_odd, w.w_odd);
@@ -198,7 +198,7 @@ struct GemmKernel224MXFP4SmallKGroup {
     }
 
     void from_mat_natural(int m, ggml_bf16_t* src, int ith, int nth) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       assert(m <= max_m);
       assert(ith == 0 && nth == 1);
       assert(k % 32 == 0);
@@ -326,7 +326,7 @@ struct GemmKernel224MXFP4SmallKGroup {
   // Only one 32-value weight group is decoded at a time.
   static void transpose_free_dx(int m, int n, int k, const ggml_bf16_t* grad_output, BufferB* weight,
                                 ggml_bf16_t* grad_input, int ith, int nth) {
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     (void)m;
     (void)n;
     (void)k;
@@ -452,7 +452,7 @@ struct GemmKernel224MXFP4SmallKGroup {
     }
   }
 
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   // Convert a logical BF16 activation into the grouped decoder's natural
   // order. This is intentionally separate from the GEMV so callers can hoist
   // it out of every N-row worker task.
@@ -740,7 +740,7 @@ inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferC> bc, int ith, int nth) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   if (m == 1 && k_group_size == 32 && k % 32 == 0 && ba->natural_order) {
     GemmKernel224MXFP4SmallKGroup::fp4_mat_vec_kgroup_natural(n, k, ba.get(), bb.get(), bc.get(), ith, nth);
     return;
@@ -848,7 +848,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
   }
 
   void prepare_decode_down_input(int expert_idx, int qlen) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     if (qlen != 1 || config_.quant_config.group_size != 32 || config_.intermediate_size % 32 != 0) {
       Base::prepare_decode_down_input(expert_idx, qlen);
       return;
@@ -860,7 +860,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
   }
 
   void apply_decode_activation(int activated_expert, int nth, int qlen) {
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
     if (qlen != 1 || config_.quant_config.group_size != 32 || config_.intermediate_size % 32 != 0) {
       Base::apply_decode_activation(activated_expert, nth, qlen);
       return;

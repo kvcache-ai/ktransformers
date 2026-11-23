@@ -114,6 +114,7 @@ class KTPretrainedLoadPlan:
     lora_rank: int | None = None
     lora_alpha: float | None = None
     disable_source_quantizer: bool = True
+    mapped_parameters: Mapping[str, tuple[str, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -818,7 +819,20 @@ def is_kt_supported_moe_model(model: Any) -> bool:
         str(getattr(config, "model_type", "")),
         str(getattr(text_config, "model_type", "")),
     }
-    return bool(model_types.intersection({"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6", "deepseek_v4"}))
+    return bool(
+        model_types.intersection(
+            {
+                "kimi_k2",
+                "kimi_k25",
+                "kimi_k2_5",
+                "kimi_k26",
+                "kimi_k2_6",
+                "deepseek_v4",
+                "deepseek_v41",
+                "deepseek_v41_text",
+            }
+        )
+    )
 
 
 def should_disable_kt_source_quantizer(
@@ -838,7 +852,7 @@ def should_disable_kt_source_quantizer(
     if weight_format == "mxfp4":
         if explicit_quantization_config is not None:
             raise KTArtifactError("MXFP4 SFT cannot use an explicit framework quantizer")
-        if getattr(model_config, "model_type", None) != "deepseek_v4":
+        if getattr(model_config, "model_type", None) not in {"deepseek_v4", "deepseek_v41", "deepseek_v41_text"}:
             raise KTArtifactError("native MXFP4 SFT currently requires DeepSeek V4")
         cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
         if not cache_path:

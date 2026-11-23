@@ -784,6 +784,8 @@ class CMakeBuild(build_ext):
                 os.environ.setdefault("CPUINFER_ENABLE_BLIS", "OFF")
 
         if platform.machine().lower() in ("aarch64", "arm64"):
+            _forward_bool_env(cmake_args, "CPUINFER_ARM_SFT", "KTRANSFORMERS_CPU_ARM_SFT")
+            _forward_bool_env(cmake_args, "CPUINFER_ARM_SFT_NATIVE_GEMM256", "KTRANSFORMERS_CPU_ARM_SFT_NATIVE_GEMM256")
             arm_feature_map = (
                 ("CPUINFER_ARM_DOTPROD", "LLAMA_ARM_DOTPROD", "ARM_DOTPROD"),
                 ("CPUINFER_ARM_FP16", "LLAMA_ARM_FP16", "ARM_FP16"),

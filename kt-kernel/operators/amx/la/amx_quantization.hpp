@@ -212,7 +212,7 @@ inline __m256i merge_q8K_bsum(block_q8_K* b) {
 }
 
 inline __m512i _mm512_dpbusd_epi32_compat(__m512i src, __m512i a, __m512i b) {
-#if defined(__AVX512VNNI__)
+#if (defined(__AVX512VNNI__) || defined(KT_ARM_SFT))
   return _mm512_dpbusd_epi32(src, a, b);
 #else
   const __m512i mask_lo = _mm512_set1_epi16(0x00FF);

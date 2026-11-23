@@ -153,6 +153,21 @@ python -c "import kt_kernel"
 
 Build from source for local installation or when you need AMD (BLIS), ARM (KML), or custom CUDA versions.
 
+On Linux AArch64 with SVE BF16 and the Ascend toolkit, build the MXFP4 routed-expert training extension with:
+
+```bash
+CPUINFER_USE_ASCEND_NPU=1 CPUINFER_ARM_SFT=1 CPUINFER_ARM_SFT_NATIVE_GEMM256=1 pip install .
+```
+
+Use `kt_expert_weight_format="mxfp4"` with the native checkpoint and a writable
+`kt_non_expert_weight_path`. For the DeepSeek V4.1 text model, set
+`kt_shared_experts_on_cpu=True` to compute the shared experts on the host as well.
+
+Set `kt_tp_enabled=True` and `kt_threadpool_count=2` to split the CPU expert
+matrices across two NUMA worker pools. For checkpoints that exceed the memory
+of the worker nodes, launch with `numactl --interleave=<nodes>` to distribute
+allocations over the selected memory nodes while retaining worker CPU affinity.
+
 #### Prerequisites
 
 First, initialize git submodules and create a conda environment:

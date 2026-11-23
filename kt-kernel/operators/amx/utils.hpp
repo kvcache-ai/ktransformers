@@ -1,6 +1,10 @@
 #ifndef UTILS_HPP
 #define UTILS_HPP
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +16,7 @@ static inline void avx512_copy_32xbf16(__m512i* src, __m512i* dst) {
 // FP32 to BF16 conversion (32 floats -> 32 bf16)
 // This requires AVX512BF16 for the fast path, with a fallback for CPUs without it
 static inline void avx512_32xfp32_to_32xbf16(__m512* src0, __m512* src1, __m512i* dst) {
-#if defined(HAVE_AVX512BF16) || defined(__AVX512BF16__)
+#if defined(HAVE_AVX512BF16) || (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   // Fast path: use native AVX512BF16 instruction
   _mm512_storeu_si512(dst, __m512i(_mm512_cvtne2ps_pbh(*src1, *src0)));
 #else

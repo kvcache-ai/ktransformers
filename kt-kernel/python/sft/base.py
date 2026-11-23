@@ -563,9 +563,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     ) -> torch.device:
         """Copy inputs to CPU buffer, return input device."""
         input_device = hidden_states.device
-        buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
-        buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=True)
-        buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=True)
+        # The CPU worker consumes these buffers as soon as the copies return.
+        asynchronous = input_device.type != "npu"
+        buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=asynchronous)
+        buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=asynchronous)
+        buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=asynchronous)
         buffer.bsz_tensor[0] = qlen
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
@@ -580,7 +582,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     def _return_output(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:
-            return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
+            return buffer.output_cpu[:qlen].to(
+                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+            )
         else:
             return buffer.output_cpu[:qlen].clone()
 
@@ -650,7 +654,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         assert output is not None
         try:
             if output_device is not None:
-                return output.to(device=output_device, non_blocking=True)
+                return output.to(device=output_device, non_blocking=torch.device(output_device).type != "npu")
             return output
         except Exception as exc:
             self.poison_checkpoint_output(exc)
@@ -665,8 +669,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:
-            grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
-            grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
+            grad_input = buffer.grad_input_cpu[:qlen].to(
+                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+            )
+            grad_weights = buffer.grad_weights[:qlen].to(
+                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+            )
         else:
             grad_input = buffer.grad_input_cpu[:qlen].clone()
             grad_weights = buffer.grad_weights[:qlen].clone()
