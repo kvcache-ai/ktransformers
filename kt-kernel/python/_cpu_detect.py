@@ -19,6 +19,8 @@ Example:
 """
 
 import os
+import platform
+import subprocess
 
 _VARIANT_LEVEL = {
     "avx2": 0,
@@ -43,6 +45,77 @@ def _validate_loaded_variant(detected_variant: str, loaded_variant: str) -> None
             f"detected={detected_variant}, loaded={loaded_variant}. "
             "Install a multi-variant wheel or rebuild for this machine."
         )
+
+
+def _detect_cpu_features_macos() -> str:
+    """
+    Detect CPU features on macOS using sysctl.
+
+    Returns:
+        str: Variant name - one of: 'amx', 'avx512_bf16', 'avx512_vbmi',
+             'avx512_vnni', 'avx512_base', 'avx2'
+    """
+    try:
+        # Get CPU features from sysctl
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.features"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            if os.environ.get("KT_KERNEL_DEBUG") == "1":
+                print(f"[kt-kernel] sysctl failed: {result.stderr}")
+            return "avx2"
+
+        features = result.stdout.strip().lower().split()
+
+        # Also check leaf7 features for AVX512
+        result_leaf7 = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.leaf7_features"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        leaf7_features = set()
+        if result_leaf7.returncode == 0:
+            leaf7_features = set(result_leaf7.stdout.strip().lower().split())
+
+        all_features = set(features) | leaf7_features
+
+        if os.environ.get("KT_KERNEL_DEBUG") == "1":
+            print(f"[kt-kernel] macOS CPU features: {sorted(all_features)}")
+
+        # Check for AMX (not available on macOS yet)
+        # Check for AVX512
+        has_avx512f = "avx512f" in all_features or "avx512_f" in all_features
+        has_avx512bw = "avx512bw" in all_features
+        has_avx512vnni = "avx512vnni" in all_features or "avx512_vnni" in all_features
+        has_avx512vbmi = "avx512vbmi" in all_features or "avx512_vbmi" in all_features
+        has_avx512bf16 = "avx512bf16" in all_features or "avx512_bf16" in all_features
+        has_avx2 = "avx2" in all_features
+
+        # Progressive matching (best to worst)
+        # AMX not available on macOS currently
+        if has_avx512f and has_avx512bw and has_avx512vnni and has_avx512vbmi and has_avx512bf16:
+            return "avx512_bf16"
+        elif has_avx512f and has_avx512bw and has_avx512vnni and has_avx512vbmi:
+            return "avx512_vbmi"
+        elif has_avx512f and has_avx512bw and has_avx512vnni:
+            return "avx512_vnni"
+        elif has_avx512f and has_avx512bw:
+            return "avx512_base"
+        elif has_avx2:
+            return "avx2"
+
+        return "avx2"
+
+    except Exception as e:
+        if os.environ.get("KT_KERNEL_DEBUG") == "1":
+            print(f"[kt-kernel] macOS CPU detection error: {e}, using AVX2 fallback")
+        return "avx2"
 
 
 def detect_cpu_features():
@@ -129,6 +202,11 @@ def detect_cpu_features():
 
     except FileNotFoundError:
         # /proc/cpuinfo doesn't exist (not Linux or in container)
+        # Try macOS sysctl
+        if platform.system() == "Darwin":
+            if os.environ.get("KT_KERNEL_DEBUG") == "1":
+                print("[kt-kernel] Detected macOS, trying sysctl for CPU features")
+            return _detect_cpu_features_macos()
         # Try cpufeature package as fallback
         if os.environ.get("KT_KERNEL_DEBUG") == "1":
             print("[kt-kernel] /proc/cpuinfo not found, trying cpufeature package")
