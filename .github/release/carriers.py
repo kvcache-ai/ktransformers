@@ -158,7 +158,7 @@ def verify_runtime_ownership(package, root):
     }
     if package == "kt-kernel":
         conflicts = sorted(
-            name for name in names if name.partition("/")[0] in SGLANG_RUNTIME_ROOTS
+            name for name in names if wheel_site_root(name) in SGLANG_RUNTIME_ROOTS
         )
         require(
             not conflicts,
@@ -174,6 +174,18 @@ def verify_runtime_ownership(package, root):
             <= names,
             "sglang-kt must own the SGL payload runtime and manifest",
         )
+
+
+def wheel_site_root(name):
+    """Account for pip spreading wheel .data/{purelib,platlib} into site-packages."""
+    parts = name.split("/")
+    if (
+        len(parts) >= 3
+        and parts[0].endswith(".data")
+        and parts[1] in {"purelib", "platlib"}
+    ):
+        return parts[2]
+    return parts[0]
 
 
 def archive_payload(sgl, output):

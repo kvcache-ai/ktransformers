@@ -206,6 +206,44 @@ class Candidates(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "standalone kt-kernel"):
             verify_candidate(self.root, self.request)
 
+    def test_standalone_kt_cannot_own_sglang_runtime_via_data_scheme(self):
+        entry = self.manifest["wheels"]["kt-kernel"]
+        path = self.root / entry["file"]
+        original = path.read_bytes()
+        for scheme in ("purelib", "platlib"):
+            for namespace in (
+                "deep_gemm",
+                "flash_attn_origin",
+                "include",
+                "lib",
+                "sgl_kernel",
+                "sgl_kernel_kt.libs",
+                "triton_kernels",
+            ):
+                with self.subTest(scheme=scheme, namespace=namespace):
+                    path.write_bytes(original)
+                    with zipfile.ZipFile(path, "a") as wheel:
+                        wheel.writestr(
+                            f"kt_kernel-1.0.data/{scheme}/{namespace}/fixture.py",
+                            "# wrong installed owner\n",
+                        )
+                    entry["sha256"] = digest(path)
+                    self.save()
+                    with self.assertRaisesRegex(ValueError, "standalone kt-kernel"):
+                        verify_candidate(self.root, self.request)
+
+    def test_standalone_kt_can_own_private_modules_via_data_scheme(self):
+        entry = self.manifest["wheels"]["kt-kernel"]
+        path = self.root / entry["file"]
+        with zipfile.ZipFile(path, "a") as wheel:
+            for scheme in ("purelib", "platlib"):
+                wheel.writestr(
+                    f"kt_kernel-1.0.data/{scheme}/kt_kernel/private.py", "# private\n"
+                )
+        entry["sha256"] = digest(path)
+        self.save()
+        verify_candidate(self.root, self.request)
+
     def test_sglang_wheel_must_own_payload_runtime(self):
         path = self.root / self.manifest["wheels"]["sglang-kt"]["file"]
         replacement = path.with_suffix(".new")

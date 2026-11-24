@@ -115,6 +115,18 @@ def validate_request(request):
     return request
 
 
+def wheel_site_root(name):
+    """Account for pip spreading wheel .data/{purelib,platlib} into site-packages."""
+    parts = name.split("/")
+    if (
+        len(parts) >= 3
+        and parts[0].endswith(".data")
+        and parts[1] in {"purelib", "platlib"}
+    ):
+        return parts[2]
+    return parts[0]
+
+
 def verify_candidate(root, request):
     """Validate a FINAL five-wheel stack; raw/native intermediates are not installable candidates."""
     root = Path(root).resolve()
@@ -157,7 +169,7 @@ def verify_candidate(root, request):
                     "triton_kernels",
                 }
                 conflicts = sorted(
-                    name for name in names if name.partition("/")[0] in foreign_roots
+                    name for name in names if wheel_site_root(name) in foreign_roots
                 )
                 require(
                     not conflicts,

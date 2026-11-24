@@ -116,6 +116,32 @@ def test_fresh_carriers_assign_sglang_runtime_without_shadowing_standalone_kt(
         carriers.unpack(path, tmp_path / f"verify-{index}")
 
 
+@pytest.mark.parametrize("scheme", ["purelib", "platlib"])
+@pytest.mark.parametrize("namespace", sorted(carriers.SGLANG_RUNTIME_ROOTS))
+def test_assembly_rejects_sglang_files_in_kt_data_scheme(
+    tmp_path, monkeypatch, scheme, namespace
+):
+    raw = raw_wheels(tmp_path)
+    root = tmp_path / "kt-kernel"
+    misplaced = root / f"kt_kernel-1.0.data/{scheme}/{namespace}/fixture.py"
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_text("# pip installs this outside the KT namespace\n")
+    carriers.pack(root, next(raw.glob("kt_kernel-*.whl")))
+    monkeypatch.setattr(carriers, "binary_evidence", lambda roots: {})
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    with pytest.raises(ValueError, match="standalone kt-kernel"):
+        carriers.assemble(raw, tmp_path / "final", evidence)
+
+
+@pytest.mark.parametrize("scheme", ["purelib", "platlib"])
+def test_ownership_accepts_private_kt_data_scheme(tmp_path, scheme):
+    private = tmp_path / f"kt_kernel-1.0.data/{scheme}/kt_kernel/private.py"
+    private.parent.mkdir(parents=True)
+    private.write_text("# KT's own module\n")
+    carriers.verify_runtime_ownership("kt-kernel", tmp_path)
+
+
 def test_tampered_raw_wheel_is_rejected(tmp_path):
     raw = raw_wheels(tmp_path)
     path = next(raw.glob("accelerate*.whl"))
