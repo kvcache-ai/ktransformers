@@ -6,7 +6,7 @@ This document lists the current maintainers and outlines their responsibilities.
 
 | Name | GitHub | Role | Affiliation | Email |
 |------|--------|------|-------------|-------|
-| Weiyu Xie | [@ErvinXie](https://github.com/ErvinXie) | Maintainer | [MADSys Lab](https://madsys.cs.tsinghua.edu.cn/) @ Tsinghua University | xwy21@mails.tsinghua.edu.cn |
+| Weiyu Xie | [@ErvinXie](https://github.com/ErvinXie) | Maintainer | [Approaching.AI](http://approaching.ai/)  | ervin@approaching.ai |
 | Hongtao Chen | [@chenht2022](https://github.com/chenht2022) | Maintainer | [MADSys Lab](https://madsys.cs.tsinghua.edu.cn/) @ Tsinghua University | cht22@mails.tsinghua.edu.cn |
 | Jianwei Dong | [@ovowei](https://github.com/ovowei) | Maintainer | [MADSys Lab](https://madsys.cs.tsinghua.edu.cn/) @ Tsinghua University | dongjw24@mails.tsinghua.edu.cn |
 | Ziwei Yuan | [@KMSorSMS](https://github.com/KMSorSMS) | Maintainer | [Approaching.AI](http://approaching.ai/) | 2022090910005@std.uestc.edu.cn |
