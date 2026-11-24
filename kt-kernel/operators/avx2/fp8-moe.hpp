@@ -6,7 +6,7 @@
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  *
  * FP8 E4M3 weights with 128×128 block-wise float32 scales.
- * Dequantization: FP8→FP32 via precomputed 256-entry LUT + AVX2 gather.
+ * Dequantization: FP8→FP32 via AVX2 bit arithmetic, with a LUT for scalar tails.
  * GEMM: BF16 input × FP32 dequantized weight → FP32 output.
  **/
 #ifndef CPUINFER_OPERATOR_AVX2_FP8_MOE_H
@@ -100,10 +100,9 @@ struct GemmKernelAVX2FP8 {
       std::memcpy(b + n_start * k, src_weights + n_start * k,
                   (size_t)(n_end - n_start) * k);
 
-      // Copy scales (split by N blocks)
+      // Assign each scale block to one worker even when a weight slice cuts through it.
       int n_blocks_k = div_up((int)k, block_size);
-      int nb_start = n_start / block_size;
-      int nb_end = div_up(n_end, block_size);
+      auto [nb_start, nb_end] = avx2::split_range(div_up((int)n, block_size), ith, nth);
       std::memcpy(d + nb_start * n_blocks_k, src_scales + nb_start * n_blocks_k,
                   (size_t)(nb_end - nb_start) * n_blocks_k * sizeof(float));
     }
@@ -145,69 +144,75 @@ struct GemmKernelAVX2FP8 {
 };
 
 // ============================================================================
-// AVX2 FP8 GEMM: C[m,n] = sum_k (A[m,k] * dequant(B[n,k])) * scale[n/BS, k/BS]
+// AVX2 FP8 GEMM: sum the dot products of the scaled K blocks.
 // ============================================================================
 
-static inline void gemm_fp8(
-    int m, int n, int k,
-    GemmKernelAVX2FP8::BufferA& a,
-    GemmKernelAVX2FP8::BufferB& b,
-    GemmKernelAVX2FP8::BufferC& c,
-    int ith, int nth) {
-
-  ensure_fp8_lut_initialized();
-
-  auto [n_start, n_end] = split_range(n, ith, nth);
-  const int block_size = b.block_size;
-  const int n_blocks_k = div_up(k, block_size);
-
-  for (int ni = n_start; ni < n_end; ni++) {
-    const uint8_t* b_row = b.b + (size_t)ni * k;
-    const int n_block_idx = ni / block_size;
-
-    for (int mi = 0; mi < m; mi++) {
-      const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
-      float sum = 0.0f;
-
-      for (int kb = 0; kb < k; kb += block_size) {
-        int k_len = std::min(block_size, k - kb);
-        int k_block_idx = kb / block_size;
-        float scale = b.d[n_block_idx * n_blocks_k + k_block_idx];
-
-        // Accumulate within this block
-        __m256 acc1 = _mm256_setzero_ps();
-        __m256 acc2 = _mm256_setzero_ps();
-        __m256 acc3 = _mm256_setzero_ps();
-        __m256 acc4 = _mm256_setzero_ps();
-
-        int ki = 0;
-        for (; ki + 32 <= k_len; ki += 32) {
-          acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
-                                  fp8x8_to_fp32x8(b_row + kb + ki), acc1);
-          acc2 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 8),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 8), acc2);
-          acc3 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 16),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 16), acc3);
-          acc4 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki + 24),
-                                  fp8x8_to_fp32x8(b_row + kb + ki + 24), acc4);
-        }
-        for (; ki + 8 <= k_len; ki += 8) {
-          acc1 = _mm256_fmadd_ps(load_bf16_to_fp32(a_row + kb + ki),
-                                  fp8x8_to_fp32x8(b_row + kb + ki), acc1);
-        }
-
-        float block_sum = hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc1, acc3),
-                                                   _mm256_add_ps(acc2, acc4)));
-
-        // Scalar tail
-        for (; ki < k_len; ki++) {
-          block_sum += GGML_BF16_TO_FP32(a_row[kb + ki]) * fp8_to_fp32_scalar(b_row[kb + ki]);
-        }
-
-        sum += block_sum * scale;
+template <int Rows>
+static inline void gemm_fp8_dot(int k, int block_size, const ggml_bf16_t* a, size_t stride, const uint8_t* b,
+                                const float* scales, float* c, size_t ldc) {
+  float sum[Rows]{};
+  for (int kb = 0; kb < k;) {
+    const int len = std::min(block_size, k - kb);
+    const float scale = *scales++;
+    __m256 acc[4][Rows]{};
+    auto accumulate = [&](int ki, __m256(&partial)[Rows]) {
+      const __m256 w = fp8x8_to_fp32x8(b + kb + ki);
+      for (int row = 0; row < Rows; ++row) {
+        partial[row] = _mm256_fmadd_ps(load_bf16_to_fp32(a + row * stride + kb + ki), w, partial[row]);
       }
+    };
 
-      c.data[mi * n + ni] = sum;
+    int ki = 0;
+    for (; ki + 32 <= len; ki += 32) {
+      accumulate(ki, acc[0]);
+      accumulate(ki + 8, acc[1]);
+      accumulate(ki + 16, acc[2]);
+      accumulate(ki + 24, acc[3]);
+    }
+    for (; ki + 8 <= len; ki += 8) {
+      accumulate(ki, acc[0]);
+    }
+
+    float block[Rows];
+    for (int row = 0; row < Rows; ++row) {
+      block[row] =
+          hsum_avx2(_mm256_add_ps(_mm256_add_ps(acc[0][row], acc[2][row]), _mm256_add_ps(acc[1][row], acc[3][row])));
+    }
+    for (; ki < len; ++ki) {
+      const float w = fp8_to_fp32_scalar(b[kb + ki]);
+      for (int row = 0; row < Rows; ++row) {
+        block[row] += GGML_BF16_TO_FP32(a[row * stride + kb + ki]) * w;
+      }
+    }
+    // Reduce before scaling so cancellation within a block precedes the multiply.
+    for (int row = 0; row < Rows; ++row) {
+      sum[row] += block[row] * scale;
+    }
+    kb += len;
+  }
+  for (int row = 0; row < Rows; ++row) {
+    c[row * ldc] = sum[row];
+  }
+}
+
+static inline void gemm_fp8(int m, int n, int k, const GemmKernelAVX2FP8::BufferA& a,
+                            const GemmKernelAVX2FP8::BufferB& b, GemmKernelAVX2FP8::BufferC& c, int ith, int nth) {
+  if (m <= 0 || n <= 0 || k < 0) return;
+  auto [n_start, n_end] = split_range(n, ith, nth);
+  const int blocks_k = div_up(k, b.block_size);
+  for (int ni = n_start; ni < n_end; ++ni) {
+    if (k == 0) {
+      for (int mi = 0; mi < m; ++mi) c.data[(size_t)mi * n + ni] = 0.0f;
+      continue;
+    }
+    const uint8_t* weights = b.b + (size_t)ni * k;
+    const float* scales = b.d + (size_t)(ni / b.block_size) * blocks_k;
+    int mi = 0;
+    for (; mi + 2 <= m; mi += 2) {
+      gemm_fp8_dot<2>(k, b.block_size, a.data + mi * a.k, a.k, weights, scales, c.data + (size_t)mi * n + ni, n);
+    }
+    if (mi < m) {
+      gemm_fp8_dot<1>(k, b.block_size, a.data + mi * a.k, a.k, weights, scales, c.data + (size_t)mi * n + ni, n);
     }
   }
 }
@@ -242,7 +247,6 @@ class AVX2_FP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_FP8_MOE_TP<T>> {
   AVX2_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
 
   void derived_init() {
-    avx2::ensure_fp8_lut_initialized();
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("AVX2 FP8 MoE only supports block-wise FP8 (group_size > 0, no zero_point)");

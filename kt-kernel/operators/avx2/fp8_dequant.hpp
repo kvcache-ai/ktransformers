@@ -1,12 +1,12 @@
 /**
- * @Description  : FP8 E4M3 dequantization for AVX2 (LUT-based)
+ * @Description  : FP8 E4M3 dequantization for AVX2
  * @Author       : Claude
  * @Date         : 2026-03-18
  * @Version      : 1.0.0
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  *
  * AVX512 uses _mm512_permutex2var_epi8 (VBMI) for FP8→BF16 LUT conversion.
- * AVX2 uses a precomputed 256-entry FP8→FP32 lookup table + _mm256_i32gather_ps.
+ * AVX2 uses bit arithmetic for vectors and a 256-entry lookup table for scalar tails.
  *
  * FP8 E4M3 format: sign(1) + exponent(4) + mantissa(3)
  * Reference: examples/test_fp8_moe.py:103-116
@@ -22,23 +22,20 @@
 namespace avx2 {
 
 // Precomputed FP8 E4M3 → FP32 lookup table (256 entries)
-// Initialized once at program startup via init_fp8_lut()
 struct FP8LUT {
   alignas(32) float table[256];
-  bool initialized = false;
 
-  void init() {
-    if (initialized) return;
+  FP8LUT() {
     for (int i = 0; i < 256; i++) {
       int sign = (i >> 7) & 1;
-      int exp = (i >> 3) & 0xF;   // 4-bit exponent (bits 3-6)
-      int man = i & 0x7;           // 3-bit mantissa (bits 0-2)
+      int exp = (i >> 3) & 0xF;  // 4-bit exponent (bits 3-6)
+      int man = i & 0x7;         // 3-bit mantissa (bits 0-2)
 
       float val;
       if (exp == 0 && man == 0) {
-        val = 0.0f;                                   // zero
+        val = 0.0f;  // zero
       } else if (exp == 0) {
-        val = std::ldexp((float)man / 8.0f, -6);      // subnormal: 2^(-6) * (0.man)
+        val = std::ldexp((float)man / 8.0f, -6);  // subnormal: 2^(-6) * (0.man)
       } else if (exp == 15 && man == 7) {
         val = 0.0f;  // Only 0x7F is NaN in E4M3. Treat as 0 to avoid propagation.
         // E4M3 has no Inf. exp=15 with man=0-6 are valid finite values (256-448).
@@ -47,19 +44,13 @@ struct FP8LUT {
       }
       table[i] = sign ? -val : val;
     }
-    initialized = true;
   }
 };
 
 // Global LUT instance
-inline FP8LUT& get_fp8_lut() {
-  static FP8LUT lut;
+inline const FP8LUT& get_fp8_lut() {
+  static const FP8LUT lut;
   return lut;
-}
-
-// Ensure LUT is initialized (call once at startup)
-inline void ensure_fp8_lut_initialized() {
-  get_fp8_lut().init();
 }
 
 // ============================================================================
@@ -103,9 +94,7 @@ static inline __m256 fp8x8_to_fp32x8(const uint8_t* src) {
 }
 
 // Scalar fallback for non-aligned or tail elements
-static inline float fp8_to_fp32_scalar(uint8_t val) {
-  return get_fp8_lut().table[val];
-}
+static inline float fp8_to_fp32_scalar(uint8_t val) { return get_fp8_lut().table[val]; }
 
 }  // namespace avx2
 
