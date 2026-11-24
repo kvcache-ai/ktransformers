@@ -33,6 +33,15 @@ MODULES = {
     "accelerate-kt": "accelerate_kt_sgl_kernel_payload",
 }
 LARGE = ("flash_ops.abi3.so", "sm100/common_ops.abi3.so")
+SGLANG_RUNTIME_ROOTS = {
+    "deep_gemm",
+    "flash_attn_origin",
+    "include",
+    "lib",
+    "sgl_kernel",
+    "sgl_kernel_kt.libs",
+    "triton_kernels",
+}
 
 
 def require(condition, message):
@@ -141,6 +150,42 @@ def retag(root, python, abi):
         "\n".join(lines + ["Root-Is-Purelib: false", f"Tag: {python}-{abi}-{PLATFORM}"])
         + "\n"
     )
+
+
+def verify_runtime_ownership(package, root):
+    names = {
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
+    }
+    if package == "kt-kernel":
+        conflicts = sorted(
+            name for name in names if wheel_site_root(name) in SGLANG_RUNTIME_ROOTS
+        )
+        require(
+            not conflicts,
+            "standalone kt-kernel must not own SGLang runtime: "
+            + ", ".join(conflicts[:3]),
+        )
+    elif package == "sglang-kt":
+        require(
+            {
+                "sgl_kernel/payload_runtime.py",
+                "sgl_kernel/_payload_manifest.py",
+            }
+            <= names,
+            "sglang-kt must own the SGL payload runtime and manifest",
+        )
+
+
+def wheel_site_root(name):
+    """Account for pip spreading wheel .data/{purelib,platlib} into site-packages."""
+    parts = name.split("/")
+    if (
+        len(parts) >= 3
+        and parts[0].endswith(".data")
+        and parts[1] in {"purelib", "platlib"}
+    ):
+        return parts[2]
+    return parts[0]
 
 
 def archive_payload(sgl, output):
@@ -254,11 +299,13 @@ def assemble(raw, output, evidence_dir):
             f"PAYLOAD_MODULES = {tuple(MODULES.values())!r}\nFILES = {hashes!r}\n"
             f"BINARIES = {dict((name, 'sgl_kernel/' + name) for name in LARGE)!r}\n"
         )
-        kt = roots["kt-kernel"]
-        kt_dist = next(kt.glob("*.dist-info"))
-        # Keep Hopper's directly loaded object, but use the lightweight umbrella
-        # carrier's size budget. Pip installs these non-overlapping paths into the
-        # same sgl_kernel directory; no loader changes or namespace .pth hacks.
+        sglang = roots["sglang-kt"]
+        sglang_dist = next(sglang.glob("*.dist-info"))
+        # Keep Hopper's directly loaded object in the umbrella package. The
+        # coordinated SGL runtime belongs to sglang-kt, not standalone kt-kernel;
+        # otherwise installing kt-kernel overwrites an existing SGLang stack.
+        # Pip installs these non-overlapping paths into the same sgl_kernel
+        # directory; no loader changes or namespace .pth hacks.
         direct_files = []
         sm90 = sgl / "sgl_kernel/sm90"
         if sm90.exists():
@@ -278,13 +325,13 @@ def assemble(raw, output, evidence_dir):
             if relative.parts[0].endswith(".dist-info"):
                 # Preserve the raw native distribution's licenses/metadata as
                 # provenance, without creating a conflicting installed package.
-                target = kt_dist / "sgl-native-origin" / Path(*relative.parts[1:])
+                target = sglang_dist / "sgl-native-origin" / Path(*relative.parts[1:])
             else:
                 require(
                     not relative.parts[0].endswith(".data"),
                     "Unsupported SGL wheel .data layout",
                 )
-                target = kt / relative
+                target = sglang / relative
             require(not target.exists(), "Carrier path collision: " + str(relative))
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
@@ -336,6 +383,7 @@ def assemble(raw, output, evidence_dir):
                 remaining -= size
                 parts[name] = {"bytes": size, "sha256": sha256(part)}
                 final = output / filenames[name]
+                verify_runtime_ownership(name, roots[name])
                 pack(roots[name], final)
                 require(
                     final.stat().st_size < LIMIT,

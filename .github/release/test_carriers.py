@@ -48,13 +48,25 @@ def raw_wheels(tmp_path):
                 path = module / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fixture-data" * 20)
+            for name in (
+                "deep_gemm/__init__.py",
+                "triton_kernels/__init__.py",
+                "flash_attn_origin/__init__.py",
+                "include/fixture.h",
+                "lib/libfixture.so",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture-data" * 20)
             (dist / "LICENSE").write_text("SGL license fixture")
         path = raw / f"{package.replace('-', '_')}-1.0-{tag}.whl"
         carriers.pack(root, path)
     return raw
 
 
-def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch):
+def test_fresh_carriers_assign_sglang_runtime_without_shadowing_standalone_kt(
+    tmp_path, monkeypatch
+):
     raw = raw_wheels(tmp_path)
     monkeypatch.setattr(carriers, "binary_evidence", lambda roots: {"fixture": True})
     monkeypatch.setattr(carriers.subprocess, "check_output", lambda *args, **kwargs: "")
@@ -67,7 +79,29 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     assert {entry["version"] for entry in entries} == {"1.0"}
     kt = next(output.glob("kt_kernel-*.whl"))
     with zipfile.ZipFile(kt) as wheel:
-        assert wheel.read("sgl_kernel/payload_runtime.py") == b"fixture-data" * 20
+        names = wheel.namelist()
+        for namespace in (
+            "sgl_kernel",
+            "deep_gemm",
+            "triton_kernels",
+            "flash_attn_origin",
+            "include",
+            "lib",
+        ):
+            assert not any(
+                name == namespace or name.startswith(namespace + "/") for name in names
+            )
+        assert "sgl_kernel_kt_payload_core/payload.part" in names
+    with zipfile.ZipFile(next(output.glob("sglang_kt-*.whl"))) as wheel:
+        for name in (
+            "sgl_kernel/payload_runtime.py",
+            "deep_gemm/__init__.py",
+            "triton_kernels/__init__.py",
+            "flash_attn_origin/__init__.py",
+            "include/fixture.h",
+            "lib/libfixture.so",
+        ):
+            assert wheel.read(name) == b"fixture-data" * 20
         assert any(
             name.endswith("sgl-native-origin/LICENSE") for name in wheel.namelist()
         )
@@ -80,6 +114,32 @@ def test_fresh_carriers_preserve_runtime_versions_and_sm90(tmp_path, monkeypatch
     # Every final RECORD is independently checked, including regenerated payloads.
     for index, path in enumerate(output.iterdir()):
         carriers.unpack(path, tmp_path / f"verify-{index}")
+
+
+@pytest.mark.parametrize("scheme", ["purelib", "platlib"])
+@pytest.mark.parametrize("namespace", sorted(carriers.SGLANG_RUNTIME_ROOTS))
+def test_assembly_rejects_sglang_files_in_kt_data_scheme(
+    tmp_path, monkeypatch, scheme, namespace
+):
+    raw = raw_wheels(tmp_path)
+    root = tmp_path / "kt-kernel"
+    misplaced = root / f"kt_kernel-1.0.data/{scheme}/{namespace}/fixture.py"
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_text("# pip installs this outside the KT namespace\n")
+    carriers.pack(root, next(raw.glob("kt_kernel-*.whl")))
+    monkeypatch.setattr(carriers, "binary_evidence", lambda roots: {})
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    with pytest.raises(ValueError, match="standalone kt-kernel"):
+        carriers.assemble(raw, tmp_path / "final", evidence)
+
+
+@pytest.mark.parametrize("scheme", ["purelib", "platlib"])
+def test_ownership_accepts_private_kt_data_scheme(tmp_path, scheme):
+    private = tmp_path / f"kt_kernel-1.0.data/{scheme}/kt_kernel/private.py"
+    private.parent.mkdir(parents=True)
+    private.write_text("# KT's own module\n")
+    carriers.verify_runtime_ownership("kt-kernel", tmp_path)
 
 
 def test_tampered_raw_wheel_is_rejected(tmp_path):

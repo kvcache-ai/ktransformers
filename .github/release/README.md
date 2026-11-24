@@ -74,7 +74,10 @@ Kimi 的[实测配置参考](examples/kimi-k25/README.md)保留原样。它不�
   载入的新 CUDA 片段变化，其发行版本也必须更新。
 - `carriers.py` 消费本次六个 raw wheels，保留 runtime 文件、许可证和 SM90
   对象；仅生成 payload 清单/分片及 `WHEEL`、`RECORD`，不改 METADATA 依赖和
-  版本。SGL native wheel 是中间输入，不作为第六个公开发行包上传。
+  版本。SGL native wheel 是中间输入，不作为第六个公开发行包上传。协调栈的
+  SGL runtime 和 provenance 由 `sglang-kt` 携带，独立 `kt-kernel` 不得再写入
+  `sgl_kernel`、`deep_gemm` 等上游命名空间；候选门会拒绝错误归属或缺失的
+  payload runtime。
 - CPython 3.12、Linux x86-64、CUDA 12.8、Torch 2.9.1；全部 KT CPU variants，
   CUDA `80;86;89;90;120`。auditwheel 修复到 manylinux_2_35 后检查 KT CUDA
   扩展和 SGL common_ops 的 SASS。编译/静态检查不等于每种显卡实测。

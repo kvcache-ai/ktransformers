@@ -181,6 +181,9 @@ class Candidates(unittest.TestCase):
                 wheel.writestr(
                     f"{name}-1.0.dist-info/METADATA", f"Name: {package}\nVersion: 1.0\n"
                 )
+                if package == "sglang-kt":
+                    wheel.writestr("sgl_kernel/payload_runtime.py", "# fixture\n")
+                    wheel.writestr("sgl_kernel/_payload_manifest.py", "# fixture\n")
             self.manifest["wheels"][package] = {
                 "file": path.name,
                 "version": "1.0",
@@ -193,6 +196,69 @@ class Candidates(unittest.TestCase):
 
     def test_final_five_wheels(self):
         verify_candidate(self.root, self.request)
+
+    def test_standalone_kt_cannot_own_sglang_runtime(self):
+        path = self.root / self.manifest["wheels"]["kt-kernel"]["file"]
+        with zipfile.ZipFile(path, "a") as wheel:
+            wheel.writestr("sgl_kernel/payload_runtime.py", "# wrong owner\n")
+        self.manifest["wheels"]["kt-kernel"]["sha256"] = digest(path)
+        self.save()
+        with self.assertRaisesRegex(ValueError, "standalone kt-kernel"):
+            verify_candidate(self.root, self.request)
+
+    def test_standalone_kt_cannot_own_sglang_runtime_via_data_scheme(self):
+        entry = self.manifest["wheels"]["kt-kernel"]
+        path = self.root / entry["file"]
+        original = path.read_bytes()
+        for scheme in ("purelib", "platlib"):
+            for namespace in (
+                "deep_gemm",
+                "flash_attn_origin",
+                "include",
+                "lib",
+                "sgl_kernel",
+                "sgl_kernel_kt.libs",
+                "triton_kernels",
+            ):
+                with self.subTest(scheme=scheme, namespace=namespace):
+                    path.write_bytes(original)
+                    with zipfile.ZipFile(path, "a") as wheel:
+                        wheel.writestr(
+                            f"kt_kernel-1.0.data/{scheme}/{namespace}/fixture.py",
+                            "# wrong installed owner\n",
+                        )
+                    entry["sha256"] = digest(path)
+                    self.save()
+                    with self.assertRaisesRegex(ValueError, "standalone kt-kernel"):
+                        verify_candidate(self.root, self.request)
+
+    def test_standalone_kt_can_own_private_modules_via_data_scheme(self):
+        entry = self.manifest["wheels"]["kt-kernel"]
+        path = self.root / entry["file"]
+        with zipfile.ZipFile(path, "a") as wheel:
+            for scheme in ("purelib", "platlib"):
+                wheel.writestr(
+                    f"kt_kernel-1.0.data/{scheme}/kt_kernel/private.py", "# private\n"
+                )
+        entry["sha256"] = digest(path)
+        self.save()
+        verify_candidate(self.root, self.request)
+
+    def test_sglang_wheel_must_own_payload_runtime(self):
+        path = self.root / self.manifest["wheels"]["sglang-kt"]["file"]
+        replacement = path.with_suffix(".new")
+        with (
+            zipfile.ZipFile(path) as source,
+            zipfile.ZipFile(replacement, "w") as target,
+        ):
+            for info in source.infolist():
+                if info.filename != "sgl_kernel/payload_runtime.py":
+                    target.writestr(info, source.read(info))
+        replacement.replace(path)
+        self.manifest["wheels"]["sglang-kt"]["sha256"] = digest(path)
+        self.save()
+        with self.assertRaisesRegex(ValueError, "sglang-kt must own"):
+            verify_candidate(self.root, self.request)
 
     def test_stale_main_snapshot(self):
         changed = copy.deepcopy(self.request)
