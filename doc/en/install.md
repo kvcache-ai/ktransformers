@@ -9,11 +9,9 @@
     - [Supported models include](#supported-models-include)
     - [Support quantize format](#support-quantize-format)
 
-In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:
+This guide covers the legacy KTransformers framework. Use the [v0.3.2 checkout](https://github.com/kvcache-ai/ktransformers/tree/v0.3.2) to follow the source-build and `ktransformers.local_chat` examples below. The [current project README](../../README.md) covers kt-kernel and the current serving stack.
 
-* V0.2 is the current main branch.
-* V0.3 is a preview version only provides binary distribution for now.
-* To reproduce our DeepSeek-R1/V3 results, please refer to [Deepseek-R1/V3 Tutorial](./DeepseekR1_V3_tutorial.md) for more detail settings after installation.
+For the original DeepSeek-R1/V3 setup, see the [DeepSeek-R1/V3 Tutorial](./DeepseekR1_V3_tutorial.md).
 
 ## Preparation
 
@@ -93,7 +91,7 @@ Download source code and compile:
 - init source code
 
   ```sh
-  git clone https://github.com/kvcache-ai/ktransformers.git
+  git clone --branch v0.3.2 https://github.com/kvcache-ai/ktransformers.git
   cd ktransformers
   git submodule update --init --recursive
   ```
@@ -156,7 +154,7 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 
 # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
-# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
 ```
 
 It features the following arguments:
