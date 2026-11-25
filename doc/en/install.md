@@ -325,4 +325,4 @@ Access website with url [http://localhost:10002/web/index.html#/chat](http://loc
   </picture>
 </p>
 
-More information about the RESTful API server can be found [here](doc/en/api/server/server.md). You can also find an example of integrating with Tabby [here](doc/en/api/server/tabby.md).
+More information about the RESTful API server can be found [here](api/server/server.md). You can also find an example of integrating with Tabby [here](api/server/tabby.md).

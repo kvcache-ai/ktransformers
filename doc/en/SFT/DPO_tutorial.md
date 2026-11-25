@@ -128,7 +128,7 @@ cpu_infer: 64
 chunk_size: 8192
 ```
 
-For more details about --kt_optimize_rule, please refer to https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/KTransformers-Fine-Tuning_User-Guide.md 
+For more details about --kt_optimize_rule, please refer to https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md 
 
 Then, you can use the lora adapter saved in `saves/Kllama_deepseekV2_DPO` for inference the same as the sft training. For example,
 
