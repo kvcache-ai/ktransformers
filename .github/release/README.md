@@ -51,7 +51,9 @@ Run workflow
 - GLM-5.3-Flash：服务 ready、实际 decode、问答语义正确。
 - 同时检查 `pip install "ktransformers[sglang]"` 和
   `pip install "ktransformers[sglang,sft]"`，分别使用全新 venv。
-- 候选阶段从已核对的本地 wheelhouse 安装，不访问索引。发布后用默认的、
+- 生成候选时从完整索引独立解析仅 serving 的依赖。若它与候选 wheelhouse 中
+  `[sglang]` 计划的版本、文件名或 SHA256 不一致，则不生成发布清单。
+- 候选验收从已核对的本地 wheelhouse 安装，不访问索引。发布后用默认的、
   **不指定版本**的用户命令从正式 PyPI 安装，核对完整依赖解析结果、下载域名、
   版本、wheel 文件名和 SHA256，拒绝回退旧版本。
 - 候选阶段不通过、缺一个测试、资源等待超时，均不能进入发布；上传成功但
