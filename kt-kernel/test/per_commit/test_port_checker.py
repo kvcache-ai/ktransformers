@@ -29,6 +29,47 @@ class TestPortChecker(unittest.TestCase):
         finally:
             holder.close()
 
+    def _require_ipv6(self, host):
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+                sock.bind((host, 0))
+        except OSError as exc:
+            self.skipTest(f"IPv6 binding is unavailable: {exc}")
+
+    def test_ipv6_loopback_port_is_available(self):
+        self._require_ipv6("::1")
+        self.assertTrue(port_checker.is_port_available("::1", 0))
+
+    def test_ipv6_wildcard_port_is_available(self):
+        self._require_ipv6("::")
+        self.assertTrue(port_checker.is_port_available("::", 0))
+
+    def test_ipv6_occupied_port_and_release(self):
+        self._require_ipv6("::1")
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as holder:
+            holder.bind(("::1", 0))
+            port = holder.getsockname()[1]
+            self.assertFalse(port_checker.is_port_available("::1", port))
+            self.assertEqual(port_checker.find_available_port("::1", port, max_attempts=1), (False, port))
+            holder.listen()
+            self.assertFalse(port_checker.is_port_available("::1", port))
+        self.assertTrue(port_checker.is_port_available("::1", port))
+        self.assertEqual(port_checker.find_available_port("::1", port, max_attempts=1), (True, port))
+
+    def test_ipv6_socket_creation_failure_is_unavailable(self):
+        with patch.object(port_checker.socket, "socket", side_effect=OSError("IPv6 unavailable")):
+            self.assertFalse(port_checker.is_port_available("::1", 12345))
+
+    def test_ipv6_windows_bind_check_does_not_use_reuseaddr(self):
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        with patch.object(port_checker.sys, "platform", "win32"):
+            with patch.object(port_checker.socket, "socket", return_value=sock) as create_socket:
+                self.assertTrue(port_checker.is_port_available("::1", 12345))
+        create_socket.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt.assert_not_called()
+        sock.bind.assert_called_once_with(("::1", 12345))
+
     def test_non_windows_bind_check_uses_reuseaddr(self):
         sock = MagicMock()
         sock.__enter__.return_value = sock
