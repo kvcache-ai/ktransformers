@@ -59,6 +59,7 @@ conda create -n kt-kernel python=3.11
 conda activate kt-kernel
 
 git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
 git checkout kimi_k2.5
 git submodule update --init --recursive
 cd kt-kernel && ./install.sh
