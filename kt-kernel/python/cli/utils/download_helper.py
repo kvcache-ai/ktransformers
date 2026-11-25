@@ -21,7 +21,7 @@ def list_remote_files_hf(repo_id: str, use_mirror: bool = False) -> List[Dict[st
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
     try:
-        api = HfApi()
+        api = HfApi(endpoint=os.environ.get("HF_ENDPOINT"))
         files_info = api.list_repo_tree(repo_id=repo_id, recursive=True)
 
         result = []
@@ -126,7 +126,7 @@ def verify_repo_exists(repo_id: str, repo_type: str, use_mirror: bool = False) -
             from huggingface_hub import HfApi
 
             try:
-                api = HfApi()
+                api = HfApi(endpoint=os.environ.get("HF_ENDPOINT"))
                 api.repo_info(repo_id=repo_id, repo_type="model")
                 return True, "Repository found"
             finally:

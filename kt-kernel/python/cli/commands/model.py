@@ -378,6 +378,7 @@ def download(
 
             snapshot_download(
                 repo_id=repo,
+                endpoint=os.environ.get("HF_ENDPOINT"),
                 local_dir=str(download_path),
                 allow_patterns=file_pattern if file_pattern != "*" else None,
                 local_dir_use_symlinks=False,
