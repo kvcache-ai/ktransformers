@@ -137,10 +137,10 @@ def model_path_remove(
 
 def _parse_value(value: str):
     """Parse a string value into appropriate Python type."""
-    # Try boolean
-    if value.lower() in ("true", "yes", "on", "1"):
+    # Try boolean ("1"/"0" fall through to int so e.g. CUDA_VISIBLE_DEVICES=1 stays "1")
+    if value.lower() in ("true", "yes", "on"):
         return True
-    if value.lower() in ("false", "no", "off", "0"):
+    if value.lower() in ("false", "no", "off"):
         return False
 
     # Try integer
