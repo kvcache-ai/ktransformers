@@ -77,6 +77,8 @@ Optional variables (with defaults):
   CPUINFER_ENABLE_AVX512_VBMI=ON/OFF    Override VBMI detection (auto if unset)
   CPUINFER_ENABLE_CPPTRACE=ON/OFF       Enable native crash tracing (default OFF)
   CPUINFER_PIP_NO_DEPS=0/1              Install the built wheel without changing the image's Python stack
+  CPUINFER_USE_XPU=0/1                  Intel XPU (torch.xpu) SYCL/Level Zero stream bridge (auto-detected if unset)
+  CPUINFER_SYCL_ROOT=/path              oneAPI compiler root with include/sycl/sycl.hpp (if setvars.sh is not sourced)
 
 Software Fallback Support:
   ✓ If VNNI not available: Uses AVX512BW fallback (2-3x slower but works)
@@ -176,6 +178,70 @@ detect_cann_root() {
     fi
   done
   echo ""
+}
+
+# Detect an Intel XPU in the active Python env: returns 0 iff torch.xpu.is_available() is true.
+# Missing torch, a CPU-only torch, no device, or a hung probe all count as "not detected".
+detect_torch_xpu() {
+  local probe="import sys, torch; sys.exit(0 if getattr(torch, 'xpu', None) and torch.xpu.is_available() else 1)"
+  if command -v timeout &> /dev/null; then
+    timeout 120 python3 -c "$probe" > /dev/null 2>&1
+  else
+    python3 -c "$probe" > /dev/null 2>&1
+  fi
+}
+
+# True iff another GPU backend was explicitly requested; sets KT_OTHER_GPU_BACKEND for the message.
+KT_OTHER_GPU_BACKEND=""
+other_gpu_backend_requested() {
+  local name value
+  for name in CPUINFER_USE_CUDA CPUINFER_USE_ROCM CPUINFER_USE_MUSA CPUINFER_USE_MACA \
+              CPUINFER_USE_ASCEND_NPU CPUINFER_USE_SYCL; do
+    eval "value=\${$name:-}"
+    case "$value" in
+      1|ON|on|TRUE|true|YES|yes) KT_OTHER_GPU_BACKEND="$name"; return 0 ;;
+    esac
+  done
+  # setup.py auto-detects CUDA, but only when CPUINFER_USE_XPU is not already set; exporting it here
+  # would pre-empt that and silently turn a CUDA host's build into an XPU one.
+  if [ -n "${CUDA_HOME:-}" ] && [ -x "${CUDA_HOME}/bin/nvcc" ]; then
+    KT_OTHER_GPU_BACKEND="a CUDA toolkit (\$CUDA_HOME)"; return 0
+  fi
+  if command -v nvcc &> /dev/null || [ -x /usr/local/cuda/bin/nvcc ]; then
+    KT_OTHER_GPU_BACKEND="a CUDA toolkit (nvcc)"; return 0
+  fi
+  KT_OTHER_GPU_BACKEND=""
+  return 1
+}
+
+# True iff the dev files the KTRANSFORMERS_USE_XPU CMake branch requires are present: the SYCL
+# headers, the Level Zero headers and the ze_loader link library. Sets KT_XPU_MISSING for the
+# caller's message. (setup.py's find_xpu_prerequisites() applies the same test.)
+KT_XPU_MISSING=""
+detect_sycl_headers() {
+  KT_XPU_MISSING=""
+  local root found_sycl=0 found_ze_h=0 found_ze_lib=0
+  for root in "${CPUINFER_SYCL_ROOT:-}" "${SYCL_ROOT:-}" "${CMPLR_ROOT:-}" \
+              "${ONEAPI_ROOT:+$ONEAPI_ROOT/compiler/latest}" /opt/intel/oneapi/compiler/latest; do
+    [ -n "$root" ] || continue
+    [ -f "$root/include/sycl/sycl.hpp" ] && found_sycl=1
+    [ -f "$root/include/level_zero/ze_api.h" ] && found_ze_h=1
+  done
+  for root in "${LEVEL_ZERO_ROOT:+$LEVEL_ZERO_ROOT/include}" "${CONDA_PREFIX:+$CONDA_PREFIX/include}" \
+              /usr/include /usr/local/include; do
+    [ -n "$root" ] && [ -f "$root/level_zero/ze_api.h" ] && found_ze_h=1
+  done
+  # Keep this list in step with the KTRANSFORMERS_USE_XPU block in CMakeLists.txt and with
+  # find_xpu_prerequisites() in setup.py: a conda/pip Level Zero is as valid as a distro one.
+  for root in "${CONDA_PREFIX:+$CONDA_PREFIX/lib}" /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu \
+              /usr/lib64 /usr/local/lib /usr/lib; do
+    [ -n "$root" ] && [ -e "$root/libze_loader.so" ] && found_ze_lib=1
+  done
+  [ "$found_sycl" = 1 ] || KT_XPU_MISSING="$KT_XPU_MISSING sycl/sycl.hpp"
+  [ "$found_ze_h" = 1 ] || KT_XPU_MISSING="$KT_XPU_MISSING level_zero/ze_api.h"
+  [ "$found_ze_lib" = 1 ] || KT_XPU_MISSING="$KT_XPU_MISSING libze_loader.so"
+  KT_XPU_MISSING="${KT_XPU_MISSING# }"
+  [ -z "$KT_XPU_MISSING" ]
 }
 
 # Function to detect CPU features
@@ -399,6 +465,36 @@ build_step() {
   echo "  Note: FP8 MoE requires AVX512F + BF16 + VNNI + VBMI"
   echo "  Tip: Override with CPUINFER_ENABLE_AVX512_[VNNI|BF16|VBMI]=ON/OFF"
 
+  # Intel XPU (torch.xpu) detection, like the CANN flow above: honour an explicit CPUINFER_USE_XPU,
+  # otherwise probe the active Python env and enable the SYCL/Level Zero stream bridge if it has an XPU.
+  echo ""
+  echo "Intel XPU Detection:"
+  if [ -n "${CPUINFER_USE_XPU:-}" ]; then
+    echo "  XPU: User override = $CPUINFER_USE_XPU"
+  elif other_gpu_backend_requested; then
+    # Backends are mutually exclusive; auto-enabling XPU next to an explicitly requested one
+    # would abort the build with "GPU backends are mutually exclusive".
+    echo "  XPU: ✗ Skipped ($KT_OTHER_GPU_BACKEND was requested explicitly)"
+    export CPUINFER_USE_XPU=0
+  elif detect_torch_xpu; then
+    # torch.xpu alone is not enough: CMake needs the SYCL and Level Zero dev files too. Enabling
+    # the bridge without them would turn a build that used to succeed (CPU-only) into a hard
+    # error, so leave it off and say what is missing.
+    if detect_sycl_headers; then
+      echo "  XPU: ✓ Detected (torch.xpu.is_available() and SYCL/Level Zero dev files); enabling the stream bridge"
+      export CPUINFER_USE_XPU=1
+    else
+      echo "  XPU: ⚠️  torch.xpu is available but the SYCL/Level Zero dev files are incomplete; building without the stream bridge"
+      echo "       Missing: $KT_XPU_MISSING"
+      echo "       Fix: 'source /opt/intel/oneapi/setvars.sh' (or export CPUINFER_SYCL_ROOT=<oneAPI compiler root>)"
+      echo "            and 'sudo apt install level-zero-dev'. Set CPUINFER_USE_XPU=1 to require the bridge anyway."
+      export CPUINFER_USE_XPU=0
+    fi
+  else
+    echo "  XPU: ✗ Not detected (torch.xpu unavailable in this Python env); building without the stream bridge"
+    export CPUINFER_USE_XPU=0
+  fi
+
   echo ""
   echo "To use manual configuration instead, run: $0 build --manual"
   echo ""
@@ -480,6 +576,7 @@ echo "  CPUINFER_ENABLE_AVX512_VNNI  = ${CPUINFER_ENABLE_AVX512_VNNI:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_BF16  = ${CPUINFER_ENABLE_AVX512_BF16:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_VBMI  = ${CPUINFER_ENABLE_AVX512_VBMI:-AUTO}"
 echo "  CPUINFER_ENABLE_CPPTRACE     = ${CPUINFER_ENABLE_CPPTRACE:-OFF}"
+echo "  CPUINFER_USE_XPU             = ${CPUINFER_USE_XPU:-AUTO}"
 echo "  CPUINFER_BUILD_TYPE          = ${CPUINFER_BUILD_TYPE:-Release}"
 echo "  CPUINFER_PARALLEL            = ${CPUINFER_PARALLEL:-AUTO}"
 echo "  CPUINFER_VERBOSE             = ${CPUINFER_VERBOSE:-1}"

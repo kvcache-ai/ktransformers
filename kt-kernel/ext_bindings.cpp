@@ -25,6 +25,9 @@
 #if defined(KTRANSFORMERS_USE_ASCEND_NPU)
 #include "cpu_backend/ascend_callback_worker.h"
 #endif
+#if defined(KTRANSFORMERS_USE_XPU)
+#include "cpu_backend/vendors/xpu.h"
+#endif
 #include "operators/common.hpp"
 
 #if defined(USE_MOE_KERNEL)
@@ -595,6 +598,25 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__fp8_kernel__") = "unsupported";
 #endif
   m.attr("__fp8_weight_layout__") = "block-e4m3-128x128";
+  // GPU runtime the stream callbacks (submit_with_cuda_stream / sync_with_cuda_stream) were built for.
+#if defined(USE_SYCL)
+  // The SYCL iGPU build defines KTRANSFORMERS_USE_CUDA_HOST_CALLBACKS rather than KTRANSFORMERS_USE_CUDA.
+  m.attr("gpu_backend") = "sycl";
+#elif defined(KTRANSFORMERS_USE_CUDA)
+  m.attr("gpu_backend") = "cuda";
+#elif defined(KTRANSFORMERS_USE_ROCM)
+  m.attr("gpu_backend") = "rocm";
+#elif defined(KTRANSFORMERS_USE_MUSA)
+  m.attr("gpu_backend") = "musa";
+#elif defined(KTRANSFORMERS_USE_MACA)
+  m.attr("gpu_backend") = "maca";
+#elif defined(KTRANSFORMERS_USE_ASCEND_NPU)
+  m.attr("gpu_backend") = "ascend";
+#elif defined(KTRANSFORMERS_USE_XPU)
+  m.attr("gpu_backend") = "xpu";
+#else
+  m.attr("gpu_backend") = "cpu";
+#endif
   m.attr("FP8_LAYERWISE_CONTROL_BYTES") = kt::layerwise::kFP8LayerwiseControlBytes;
   m.attr("FP8_LAYERWISE_MAX_TP_SIZE") = kt::layerwise::kFP8LayerwiseMaxTPSize;
 
@@ -656,6 +678,16 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         "Stop the ACL callback worker thread.");
   m.def("is_ascend_callback_worker_running", &kt::ascend::callback_worker_running,
         "True iff the ACL callback worker is started and dispatching reports.");
+#endif
+#if defined(KTRANSFORMERS_USE_XPU)
+  m.def("xpu_stream_bridge_events", &kt::xpu::bridge_events,
+        "Configured Level Zero event ring size per queue in 'l0' mode (env KT_XPU_BRIDGE_EVENTS).");
+  m.def("xpu_stream_bridge_mode", &kt::xpu::bridge_mode,
+        "Configured default of the XPU stream bridge, 'l0' or 'host_task' (env KT_XPU_BRIDGE; recording queues "
+        "always use host_task).");
+  m.def("shutdown_xpu_stream_bridge", &kt::xpu::shutdown, py::call_guard<py::gil_scoped_release>(),
+        "Stop the XPU stream bridge workers and release their Level Zero events; idempotent, the bridge restarts "
+        "lazily on the next use.");
 #endif
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")

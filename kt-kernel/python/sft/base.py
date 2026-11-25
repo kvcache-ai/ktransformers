@@ -569,6 +569,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer.bsz_tensor[0] = qlen
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
+        elif input_device.type == "xpu":
+            torch.xpu.synchronize(input_device)
         return input_device
 
     def _copy_grad_output_to_cpu(self, buffer: KExpertsSFTBuffer, grad_output: torch.Tensor, qlen: int):
@@ -576,6 +578,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         input_device = grad_output.device
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
+        elif input_device.type == "xpu":
+            torch.xpu.synchronize(input_device)
         buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16))
 
     def _return_output(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
@@ -823,7 +827,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         GPU output buffer. It deliberately avoids the training-oriented
         torch.cuda.synchronize() in _copy_inputs_to_buffer().
         """
-        if not hasattr(self.cpu_infer, "submit_with_cuda_stream"):
+        # The stream path below is written against torch.cuda streams and events (ExternalStream,
+        # Event, record_stream), which torch.xpu does not provide; xpu takes the synchronous path.
+        if not hasattr(self.cpu_infer, "submit_with_cuda_stream") or hidden_states.device.type == "xpu":
             self.submit_forward(hidden_states, expert_ids, weights, save_for_backward=False)
             self._pending_inference_fallback = True
             self._pending_inference_fallback_device = hidden_states.device
