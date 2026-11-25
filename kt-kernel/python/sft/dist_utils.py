@@ -112,6 +112,7 @@ def _all_gather_checkpoint_state(
     owner_valid: bool = True,
     device: torch.device,
     world_size: int,
+    group=None,
 ) -> list[int]:
     """Agree on checkpoint control flow before entering conditional collectives.
 
@@ -154,7 +155,7 @@ def _all_gather_checkpoint_state(
             torch.empty(7, device=device, dtype=torch.int64)
             for _ in range(world_size)
         ]
-        dist.all_gather(gathered, local_state)
+        dist.all_gather(gathered, local_state, group=group)
 
     states = [tuple(int(value) for value in state.tolist()) for state in gathered]
     invalid = []

@@ -459,6 +459,26 @@ class KTMoELayerWrapper(nn.Module):
         if checkpoint_mode == "first_forward" and not cache_checkpoint_forward:
             save_for_backward_submit = False
 
+        replica_group = getattr(self, "_kt_replica_group", None)
+        if replica_group is not None:
+            from .token_redistribution import ReplicatedMoEFunction
+
+            all_qlens = _all_gather_checkpoint_state(
+                hidden_states.shape[0] * hidden_states.shape[1],
+                layer_idx=self.layer_idx, phase=checkpoint_mode, action=checkpoint_action,
+                cpu_policy=self._kt_activation_policy.cpu, gpu_policy=self._kt_activation_policy.gpu,
+                device=torch.device("cpu"), world_size=dist.get_world_size(), group=replica_group,
+                owner_valid=self.wrapper is not None and bool(self.wrapper.authoritative_optimizer_grads),
+            )
+            _validate_activation_checkpoint_phase(
+                self._kt_activation_policy, checkpoint_mode, requires_backward=save_for_backward_submit
+            )
+            return ReplicatedMoEFunction.apply(
+                hidden_states, topk_ids, topk_weights,
+                hidden_states.new_empty((), requires_grad=use_autograd_path),
+                self, all_qlens, checkpoint_action, save_for_backward_submit,
+            )
+
         with torch.profiler.record_function("kt.sft.submit_and_gpu_experts"):
             gpu_output, all_qlens = self._submit_and_compute_gpu(
                 hidden_states,

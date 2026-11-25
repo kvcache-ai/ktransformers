@@ -375,7 +375,8 @@ def kt_adapt_peft_lora(model: nn.Module) -> KTAdaptationResult:
             # In rank-0-authoritative BF16 mode, non-rank-0 processes need the
             # mode flag for collective/autograd symmetry but own no optimizer
             # Parameter or gradient buffer.
-            if authoritative_mode and not is_rank_0:
+            replicated = getattr(wrapper, "_kt_replica_group", None) is not None
+            if authoritative_mode and not is_rank_0 and not replicated:
                 wrapper._fused_expert_lora_params = []
                 wrapper._peft_lora_modules = None
                 adapted_count += 1
@@ -390,7 +391,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> KTAdaptationResult:
                 preassign_grads=not authoritative_mode,
             )
 
-            if is_rank_0 and wrapper.wrapper is not None:
+            if (is_rank_0 or replicated) and wrapper.wrapper is not None:
                 all_buffers = {}
                 all_buffers.update(lora_buffers)
                 all_buffers.update(lora_grad_buffers)
@@ -410,7 +411,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> KTAdaptationResult:
             elif authoritative_mode:
                 raise RuntimeError(f"Layer {layer_idx}: rank 0 authoritative LoRA requires a KT backend")
 
-            wrapper._fused_expert_lora_params = lora_params
+            wrapper._fused_expert_lora_params = lora_params if is_rank_0 or not replicated else []
             wrapper._peft_lora_modules = None
             adapted_count += 1
             wrapper._kt_peft_lora_adapted = True
@@ -893,6 +894,9 @@ def sync_kt_lora_gradients(model: nn.Module) -> None:
                 raise RuntimeError(f"Layer {wrapper.layer_idx}: rank 0 does not own {backend_description}")
             if authoritative:
                 backend.validate_authoritative_optimizer_grad_state()
+        elif getattr(wrapper, "_kt_replica_group", None) is not None:
+            if not authoritative or backend is None or backend.validate_authoritative_optimizer_grad_state() != "closed":
+                raise RuntimeError(f"Layer {wrapper.layer_idx}: replica gradient was not released after reduction")
         else:
             if backend is not None:
                 raise RuntimeError(f"Layer {wrapper.layer_idx}: rank {rank} unexpectedly owns {backend_description}")

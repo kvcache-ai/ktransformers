@@ -78,6 +78,7 @@ def _sync_any_rank_exception(
     *,
     device: torch.device,
     context: str,
+    group=None,
 ) -> None:
     """Raise the lowest-rank failure coherently on every distributed peer."""
     import torch.distributed as dist
@@ -96,7 +97,7 @@ def _sync_any_rank_exception(
     )
     local_length = torch.tensor([len(encoded)], device=device, dtype=torch.int64)
     lengths = [torch.empty_like(local_length) for _ in range(world_size)]
-    dist.all_gather(lengths, local_length)
+    dist.all_gather(lengths, local_length, group=group)
     failing_ranks = [idx for idx, value in enumerate(lengths) if int(value.item()) > 0]
     if not failing_ranks:
         return
@@ -107,7 +108,7 @@ def _sync_any_rank_exception(
         payload = torch.tensor(list(encoded), device=device, dtype=torch.uint8)
     else:
         payload = torch.empty(payload_length, device=device, dtype=torch.uint8)
-    dist.broadcast(payload, src=source)
+    dist.broadcast(payload, src=source, group=group)
     message = bytes(payload.cpu().tolist()).decode("utf-8", errors="replace")
     synced_error = RuntimeError(f"{context} on rank {source}: {message}")
     if rank == source and error is not None:

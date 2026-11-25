@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from .arch import (
@@ -24,6 +25,7 @@ from .arch import (
 )
 from .layer import KTMoELayerWrapper, KTRoutedExpertsWrapper
 from .lora import LoRAExperts
+from .autograd import _sync_any_rank_exception
 from .base import _supports_authoritative_optimizer_grads
 from .backend import (
     FP8_BACKEND,
@@ -160,6 +162,7 @@ def _sync_rank0_wrap_error(
     context: str,
     rank: int,
     world_size: int,
+    replica_group=None,
 ) -> None:
     """Make a rank-0-only wrapping stage fail coherently on every rank."""
     if world_size <= 1:
@@ -167,13 +170,14 @@ def _sync_rank0_wrap_error(
             raise error
         return
 
-    import torch.distributed as dist
-
     if not dist.is_initialized():
         if error is not None:
             raise error
         return
 
+    if replica_group is not None:
+        _sync_any_rank_exception(error, device=torch.device("cpu"), context=context, group=replica_group)
+        return
     payload = [
         None
         if error is None
@@ -304,7 +308,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
     Loads expert weights into the C++ KT kernel. No LoRA initialization ---
     LoRA is handled by PEFT and later adapted via kt_adapt_peft_lora().
-    Only rank 0 initializes KT kernel and loads weights.
+    Rank 0 owns the optimizer. Opt-in MXFP4 replicas also load the frozen weights.
     """
     if not KT_KERNEL_AVAILABLE:
         raise KTAMXNotAvailableError("kt_kernel not found. Please install kt_kernel to enable KT MoE support.")
@@ -574,6 +578,23 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         )
 
     threadpool_count = getattr(cfg, "kt_threadpool_count", 1) if getattr(cfg, "kt_tp_enabled", False) else 1
+    replica_group = None
+    cpu_threads = getattr(cfg, "kt_num_threads", 1)
+    numa_nodes = None
+    if getattr(cfg, "kt_token_redistribution", False) and distributed_world_size > 1:
+        if expert_weight_format != "mxfp4" or threadpool_count != 1:
+            raise KTAMXConfigError("KT token redistribution requires MXFP4 SFT with CPU TP1")
+        if not dist.is_initialized() or cpu_threads < distributed_world_size or cpu_threads % distributed_world_size:
+            raise KTAMXConfigError("KT token redistribution requires an initialized group and equal workers per rank")
+        replica_group = dist.new_group(backend="gloo")
+        cpu_threads //= distributed_world_size
+        nodes = sorted(
+            int(p.parent.name[4:]) for p in Path("/sys/devices/system/node").glob("node[0-9]*/cpulist")
+            if p.read_text().strip()
+        )
+        if nodes:
+            numa_nodes = [nodes[int(os.environ.get("LOCAL_RANK", distributed_rank)) % len(nodes)]]
+    owns_backend = is_rank_0 or replica_group is not None
     fp8_block_size = None
     if expert_weight_format == "fp8":
         fp8_block_size = _native_fp8_block_size(model.config)
@@ -930,9 +951,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         # the per-rank capacity multiplied by world size.
         rank0_chunked_prefill_size = int(chunked_prefill_size) * distributed_world_size
 
-        # Only rank 0 creates KTMoEWrapper and loads weights
         construct_error = None
-        if is_rank_0:
+        if owns_backend:
             try:
                 wrapper = KTMoEWrapper(
                     layer_idx=layer_idx,
@@ -942,7 +962,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                     moe_intermediate_size=moe_config.intermediate_size,
                     gpu_experts_mask=None,
                     num_gpu_experts=0,
-                    cpuinfer_threads=getattr(cfg, "kt_num_threads", 1),
+                    cpuinfer_threads=cpu_threads,
+                    **({"numa_nodes": numa_nodes} if numa_nodes is not None else {}),
                     threadpool_count=threadpool_count,
                     weight_path=kt_weight_path or "",
                     chunked_prefill_size=rank0_chunked_prefill_size,
@@ -975,10 +996,11 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             context=f"constructing KT layer {layer_idx}",
             rank=distributed_rank,
             world_size=distributed_world_size,
+            replica_group=replica_group,
         )
 
         load_error = None
-        if is_rank_0:
+        if owns_backend:
             try:
                 # The current SFT wrapping path routes all experts through KT even
                 # when the loading config requested GPU experts. Preserve that
@@ -1066,6 +1088,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             context=f"loading KT layer {layer_idx}",
             rank=distributed_rank,
             world_size=distributed_world_size,
+            replica_group=replica_group,
         )
 
         # Create LoRA Experts if enabled
@@ -1099,6 +1122,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         layer_wrapper._lora_alpha = float(lora_alpha)
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
+        layer_wrapper._kt_replica_group = replica_group
         layer_wrapper._kt_expert_weight_format = expert_weight_format or "bf16"
         if rawint4_contract is not None:
             layer_wrapper._kt_rawint4_quantization = {

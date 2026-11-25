@@ -263,6 +263,7 @@ class KTMoEWrapper:
                 zero_point=zero_point,
                 full_weight_grad=full_weight_grad,
                 swiglu_limit=swiglu_limit,
+                numa_nodes=numa_nodes,
             )
 
     # Forward static methods to the base class
@@ -430,6 +431,7 @@ def _create_sft_wrapper(
     zero_point: bool,
     full_weight_grad: bool = False,
     swiglu_limit: float = 0.0,
+    numa_nodes: Optional[List[int]] = None,
 ):
     """
     Create an SFT wrapper based on the method.
@@ -463,4 +465,5 @@ def _create_sft_wrapper(
         zero_point=zero_point,
         full_weight_grad=full_weight_grad,
         swiglu_limit=swiglu_limit,
+        numa_nodes=numa_nodes,
     )

@@ -7,6 +7,8 @@ from typing import Sequence
 import torch
 import torch.distributed as dist
 
+from .autograd import _sync_any_rank_exception
+
 
 @dataclass(frozen=True)
 class _Transfer:
@@ -63,11 +65,9 @@ class TokenRedistributionPlan:
         return sum(t.rows for t in self._transfers)
 
     def to_workers(self, rows: torch.Tensor, group: dist.ProcessGroup | None = None) -> torch.Tensor:
-        """Move CPU input rows to the workers that will execute their experts."""
         return self._exchange(rows, group, reverse=False)
 
     def to_sources(self, rows: torch.Tensor, group: dist.ProcessGroup | None = None) -> torch.Tensor:
-        """Return worker outputs or gradients in their original row order."""
         return self._exchange(rows, group, reverse=True)
 
     def _exchange(self, rows: torch.Tensor, group: dist.ProcessGroup | None, reverse: bool) -> torch.Tensor:
@@ -105,3 +105,123 @@ class TokenRedistributionPlan:
         for request in dist.batch_isend_irecv(ops):
             request.wait()
         return result
+
+
+def _exchange_columns(exchange, group, *columns):
+    columns = [column.detach().cpu().contiguous() for column in columns]
+    buffers = [column.view(torch.uint8) for column in columns]
+    packed = exchange(torch.cat(buffers, dim=1), group)
+    return [
+        chunk.contiguous().view(column.dtype)
+        for chunk, column in zip(packed.split([buffer.shape[1] for buffer in buffers], dim=1), columns)
+    ]
+
+
+def _replica_lora_params(layer, group):
+    entries = layer.wrapper.authoritative_optimizer_grads
+    dirty = torch.tensor([not getattr(layer, "_kt_replica_synced", False) or layer._lora_pointers_dirty])
+    dist.broadcast(dirty, src=0, group=group)
+    if dirty.item():
+        for entry in entries:
+            dist.broadcast(entry.parameter.detach().view(torch.uint8), src=0, group=group)
+        layer.update_lora_pointers()
+        layer._lora_pointers_dirty = False
+        layer._kt_replica_synced = True
+
+
+def _flat_grads(entries):
+    return torch.cat([entry.grad_view.flatten().float() for entry in entries])
+
+
+class ReplicatedMoEFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, hidden, ids, scores, lora_ref, layer, counts, checkpoint_action, save_for_backward):
+        group, backend = layer._kt_replica_group, layer.wrapper
+        rank = dist.get_rank(group)
+        plan = TokenRedistributionPlan.from_counts(counts)
+        worker_rows = plan.worker_counts[rank]
+        error = None
+        try:
+            if checkpoint_action != "reuse_recompute":
+                _replica_lora_params(layer, group)
+        except Exception as exc:
+            error = exc
+        _sync_any_rank_exception(error, device=torch.device("cpu"), context="Refreshing KT replicas", group=group)
+
+        if checkpoint_action != "reuse_recompute":
+            inputs = _exchange_columns(
+                plan.to_workers, group, hidden.reshape(counts[rank], hidden.shape[-1]), ids, scores
+            )
+        try:
+            if not worker_rows:
+                output = torch.empty((0, hidden.shape[-1]), dtype=torch.bfloat16)
+            elif checkpoint_action == "reuse_recompute":
+                output = backend.get_checkpoint_output(worker_rows)
+            else:
+                if checkpoint_action == "cache_first_forward":
+                    backend.validate_checkpoint_cache_empty()
+                output = backend.forward(*inputs, save_for_backward=save_for_backward)
+                if checkpoint_action == "cache_first_forward":
+                    backend.cache_checkpoint_output(output, worker_rows)
+        except Exception as exc:
+            error = exc
+        _sync_any_rank_exception(error, device=torch.device("cpu"), context="KT replica forward", group=group)
+
+        ctx.plan, ctx.layer = plan, layer
+        ctx.score_shape, ctx.score_dtype, ctx.score_device = scores.shape, scores.dtype, scores.device
+        ctx.save_for_backward(hidden.new_empty(()))
+        return plan.to_sources(output, group).to(hidden).reshape_as(hidden)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        layer, plan = ctx.layer, ctx.plan
+        group, backend = layer._kt_replica_group, layer.wrapper
+        rank = dist.get_rank(group)
+        cpu = torch.device("cpu")
+        error = None
+        try:
+            _ = ctx.saved_tensors
+        except Exception as exc:
+            error = exc
+        _sync_any_rank_exception(error, device=cpu, context="KT replica checkpoint recompute", group=group)
+        grad = plan.to_workers(grad_output.detach().flatten(0, 1).cpu(), group)
+
+        entries = backend.authoritative_optimizer_grads
+        previous = None
+        try:
+            if rank == 0 or not grad.shape[0]:
+                # Native lazy clearing only tracks locally active experts.
+                if rank == 0 and backend.validate_authoritative_optimizer_grad_state() == "open":
+                    previous = _flat_grads(entries)
+                    backend.release_authoritative_optimizer_grads()
+                for entry in entries:
+                    entry.grad_view.zero_()
+            if grad.shape[0]:
+                dx, ds = backend.backward(grad, optimizer_grad_scale=1.0 / len(plan.source_counts))
+            else:
+                dx = grad.bfloat16()
+                ds = torch.empty((0, ctx.score_shape[-1]), dtype=torch.bfloat16)
+                if rank == 0:
+                    backend._prepare_authoritative_optimizer_grad_write(1.0)
+                    backend._publish_authoritative_optimizer_grads()
+            backend.clear_checkpoint_output()
+        except Exception as exc:
+            error = exc
+        try:
+            _sync_any_rank_exception(error, device=cpu, context="KT replica backward", group=group)
+            gradients = _flat_grads(entries)
+            dist.reduce(gradients, dst=0, group=group)
+            if rank == 0:
+                if previous is not None:
+                    gradients.add_(previous)
+                for entry, chunk in zip(entries, gradients.split([entry.grad_view.numel() for entry in entries])):
+                    entry.grad_view.copy_(chunk.view_as(entry.grad_view))
+            dx, ds = _exchange_columns(plan.to_sources, group, dx, ds.bfloat16())
+        except Exception:
+            backend.release_authoritative_optimizer_grads()
+            raise
+        if rank != 0:
+            backend.release_authoritative_optimizer_grads()
+        dx = dx.to(grad_output).reshape_as(grad_output)
+        ds = ds.to(device=ctx.score_device, dtype=ctx.score_dtype).reshape(ctx.score_shape)
+        return dx, None, ds, None, None, None, None, None
