@@ -79,14 +79,20 @@ class TP_MOE_Common : public MoE_Interface {
 #endif
 
     if (is_llamafile) {
-      // For Llamafile backend: use QK_K-aligned TP splitting
-      if (config.intermediate_size % QK_K != 0) {
-        printf("intermediate_size %d must be divisible by QK_K %d for Llamafile backend\n", config.intermediate_size,
-               QK_K);
-        throw std::runtime_error("intermediate_size must be divisible by QK_K (256) for Llamafile backend");
+      // For Llamafile backend: split the intermediate dimension on whole blocks of the down
+      // projection's type (the dimension it contracts over). Sizes that are a multiple of QK_K
+      // keep the QK_K split; others (e.g. 640 with a 32-wide down type such as IQ4_NL or Q8_0)
+      // split on max(32, down block size), the granularity forward_many's row tiles need.
+      const int down_blck = (int)ggml_blck_size((ggml_type)config.down_type);
+      const int gran = config.intermediate_size % QK_K == 0 ? QK_K : (down_blck > 32 ? down_blck : 32);
+      if (config.intermediate_size % gran != 0) {
+        printf("intermediate_size %d must be divisible by %d (QK_K, or the down type's block size) for Llamafile backend\n",
+               config.intermediate_size, gran);
+        throw std::runtime_error(
+            "intermediate_size must be a multiple of the down type's block size (and of 32) for Llamafile backend");
       }
 
-      int num_blocks = config.intermediate_size / QK_K;
+      int num_blocks = config.intermediate_size / gran;
       int base_blocks = num_blocks / tp_count;
       int extra_blocks = num_blocks % tp_count;
 
@@ -96,8 +102,8 @@ class TP_MOE_Common : public MoE_Interface {
         throw std::runtime_error("intermediate_size too small: cannot distribute blocks to all TP instances");
       }
 
-      printf("Llamafile TP splitting: intermediate_size=%d, tp_count=%d, QK_K=%d\n", config.intermediate_size, tp_count,
-             QK_K);
+      printf("Llamafile TP splitting: intermediate_size=%d, tp_count=%d, granularity=%d\n", config.intermediate_size,
+             tp_count, gran);
       printf("  num_blocks=%d, base_blocks=%d, extra_blocks=%d\n", num_blocks, base_blocks, extra_blocks);
 
       int current_offset = 0;
@@ -107,7 +113,7 @@ class TP_MOE_Common : public MoE_Interface {
 
         // First extra_blocks TPs get one more block
         int num_blocks_for_this_tp = base_blocks + (i < extra_blocks ? 1 : 0);
-        tp_config.intermediate_size = num_blocks_for_this_tp * QK_K;
+        tp_config.intermediate_size = num_blocks_for_this_tp * gran;
 
         printf("  TP %d: intermediate_size=%d, offset=%d, blocks=%d\n", i, tp_config.intermediate_size, current_offset,
                num_blocks_for_this_tp);
