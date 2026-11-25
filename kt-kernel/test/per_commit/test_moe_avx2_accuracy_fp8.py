@@ -23,6 +23,23 @@ max_len = 128
 group_size = 128
 validation_iter = 3
 CPUINFER_PARAM = 60
+SINGLE_SUBPOOL_THREADS = 8
+
+
+def make_cpu_infer(threads=CPUINFER_PARAM):
+    """CPUInfer backed by a single NUMA subpool.
+
+    The CPU MoE maps one TP part to each NUMA subpool, so the number of TP parts
+    (and the resulting per-TP shape) depends on the host NUMA topology. These
+    accuracy tests use small block-quantized shapes that must stay aligned to the
+    quantization group_size, so pin the pool to a single subpool (TP=1) to keep
+    the test independent of the host NUMA count.
+    """
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 1
+    cfg.subpool_numa_map = [0]
+    cfg.subpool_thread_count = [min(threads, SINGLE_SUBPOOL_THREADS)]
+    return kt_kernel_ext.CPUInfer(cfg)
 
 
 def fp8_e4m3_quantize(tensor_bf16):
@@ -161,7 +178,7 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
 @pytest.mark.parametrize("qlen,label", [(1, "Decode"), (16, "Prefill")])
 def test_avx2_fp8_accuracy(qlen, label):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
-    CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
+    CPUInfer = make_cpu_infer()
 
     with torch.inference_mode():
         # Generate BF16 weights, quantize to FP8
@@ -239,6 +256,112 @@ def test_avx2_fp8_accuracy(qlen, label):
             assert diff < 0.1, "FP8 accuracy test failed: diff=%.6f >= 0.1" % diff.item()
 
     print("  PASSED")
+
+
+@pytest.mark.cpu
+def test_avx2_fp8_rejects_unaligned_tp_split():
+    """A TP split that breaks the FP8 block grid must fail loudly.
+
+    With 8 subpools the CPU MoE uses 8 TP parts, so intermediate_size=512
+    becomes 64 per TP -- smaller than the 128-wide quantization block and a
+    hostile layout for the block-wise scales. The kernel used to silently
+    return garbage; it must now raise instead.
+    """
+    if not hasattr(kt_kernel_ext.moe, "AVX2FP8_MOE"):
+        pytest.skip("AVX2FP8_MOE is not available")
+
+    cfg = kt_kernel_ext.WorkerPoolConfig()
+    cfg.subpool_count = 8
+    cfg.subpool_numa_map = [0] * 8
+    cfg.subpool_thread_count = [2] * 8
+    cpu_infer = kt_kernel_ext.CPUInfer(cfg)
+
+    config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+    config.max_len = max_len
+    config.quant_config.bits = 8
+    config.quant_config.group_size = group_size
+    config.quant_config.zero_point = False
+    config.pool = cpu_infer.backend_
+
+    with pytest.raises(RuntimeError, match="group_size"):
+        kt_kernel_ext.moe.AVX2FP8_MOE(config)
+
+
+@pytest.mark.cpu
+def test_avx2_fp8_allows_unsplit_tail_shape():
+    """TP=1 must still accept a partial trailing block (e.g. hidden=192).
+
+    No TP boundary crosses a 128-wide block here, so the block-wise scales and
+    the GEMM K-tail stay valid; only a misaligned TP split should be rejected.
+    """
+    h, inter = 192, 256
+    physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
+    CPUInfer = make_cpu_infer()
+
+    with torch.inference_mode():
+        gate_bf16 = (torch.randn((expert_num, inter, h), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+        up_bf16 = (torch.randn((expert_num, inter, h), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+        down_bf16 = (torch.randn((expert_num, h, inter), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+
+        gate_fp8_list, gate_scale_list = [], []
+        up_fp8_list, up_scale_list = [], []
+        down_fp8_list, down_scale_list = [], []
+        for e in range(expert_num):
+            gf, gs = fp8_e4m3_quantize(gate_bf16[e])
+            gate_fp8_list.append(gf)
+            gate_scale_list.append(gs)
+            uf, us = fp8_e4m3_quantize(up_bf16[e])
+            up_fp8_list.append(uf)
+            up_scale_list.append(us)
+            df, ds = fp8_e4m3_quantize(down_bf16[e])
+            down_fp8_list.append(df)
+            down_scale_list.append(ds)
+
+        gate_fp8 = torch.stack(gate_fp8_list).contiguous()
+        gate_scales = torch.stack(gate_scale_list).contiguous()
+        up_fp8 = torch.stack(up_fp8_list).contiguous()
+        up_scales = torch.stack(up_scale_list).contiguous()
+        down_fp8 = torch.stack(down_fp8_list).contiguous()
+        down_scales = torch.stack(down_scale_list).contiguous()
+
+        gate_deq = torch.stack([fp8_dequantize(gate_fp8_list[e], gate_scale_list[e]) for e in range(expert_num)])
+        up_deq = torch.stack([fp8_dequantize(up_fp8_list[e], up_scale_list[e]) for e in range(expert_num)])
+        down_deq = torch.stack([fp8_dequantize(down_fp8_list[e], down_scale_list[e]) for e in range(expert_num)])
+
+        config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, h, inter, 0)
+        config.max_len = max_len
+        config.gate_proj = gate_fp8.data_ptr()
+        config.up_proj = up_fp8.data_ptr()
+        config.down_proj = down_fp8.data_ptr()
+        config.gate_scale = gate_scales.data_ptr()
+        config.up_scale = up_scales.data_ptr()
+        config.down_scale = down_scales.data_ptr()
+        config.quant_config.bits = 8
+        config.quant_config.group_size = group_size
+        config.quant_config.zero_point = False
+        config.pool = CPUInfer.backend_
+
+        moe = kt_kernel_ext.moe.AVX2FP8_MOE(config)  # must not raise for TP=1
+        CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
+        CPUInfer.sync()
+
+        qlen = 1
+        expert_ids = torch.stack([torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]).contiguous()
+        weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
+        input_data = (torch.randn((qlen, h), dtype=torch.float32) / 100.0).to(torch.bfloat16).contiguous()
+        output = torch.empty((qlen, h), dtype=torch.bfloat16).contiguous()
+        bsz_tensor = torch.tensor([qlen], dtype=torch.int32)
+        CPUInfer.submit(
+            moe.forward_task(
+                bsz_tensor.data_ptr(), num_experts_per_tok, expert_ids.data_ptr(), weights.data_ptr(),
+                input_data.data_ptr(), output.data_ptr(), False,
+            )
+        )
+        CPUInfer.sync()
+
+        t_output = moe_torch(input_data.float(), expert_ids, weights, gate_deq, up_deq, down_deq).to(torch.bfloat16)
+        diff = torch.mean(torch.abs(output.float() - t_output.float())) / (torch.mean(torch.abs(t_output.float())) + 1e-8)
+        assert diff < 0.1, "AVX2 FP8 unsplit tail accuracy failed: diff=%.6f" % diff.item()
 
 
 if __name__ == "__main__":
