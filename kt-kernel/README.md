@@ -560,7 +560,7 @@ python -m sglang.launch_server \
 
 ## Direct Python API Usage
 
-For standalone usage without SGLang, you can use KT-Kernel directly via Python API:
+You can call KT-Kernel's MoE layer operator directly from Python without SGLang. The caller supplies the layer weights, hidden states, and top-k routing IDs and weights. The wrapper does not load or run a complete language model.
 
 ```python
 from kt_kernel import KTMoEWrapper
@@ -580,11 +580,8 @@ wrapper = KTMoEWrapper(
     method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE"
 )
 
-# Load weights (from disk - pre-quantized)
+# Load existing quantized weights from weight_path.
 wrapper.load_weights(physical_to_logical_map)
-
-# Or load weights from tensors (online quantization)
-wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
 
 # Run inference
 output = wrapper.forward(hidden_states, topk_ids, topk_weights, cuda_stream)
@@ -594,6 +591,14 @@ wrapper.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
 # ... do other work ...
 output = wrapper.sync_forward(hidden_states, cuda_stream)
 ```
+
+For `AMXINT4` or `AMXINT8`, if you have BF16 or FP16 projection tensors instead of pre-quantized weights, replace the `load_weights` call with:
+
+```python
+wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+```
+
+This quantizes the weights and saves them under `weight_path`. Use a writable path for this step.
 
 ### Advanced Options
 
