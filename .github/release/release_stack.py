@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from cleanup import cleanup
 from four_main import inspect_wheel, read_lock, save_json, sha256
@@ -26,6 +27,7 @@ from contracts import CASES, PACKAGES, require, suite_passed  # noqa: E402
 from release_contracts import verify_install_report, verify_release  # noqa: E402
 
 ORDER = ("accelerate-kt", "transformers-kt", "kt-kernel", "sglang-kt", "ktransformers")
+PYPI_SIMPLE_INDEX = "https://pypi.org/simple"
 
 
 def pypi_files(name, version):
@@ -63,6 +65,21 @@ def pip(*args):
     )
 
 
+def wheel_choices(report):
+    choices = {}
+    for item in json.loads(report.read_text())["install"]:
+        metadata = item["metadata"]
+        name = metadata["name"].lower().replace("_", "-")
+        require(name not in choices, "Duplicate distribution in resolution: " + name)
+        download = item["download_info"]
+        choices[name] = (
+            metadata["version"],
+            Path(unquote(urlparse(download["url"]).path)).name,
+            download.get("archive_info", {}).get("hashes", {}).get("sha256"),
+        )
+    return choices
+
+
 def make_release(final, root, lock_path, evidence):
     root.mkdir(exist_ok=False)
     house = root / "wheelhouse"
@@ -78,7 +95,7 @@ def make_release(final, root, lock_path, evidence):
     pip(
         "download",
         "--index-url",
-        "https://pypi.org/simple",
+        PYPI_SIMPLE_INDEX,
         "--no-cache-dir",
         "--only-binary=:all:",
         "--find-links",
@@ -166,6 +183,35 @@ def make_release(final, root, lock_path, evidence):
         verify_install_report(
             json.loads(report.read_text()), manifest, extra, public=False
         )
+    # The combined download may hide a newer dependency selected without SFT.
+    # Validate the independent resolution before sealing a one-version wheelhouse.
+    serving_index_report = evidence / "resolution-sglang-index.json"
+    pip(
+        "install",
+        "--dry-run",
+        "--ignore-installed",
+        "--no-cache-dir",
+        "--only-binary=:all:",
+        "--index-url",
+        PYPI_SIMPLE_INDEX,
+        "--find-links",
+        final,
+        "--report",
+        serving_index_report,
+        "ktransformers[sglang]",
+    )
+    index_choices = wheel_choices(serving_index_report)
+    tested_choices = wheel_choices(evidence / "resolution-sglang.json")
+    differences = sorted(
+        name
+        for name in index_choices.keys() | tested_choices.keys()
+        if index_choices.get(name) != tested_choices.get(name)
+    )
+    require(
+        not differences,
+        "Serving-only index resolution differs from the tested wheelhouse: "
+        + ", ".join(differences),
+    )
     save_json(root / "release.json", manifest)
     digest = sha256(root / "release.json")
     verify_release(root, digest)

@@ -4,11 +4,13 @@ import copy
 import json
 import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from contracts import CASES, digest, write_json
+import release_stack
+from contracts import CASES, REPOSITORIES, digest, write_json
 from release_stack import (
     check_evidence,
     check_unused,
@@ -17,6 +19,118 @@ from release_stack import (
     promote,
 )
 from test_release_contracts import fixture, report
+
+
+def write_test_wheel(directory, name, version, requirements=(), extras=()):
+    stem = f"{name.replace('-', '_')}-{version}"
+    metadata = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+    metadata.extend(f"Provides-Extra: {extra}" for extra in extras)
+    metadata.extend(f"Requires-Dist: {requirement}" for requirement in requirements)
+    with ZipFile(directory / f"{stem}-py3-none-any.whl", "w") as wheel:
+        info = f"{stem}.dist-info"
+        wheel.writestr(f"{info}/METADATA", "\n".join(metadata) + "\n\n")
+        wheel.writestr(
+            f"{info}/WHEEL",
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        wheel.writestr(f"{info}/RECORD", "")
+
+
+@pytest.mark.parametrize("newer_backend", [False, True])
+def test_release_checks_serving_plan_against_complete_index(
+    tmp_path, monkeypatch, newer_backend
+):
+    final, index, evidence = (
+        tmp_path / name for name in ("final", "index", "evidence")
+    )
+    for directory in (final, index, evidence):
+        directory.mkdir()
+    backend = "kt-release-fixture-backend"
+    write_test_wheel(index, backend, "1.0")
+    if newer_backend:
+        write_test_wheel(index, backend, "2.0")
+    write_test_wheel(final, "kt-kernel", "1.0")
+    write_test_wheel(final, "accelerate-kt", "1.0")
+    write_test_wheel(final, "transformers-kt", "1.0", [f"{backend}<2"])
+    write_test_wheel(final, "sglang-kt", "1.0", [f"{backend}>=1"])
+    write_test_wheel(
+        final,
+        "ktransformers",
+        "1.0",
+        [
+            "kt-kernel==1.0",
+            'sglang-kt==1.0; extra == "sglang"',
+            'transformers-kt==1.0; extra == "sft"',
+            'accelerate-kt==1.0; extra == "sft"',
+        ],
+        ["sglang", "sft"],
+    )
+    lock = tmp_path / "lock.json"
+    write_json(
+        lock,
+        {
+            "schema_version": 1,
+            "workflow_sha": "a" * 40,
+            "sources": {
+                name: {"repository": repo, "ref": "refs/heads/main", "sha": "a" * 40}
+                for name, repo in REPOSITORIES.items()
+            },
+        },
+    )
+    root = tmp_path / "release"
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setattr(
+        release_stack,
+        "check_unused",
+        lambda entries: check_unused(entries, query=lambda *_: []),
+    )
+    real_pip = release_stack.pip
+
+    def offline_pip(*args):
+        args = list(args)
+        if "--index-url" in args:
+            start = args.index("--index-url")
+            args[start : start + 2] = ["--no-index", "--find-links", index]
+        assert "--no-index" in args
+        real_pip(*args, "--disable-pip-version-check")
+
+    standalone = tmp_path / "standalone-resolution.json"
+    offline_pip(
+        "install",
+        "--dry-run",
+        "--ignore-installed",
+        "--no-index",
+        "--find-links",
+        final,
+        "--find-links",
+        index,
+        "--report",
+        standalone,
+        "ktransformers[sglang]",
+    )
+    selected = {
+        row["metadata"]["name"]: row["metadata"]["version"]
+        for row in json.loads(standalone.read_text())["install"]
+    }
+    assert selected[backend] == ("2.0" if newer_backend else "1.0")
+    monkeypatch.setattr(release_stack, "pip", offline_pip)
+    if newer_backend:
+        with pytest.raises(
+            ValueError, match=f"Serving-only index resolution differs.*{backend}"
+        ):
+            release_stack.make_release(final, root, lock, evidence)
+        assert not (root / "release.json").exists()
+        assert not output.exists()
+    else:
+        release_stack.make_release(final, root, lock, evidence)
+        manifest = json.loads((root / "release.json").read_text())
+        plans = manifest["plans"]
+        assert plans["sglang"][backend] == plans["sglang,sft"][backend]
+        assert manifest["wheelhouse"][plans["sglang"][backend]]["version"] == "1.0"
+        assert "manifest_sha256=" in output.read_text()
 
 
 @pytest.fixture
