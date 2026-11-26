@@ -16,8 +16,10 @@
 #include <tmmintrin.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -26,6 +28,7 @@
 
 #include "avx2_bf16_gemm.hpp"
 #include "avx2_bf16_utils.hpp"
+#include "block_scale_codes.hpp"
 #include "moe_base.hpp"
 
 namespace avx2 {
@@ -191,6 +194,42 @@ struct GemmKernelAVX2MXFP4 {
       return n * (k / k_group_size) * sizeof(float);
     }
 
+    // KT_SCALE_CODES=1 (block_scale_codes.hpp): one byte a group indexing lut, the matrix's distinct FP32 scales bit
+    // for bit. d stays allocated and filled (the GPU export and the generic path read it).
+    std::unique_ptr<uint8_t[]> code_store;
+    uint8_t* code = nullptr;
+    alignas(64) float lut[256];
+
+    // false (and the FP32 path kept) when the matrix has more than 256 distinct scale bit patterns
+    bool build_scale_codes() {
+      code = nullptr;
+      if (d == nullptr || n <= 0 || k_group_count <= 0) return false;
+      const size_t cnt = (size_t)n * k_group_count;
+      std::unique_ptr<uint8_t[]> out(new uint8_t[cnt]);
+      uint32_t keys[512];
+      int16_t val[512];
+      for (int i = 0; i < 512; i++) val[i] = -1;
+      int nd = 0;
+      for (size_t i = 0; i < cnt; i++) {
+        uint32_t x;
+        std::memcpy(&x, d + i, 4);
+        uint32_t h = (x * 2654435761u) >> 23;
+        while (val[h] >= 0 && keys[h] != x) h = (h + 1) & 511;
+        if (val[h] < 0) {
+          if (nd == 256) return false;
+          keys[h] = x;
+          val[h] = (int16_t)nd;
+          std::memcpy(&lut[nd], &x, 4);
+          nd++;
+        }
+        out[i] = (uint8_t)val[h];
+      }
+      for (int i = nd; i < 256; i++) lut[i] = 0.0f;
+      code_store = std::move(out);
+      code = code_store.get();
+      return true;
+    }
+
     void from_raw_mat(const uint8_t* proj, int ith, int nth) {
       if (b == nullptr) return;
       auto [n_start, n_end] = split_range(n, ith, nth);
@@ -303,14 +342,14 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
       const char* v = std::getenv("KT_MXFP4_REM_ROWS");
       return v ? std::atoi(v) != 0 : true;
     }();
-    auto rem_rows = [&](auto nr_const, int mi0, int ni, const uint8_t* b_row, const float* b_scales) {
+    auto rem_rows = [&](auto nr_const, int mi0, int ni, const uint8_t* b_row, auto b_scale) {
       constexpr int NR = decltype(nr_const)::value;
       __m256 ta[NR], tb[NR];
 #pragma GCC unroll 3
       for (int r = 0; r < NR; r++) ta[r] = tb[r] = _mm256_setzero_ps();
       for (int g = 0; g < group_count; g++) {
         KT_MXFP4_DECODE_GROUP(b_row, g);
-        const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+        const __m256 sv = _mm256_broadcast_ss(b_scale(g));
 #pragma GCC unroll 3
         for (int r = 0; r < NR; r++) {
           const float* ap = a_perm + (size_t)(mi0 + r) * k + (size_t)g * 32;
@@ -328,17 +367,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
       for (int r = 0; r < NR; r++) c.data[(size_t)(mi0 + r) * n + ni] = hsum_avx2(_mm256_add_ps(ta[r], tb[r]));
     };
 
-    for (int ni = n_start; ni < n_end; ni++) {
-      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
-      const float* b_scales = b.d + (size_t)ni * group_count;
-      if (ni + 1 < n_end) {
-        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
-        _mm_prefetch(nr, _MM_HINT_T0);
-        _mm_prefetch(nr + 64, _MM_HINT_T0);
-        _mm_prefetch(nr + 128, _MM_HINT_T0);
-        _mm_prefetch(nr + 192, _MM_HINT_T0);
-      }
-
+    auto row32 = [&](int ni, const uint8_t* b_row, auto b_scale) {
       // 4-token blocked path: each decoded group feeds 4 accumulators.
       int mi = 0;
       for (; mi + 4 <= m; mi += 4) {
@@ -370,7 +399,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
           g2 = _mm256_fmadd_ps(_mm256_loadu_ps(p2 + base + 24), w3, g2);
           g3 = _mm256_fmadd_ps(_mm256_loadu_ps(p3 + base + 24), w3, g3);
 
-          const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+          const __m256 sv = _mm256_broadcast_ss(b_scale(g));
           tot0 = _mm256_fmadd_ps(g0, sv, tot0);
           tot1 = _mm256_fmadd_ps(g1, sv, tot1);
           tot2 = _mm256_fmadd_ps(g2, sv, tot2);
@@ -387,9 +416,9 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
       // per row, so the outputs are those of the loop below, bit for bit.
       if (kRemRows && m - mi >= 2) {
         if (m - mi == 2)
-          rem_rows(std::integral_constant<int, 2>{}, mi, ni, b_row, b_scales);
+          rem_rows(std::integral_constant<int, 2>{}, mi, ni, b_row, b_scale);
         else
-          rem_rows(std::integral_constant<int, 3>{}, mi, ni, b_row, b_scales);
+          rem_rows(std::integral_constant<int, 3>{}, mi, ni, b_row, b_scale);
         mi = m;
       }
 
@@ -407,7 +436,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
           gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 16), w2, gacc);
           gacc = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, gacc);
 
-          const __m256 sv = _mm256_broadcast_ss(&b_scales[g]);
+          const __m256 sv = _mm256_broadcast_ss(b_scale(g));
           if (g & 1)
             total1 = _mm256_fmadd_ps(gacc, sv, total1);
           else
@@ -415,6 +444,21 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
         }
         c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
       }
+    };
+
+    for (int ni = n_start; ni < n_end; ni++) {
+      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
+      if (ni + 1 < n_end) {
+        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
+        _mm_prefetch(nr, _MM_HINT_T0);
+        _mm_prefetch(nr + 64, _MM_HINT_T0);
+        _mm_prefetch(nr + 128, _MM_HINT_T0);
+        _mm_prefetch(nr + 192, _MM_HINT_T0);
+      }
+      if (b.code != nullptr)
+        row32(ni, b_row, BlockScaleCode{b.code + (size_t)ni * group_count, b.lut});
+      else
+        row32(ni, b_row, BlockScaleF32{b.d + (size_t)ni * group_count});
     }
 #undef KT_MXFP4_DECODE_GROUP
     return;
@@ -470,17 +514,7 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
   const __m256 w2 = _mm256_castsi256_ps(_mm256_unpacklo_epi16(zero256, u16b));       \
   const __m256 w3 = _mm256_castsi256_ps(_mm256_unpackhi_epi16(zero256, u16b))
 
-    for (int ni = n_start; ni < n_end; ni++) {
-      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
-      const float* b_scales = b.d + (size_t)ni * group_count;
-      if (ni + 1 < n_end) {
-        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
-        _mm_prefetch(nr, _MM_HINT_T0);
-        _mm_prefetch(nr + 64, _MM_HINT_T0);
-        _mm_prefetch(nr + 128, _MM_HINT_T0);
-        _mm_prefetch(nr + 192, _MM_HINT_T0);
-      }
-
+    auto row16 = [&](int ni, const uint8_t* b_row, auto b_scale) {
       // 4-token blocked path: per block, each half folds with its own scale.
       int mi = 0;
       for (; mi + 4 <= m; mi += 4) {
@@ -494,8 +528,8 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
         for (int blk = 0; blk < block_count; blk++) {
           const int base = blk * 32;
           KT_MXFP4_DECODE_GROUP(b_row, blk);
-          const __m256 sa = _mm256_broadcast_ss(&b_scales[2 * blk]);
-          const __m256 sb = _mm256_broadcast_ss(&b_scales[2 * blk + 1]);
+          const __m256 sa = _mm256_broadcast_ss(b_scale(2 * blk));
+          const __m256 sb = _mm256_broadcast_ss(b_scale(2 * blk + 1));
 
           __m256 h0 = _mm256_mul_ps(_mm256_loadu_ps(p0 + base), w0);
           __m256 h1 = _mm256_mul_ps(_mm256_loadu_ps(p1 + base), w0);
@@ -549,11 +583,26 @@ static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, Gem
           __m256 hb = _mm256_mul_ps(_mm256_loadu_ps(ap + 16), w2);
           hb = _mm256_fmadd_ps(_mm256_loadu_ps(ap + 24), w3, hb);
 
-          total0 = _mm256_fmadd_ps(ha, _mm256_broadcast_ss(&b_scales[2 * blk]), total0);
-          total1 = _mm256_fmadd_ps(hb, _mm256_broadcast_ss(&b_scales[2 * blk + 1]), total1);
+          total0 = _mm256_fmadd_ps(ha, _mm256_broadcast_ss(b_scale(2 * blk)), total0);
+          total1 = _mm256_fmadd_ps(hb, _mm256_broadcast_ss(b_scale(2 * blk + 1)), total1);
         }
         c.data[(size_t)mi * n + ni] = hsum_avx2(_mm256_add_ps(total0, total1));
       }
+    };
+
+    for (int ni = n_start; ni < n_end; ni++) {
+      const uint8_t* b_row = b.b + (size_t)ni * row_bytes;
+      if (ni + 1 < n_end) {
+        const char* nr = (const char*)(b.b + (size_t)(ni + 1) * row_bytes);
+        _mm_prefetch(nr, _MM_HINT_T0);
+        _mm_prefetch(nr + 64, _MM_HINT_T0);
+        _mm_prefetch(nr + 128, _MM_HINT_T0);
+        _mm_prefetch(nr + 192, _MM_HINT_T0);
+      }
+      if (b.code != nullptr)
+        row16(ni, b_row, BlockScaleCode{b.code + (size_t)ni * group_count, b.lut});
+      else
+        row16(ni, b_row, BlockScaleF32{b.d + (size_t)ni * group_count});
     }
 #undef KT_MXFP4_DECODE_GROUP
     return;
@@ -1179,6 +1228,28 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
         delete[] (ggml_bf16_t*)tpc.up_scale;
         delete[] (ggml_bf16_t*)tpc.down_scale;
       });
+    }
+
+    if (avx2::scale_codes_enabled()) {
+      // one-byte scale codes for the decode (BufferB::build_scale_codes), for the experts the CPU serves
+      std::atomic<size_t> built{0}, total{0};
+      pool->dispense_backend()->do_numa_job([&, this](int i) {
+        auto* tp = tps[i].get();
+        auto& tpc = tp->config_;
+        pool->get_subpool(i)->do_work_stealing_job(
+            tpc.expert_num, nullptr,
+            [&, tp](int eid) {
+              if (tpc.should_skip_expert(eid)) return;
+              for (auto* bb : {tp->gate_bb_[eid].get(), tp->up_bb_[eid].get(), tp->down_bb_[eid].get()}) {
+                if (bb == nullptr) continue;
+                total++;
+                if (bb->build_scale_codes()) built++;
+              }
+            },
+            nullptr);
+      });
+      printf("KT_SCALE_CODES: %zu of %zu matrices read one-byte scale codes\n", built.load(), total.load());
+      fflush(stdout);
     }
 
     this->weights_loaded = true;
