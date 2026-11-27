@@ -17,7 +17,7 @@ from types import SimpleNamespace
 KT_KERNEL_ROOT = Path(__file__).resolve().parents[1]
 EXPERTS_PATH = KT_KERNEL_ROOT / "python/experts.py"
 AMX_PATH = KT_KERNEL_ROOT / "python/utils/amx.py"
-ALLOWED_METHODS = ("FP8", "MXFP4", "MXFP8")
+ALLOWED_METHODS = ("FP8", "MXFP4", "NVFP4", "MXFP8")
 REJECTED_METHODS = (
     "RAWINT4",
     "BF16",
