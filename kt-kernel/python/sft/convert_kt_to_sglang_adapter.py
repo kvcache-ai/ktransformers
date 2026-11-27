@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -194,6 +195,36 @@ def _build_adapter_config(
     return config
 
 
+def _validate_fused_lora_scaling(input_path: Path, rank: int, alpha: float) -> None:
+    manifest_path = input_path / "kt_adapter_manifest.json"
+    if not manifest_path.exists():
+        return
+
+    manifest = _load_json(manifest_path)
+    if not isinstance(manifest, dict) or manifest.get("version") != 1 or manifest.get("status") != "ready":
+        raise ValueError(f"{manifest_path}: expected a ready KT adapter manifest with version 1.")
+    lora = manifest.get("lora")
+    if not isinstance(lora, dict):
+        raise ValueError(f"{manifest_path}: missing fused expert LoRA scaling metadata.")
+
+    saved_rank = lora.get("rank")
+    if type(saved_rank) is not int or saved_rank <= 0 or saved_rank != rank:
+        raise ValueError(f"KT fused expert LoRA rank mismatch: manifest records {saved_rank!r}, tensors have {rank}.")
+
+    saved_alpha = lora.get("alpha")
+    if (
+        type(saved_alpha) not in (float, int)
+        or not math.isfinite(saved_alpha)
+        or saved_alpha <= 0
+        or type(alpha) not in (float, int)
+        or saved_alpha != alpha
+    ):
+        raise ValueError(
+            f"KT fused expert LoRA alpha mismatch: manifest records {saved_alpha!r}, "
+            f"but the serving adapter would use {alpha!r}. Re-export with matching LoRA scaling."
+        )
+
+
 def _paths_have_ancestor_relationship(left: Path, right: Path) -> bool:
     if left == right:
         return True
@@ -355,6 +386,8 @@ def convert_kt_to_sglang_adapter(
         base_model_name_or_path,
         lora_alpha,
     )
+
+    _validate_fused_lora_scaling(input_path, rank, config["lora_alpha"])
 
     _write_adapter(output_path, input_path, tensors, config, overwrite=overwrite)
 

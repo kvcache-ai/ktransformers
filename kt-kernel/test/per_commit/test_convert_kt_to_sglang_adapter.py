@@ -363,3 +363,82 @@ def test_rejects_mismatched_nonexpert_rank(tmp_path):
             output_dir,
             base_model_name_or_path="/models/base",
         )
+
+
+@pytest.mark.parametrize("with_input_config", [True, False])
+def test_rejects_kt_manifest_alpha_mismatch_before_writing_adapters(tmp_path, with_input_config):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    _write_full_fused_checkpoint(input_dir, rank=2)
+    outputs = [tmp_path / "merged", tmp_path / "expert"]
+    if with_input_config:
+        converter._write_json(
+            input_dir / converter.ADAPTER_CONFIG_FILE,
+            {"r": 2, "lora_alpha": 4, "target_modules": ["q_proj"]},
+        )
+        save_file(
+            {
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(2, 5),
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(5, 2),
+            },
+            str(input_dir / converter.ADAPTER_MODEL_FILE),
+        )
+        outputs.append(tmp_path / "nonexpert")
+    converter._write_json(
+        input_dir / "kt_adapter_manifest.json",
+        {"version": 1, "status": "ready", "lora": {"rank": 2, "alpha": 8.0}},
+    )
+
+    with pytest.raises(ValueError, match="fused expert LoRA alpha mismatch"):
+        converter.convert_kt_to_sglang_adapter(
+            input_dir,
+            outputs[0],
+            base_model_name_or_path="/models/base",
+            lora_alpha=None if with_input_config else 4,
+            expert_output_dir=outputs[1],
+            nonexpert_output_dir=outputs[2] if with_input_config else None,
+        )
+
+    assert not any(path.exists() for path in outputs)
+
+
+def test_matching_kt_manifest_preserves_fused_and_split_scaling(tmp_path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    fused = _write_full_fused_checkpoint(input_dir, rank=2)
+    converter._write_json(
+        input_dir / "kt_adapter_manifest.json",
+        {"version": 1, "status": "ready", "lora": {"rank": 2, "alpha": 8.0}},
+    )
+    merged = tmp_path / "merged"
+    expert = tmp_path / "expert"
+    converter.convert_kt_to_sglang_adapter(
+        input_dir, merged, base_model_name_or_path="/models/base", lora_alpha=8, expert_output_dir=expert
+    )
+
+    base = "model.layers.2.mlp.experts.1.gate_proj."
+    sample = torch.arange(1, 6, dtype=torch.float32)
+    expected = 4 * (fused["layers.2.experts.gate_lora_b"][1] @ (fused["layers.2.experts.gate_lora_a"][1] @ sample))
+    for path in (merged, expert):
+        config = converter._load_json(path / converter.ADAPTER_CONFIG_FILE)
+        tensors = load_file(str(path / converter.ADAPTER_MODEL_FILE))
+        delta = (config["lora_alpha"] / config["r"]) * (
+            tensors[base + "lora_B.weight"] @ (tensors[base + "lora_A.weight"] @ sample)
+        )
+        torch.testing.assert_close(delta, expected)
+
+
+def test_rejects_kt_manifest_rank_mismatch_before_writing_adapter(tmp_path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    _write_full_fused_checkpoint(input_dir, rank=2)
+    converter._write_json(
+        input_dir / "kt_adapter_manifest.json",
+        {"version": 1, "status": "ready", "lora": {"rank": 4, "alpha": 8.0}},
+    )
+    output = tmp_path / "output"
+
+    with pytest.raises(ValueError, match="fused expert LoRA rank mismatch"):
+        converter.convert_kt_to_sglang_adapter(input_dir, output, base_model_name_or_path="/models/base", lora_alpha=8)
+
+    assert not output.exists()
