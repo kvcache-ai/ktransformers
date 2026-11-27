@@ -213,7 +213,9 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
         # Llamafile-specific configuration
         moe_config.m_block = 32  # Parallel block size
-        moe_config.group_min_len = 10  # Use forward_one when qlen < 10
+        # forward_one per token below this qlen, forward_many (tokens grouped per expert) from it:
+        # forward_many is faster from 2 tokens on (decode batches, speculative verify windows)
+        moe_config.group_min_len = 2
         # Defensive fallback: chunked_prefill_size <= 0 (e.g. -1 meaning "disabled" in sglang
         # baseline) would otherwise let C++ compute max_possible_qlen() = max(max_len=-1,
         # group_max_len=max(1,-1)=1) = 1, sizing per-NUMA fp32 output buffer
