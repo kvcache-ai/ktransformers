@@ -170,7 +170,7 @@ def run_case(tp, threads, top_k, rank, ga, dropout, authoritative=True):
         updates = []
         for layer in (old, new):
             parameters = [layer[1][name].float().clone().requires_grad_() for name in NAMES]
-            optimizer = torch.optim.AdamW(parameters, lr=1e-4)
+            optimizer = torch.optim.AdamW(parameters, lr=1e-4, foreach=False)
             for name, parameter in zip(NAMES, parameters):
                 gradient = layer[2][name]
                 assert torch.count_nonzero(gradient), f"{name}: missing expert gradient"
