@@ -168,6 +168,13 @@ matrices across two NUMA worker pools. For checkpoints that exceed the memory
 of the worker nodes, launch with `numactl --interleave=<nodes>` to distribute
 allocations over the selected memory nodes while retaining worker CPU affinity.
 
+For BF16 expert training on a Linux AArch64 Ascend host with NEON, run this
+from the `kt-kernel` directory after installing the build prerequisites:
+
+```bash
+CPUINFER_USE_ASCEND_NPU=1 CPUINFER_ARM_SFT=1 CPUINFER_ARM_SFT_NEON=1 pip install .
+```
+
 #### Prerequisites
 
 First, initialize git submodules and create a conda environment:
