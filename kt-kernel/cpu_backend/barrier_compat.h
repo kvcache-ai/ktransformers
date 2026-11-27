@@ -5,7 +5,7 @@
 #include <barrier>
 #endif
 
-#if defined(__cpp_lib_barrier) && __cpp_lib_barrier >= 201907L
+#if !defined(KT_ARM_SFT) || (defined(__cpp_lib_barrier) && __cpp_lib_barrier >= 201907L)
 namespace kt {
 using Barrier = std::barrier<>;
 }

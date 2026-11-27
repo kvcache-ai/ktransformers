@@ -51,6 +51,7 @@ _stub_module(
     RAWINT4_SFT_METHOD="RAWINT4_SFT",
     RAWINT4_WEIGHT_LAYOUT="compressed-tensors-rawint4-g32-v1",
     get_fp8_runtime=lambda: None,
+    is_arm_sft_build=lambda: False,
     get_int8_runtime=lambda: None,
     get_mxfp4_runtime=lambda: None,
     get_rawint4_checkpoint_contract=lambda config: None,
@@ -217,7 +218,11 @@ def test_wrapper_distinguishes_rawint4_ordinary_retain_from_checkpoint_reuse():
 
 
 @pytest.mark.parametrize("expert_weight_format", ["fp8", "rawint4"])
-def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monkeypatch, expert_weight_format):
+@pytest.mark.parametrize("arm_build", [False, True])
+def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monkeypatch, expert_weight_format, arm_build):
+    monkeypatch.setattr(wrapper, "is_arm_sft_build", lambda: arm_build)
+    monkeypatch.setattr(wrapper.torch, "npu", SimpleNamespace(is_available=lambda: True), raising=False)
+    monkeypatch.setenv("LOCAL_RANK", "0")
     cfg = SimpleNamespace(
         kt_expert_weight_format=expert_weight_format,
         kt_weight_path="/models/deepseek-v3.1",
@@ -251,6 +256,7 @@ def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monk
         @staticmethod
         def from_pretrained(path, **kwargs):
             captured["path"] = path
+            captured["device_map"] = kwargs["device_map"]
             captured["skip_during_load"] = cfg.kt_skip_expert_loading
             captured["weight_path_during_load"] = cfg.kt_weight_path
             return _FakeModel()
@@ -267,7 +273,7 @@ def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monk
     monkeypatch.setitem(sys.modules, "transformers.integrations.kt", kt_integration)
 
     fake_arch = sys.modules[f"{PACKAGE_NAME}.arch"]
-    monkeypatch.setattr(fake_arch, "move_non_experts_to_gpu", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(fake_arch, "move_non_experts_to_gpu", lambda *args, **kw: captured.update(device=kw["device"]))
     monkeypatch.setattr(fake_arch, "get_moe_arch_config", lambda config: SimpleNamespace())
 
     model = wrapper.load_kt_model(
@@ -276,6 +282,8 @@ def test_load_kt_model_keeps_native_path_as_provenance_and_skips_hf_experts(monk
         model_name_or_path=cfg.kt_weight_path,
     )
 
+    assert captured["device_map"] == (None if arm_build else "cpu")
+    assert captured["device"] == ("npu:0" if arm_build else "cuda:0")
     assert isinstance(model, _FakeModel)
     assert captured["skip_during_load"] is True
     assert captured["weight_path_during_load"] == "/models/deepseek-v3.1"

@@ -191,6 +191,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
   static typename Base::PartFactory make_sft_part_factory(const MOESFTConfig& full_config) {
+#if defined(KT_ARM_SFT)
     if constexpr (requires { T::kIntermediateAlignment; }) {
       if (full_config.pool != nullptr) {
         const int partitions = full_config.pool->config.subpool_count;
@@ -200,6 +201,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
         }
       }
     }
+#endif
     if constexpr (uses_rawint4_kgroup_weights()) {
       if (full_config.share_backward_bb) {
         throw std::invalid_argument(

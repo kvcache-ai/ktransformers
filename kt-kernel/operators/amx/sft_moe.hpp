@@ -399,7 +399,9 @@ template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = 
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
+#if defined(KT_ARM_SFT)
   static constexpr int kIntermediateAlignment = T::N_STEP;
+#endif
   static constexpr bool kIsInt8Backend = std::is_same_v<T, amx::GemmKernel224Int8>;
   static constexpr bool kIsFP8Backend = std::is_same_v<T, amx::GemmKernel224FP8>;
   static constexpr bool kIsMXFP4Backend = std::is_same_v<T, amx::GemmKernel224MXFP4SmallKGroup>;

@@ -27,6 +27,12 @@ _RAWINT4_SFT_METHOD_ALIASES = frozenset({RAWINT4_SFT_METHOD, "AMXINT4_KGroup_SFT
 
 MXFP4_BACKEND = "MXFP4"
 
+def is_arm_sft_build() -> bool:
+    import kt_kernel
+
+    return getattr(kt_kernel, "__cpu_variant__", None) in {"arm_neon", "arm_sve_bf16"}
+
+
 def is_int8_sft_method(method: str) -> bool:
     return str(method) in _INT8_SFT_METHOD_ALIASES
 

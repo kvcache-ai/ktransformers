@@ -77,7 +77,7 @@ def get_moe_arch_config(config) -> MOEArchConfig:
     model_type = str(getattr(config, "model_type", ""))
     text_model_type = str(getattr(cfg, "model_type", ""))
 
-    if "DeepseekV4" in arch or text_model_type in {"deepseek_v4", "deepseek_v41_text"}:
+    if "DeepseekV4" in arch or model_type == "deepseek_v4" or text_model_type == "deepseek_v41_text":
         return MOEArchConfig(
             moe_layer_attr="mlp",
             router_attr="gate",
@@ -285,12 +285,14 @@ def move_non_experts_to_gpu(
 
     container, layers = _get_model_container_and_layers(model, purpose="placement")
 
-    if shared_experts_on_cpu and getattr(model.config, "model_type", "") != "deepseek_v41_text":
+    v41_text = getattr(getattr(model, "config", None), "model_type", "") == "deepseek_v41_text"
+    if shared_experts_on_cpu and not v41_text:
         raise KTAMXConfigError("CPU shared-expert placement requires the DeepSeek V4.1 text model")
-    for name in ("rotary_emb", "engram_hash_state"):
-        module = getattr(container, name, None)
-        if module is not None:
-            module.to(device)
+    if v41_text:
+        for name in ("rotary_emb", "engram_hash_state"):
+            module = getattr(container, name, None)
+            if module is not None:
+                module.to(device)
     if hasattr(container, "embed_tokens"):
         container.embed_tokens.to(device)
     if hasattr(container, "norm"):
@@ -304,8 +306,10 @@ def move_non_experts_to_gpu(
         output_embeddings.to(device)
 
     for layer in layers:
-        for name in ("attn_hc", "ffn_hc", "engram"):
-            if getattr(layer, name, None) is not None:
+        if v41_text and getattr(layer, "engram", None) is not None:
+            layer.engram.to(device)
+        for name in ("attn_hc", "ffn_hc"):
+            if hasattr(layer, name):
                 getattr(layer, name).to(device)
         if hasattr(layer, "self_attn"):
             layer.self_attn.to(device)

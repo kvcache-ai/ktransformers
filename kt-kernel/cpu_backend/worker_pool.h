@@ -26,6 +26,7 @@
 
 // #define PROFILE_BALANCE
 
+#if defined(KT_ARM_SFT)
 // Respect a caller that explicitly interleaves allocations across NUMA nodes.
 inline bool has_interleave_policy() {
   auto* mask = numa_get_interleave_mask();
@@ -34,20 +35,26 @@ inline bool has_interleave_policy() {
   numa_bitmask_free(mask);
   return interleaved;
 }
+#endif
 
 inline void set_to_numa(int this_numa) {
   struct bitmask* mask = numa_bitmask_alloc(numa_num_configured_nodes());
   numa_bitmask_setbit(mask, this_numa);
+#if defined(KT_ARM_SFT)
   if (has_interleave_policy()) {
     numa_run_on_node_mask(mask);
-  } else {
-    numa_bind(mask);
+    numa_bitmask_free(mask);
+    return;
   }
+#endif
+  numa_bind(mask);
   numa_bitmask_free(mask);
 }
 
 inline void set_memory_to_numa(int this_numa) {
+#if defined(KT_ARM_SFT)
   if (has_interleave_policy()) return;
+#endif
   hwloc_topology_t topology;
   hwloc_topology_init(&topology);
   hwloc_topology_load(topology);

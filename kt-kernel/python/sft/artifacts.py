@@ -73,6 +73,7 @@ _SUPPORTED_MOE_ARCHITECTURES = (
     "Mixtral",
 )
 _EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8", "rawint4", "mxfp4"})
+_DEEPSEEK_V4_MODEL_TYPES = frozenset({"deepseek_v4", "deepseek_v41", "deepseek_v41_text"})
 _RAWINT4_BASE_IDENTITY_SCHEMA = "safetensors-sharded-sampled-v1"
 _RAWINT4_SAMPLE_BYTES = 64 * 1024
 _RAWINT4_SAMPLE_COUNT = 8
@@ -819,20 +820,8 @@ def is_kt_supported_moe_model(model: Any) -> bool:
         str(getattr(config, "model_type", "")),
         str(getattr(text_config, "model_type", "")),
     }
-    return bool(
-        model_types.intersection(
-            {
-                "kimi_k2",
-                "kimi_k25",
-                "kimi_k2_5",
-                "kimi_k26",
-                "kimi_k2_6",
-                "deepseek_v4",
-                "deepseek_v41",
-                "deepseek_v41_text",
-            }
-        )
-    )
+    kimi_types = {"kimi_k2", "kimi_k25", "kimi_k2_5", "kimi_k26", "kimi_k2_6"}
+    return bool(model_types.intersection(kimi_types | _DEEPSEEK_V4_MODEL_TYPES))
 
 
 def should_disable_kt_source_quantizer(
@@ -852,7 +841,7 @@ def should_disable_kt_source_quantizer(
     if weight_format == "mxfp4":
         if explicit_quantization_config is not None:
             raise KTArtifactError("MXFP4 SFT cannot use an explicit framework quantizer")
-        if getattr(model_config, "model_type", None) not in {"deepseek_v4", "deepseek_v41", "deepseek_v41_text"}:
+        if getattr(model_config, "model_type", None) not in _DEEPSEEK_V4_MODEL_TYPES:
             raise KTArtifactError("native MXFP4 SFT currently requires DeepSeek V4")
         cache_path = _config_value(kt_config, "kt_non_expert_weight_path")
         if not cache_path:

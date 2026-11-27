@@ -19,7 +19,14 @@ from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
-from .backend import is_fp8_sft_method, is_int8_sft_method, is_rawint4_sft_method, is_mxfp4_sft_method
+from .backend import is_arm_sft_build, is_fp8_sft_method, is_int8_sft_method, is_rawint4_sft_method, is_mxfp4_sft_method
+
+
+_ARM_SFT = is_arm_sft_build()
+
+
+def _non_blocking_copy(device):
+    return not _ARM_SFT or torch.device(device).type != "npu"
 
 
 def _supports_authoritative_optimizer_grads(
@@ -564,7 +571,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         """Copy inputs to CPU buffer, return input device."""
         input_device = hidden_states.device
         # The CPU worker consumes these buffers as soon as the copies return.
-        asynchronous = input_device.type != "npu"
+        asynchronous = _non_blocking_copy(input_device)
         buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=asynchronous)
         buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=asynchronous)
         buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=asynchronous)
@@ -583,7 +590,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def _return_output(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:
             return buffer.output_cpu[:qlen].to(
-                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+                device=output_device, non_blocking=_non_blocking_copy(output_device)
             )
         else:
             return buffer.output_cpu[:qlen].clone()
@@ -654,7 +661,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         assert output is not None
         try:
             if output_device is not None:
-                return output.to(device=output_device, non_blocking=torch.device(output_device).type != "npu")
+                return output.to(device=output_device, non_blocking=_non_blocking_copy(output_device))
             return output
         except Exception as exc:
             self.poison_checkpoint_output(exc)
@@ -670,10 +677,10 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:
             grad_input = buffer.grad_input_cpu[:qlen].to(
-                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+                device=output_device, non_blocking=_non_blocking_copy(output_device)
             )
             grad_weights = buffer.grad_weights[:qlen].to(
-                device=output_device, non_blocking=torch.device(output_device).type != "npu"
+                device=output_device, non_blocking=_non_blocking_copy(output_device)
             )
         else:
             grad_input = buffer.grad_input_cpu[:qlen].clone()
