@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-#include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -22,6 +23,13 @@ static float widen(uint16_t value) {
   return out;
 }
 
+static void check(bool passed, const char* message) {
+  if (!passed) {
+    std::fprintf(stderr, "%s\n", message);
+    std::exit(EXIT_FAILURE);
+  }
+}
+
 int main() {
   const uint32_t special[][4] = {
       {0x00000001, 0x80000001, 0x7f800000, 0xff800000},
@@ -33,7 +41,7 @@ int main() {
     for (int i = 0; i < 4; ++i) {
       float value;
       std::memcpy(&value, &bits[i], sizeof(value));
-      assert(result[i] == narrow(value));
+      check(result[i] == narrow(value), "BF16 conversion mismatch");
     }
   }
   std::mt19937 rng(42);
@@ -46,9 +54,11 @@ int main() {
       for (auto& v : w) v = narrow(sample(rng));
       for (auto& v : y) v = narrow(sample(rng));
       auto expected = y;
-      assert(!kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 4, cols, 0.75f));
-      assert(!kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 8, cols - 1, 0.75f));
-      assert(y == expected);
+      check(!kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 4, cols, 0.75f),
+            "Unexpected dispatch for rank 4");
+      check(!kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 8, cols - 1, 0.75f),
+            "Unexpected dispatch for unaligned width");
+      check(y == expected, "Fallback modified the output");
       for (int row = 0; row < rows; ++row) {
         for (int col = 0; col < cols; ++col) {
           float sum = 0;
@@ -56,8 +66,9 @@ int main() {
           expected[row * cols + col] = narrow(widen(y[row * cols + col]) + 0.75f * sum);
         }
       }
-      assert(kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 8, cols, 0.75f));
-      assert(y == expected);
+      check(kt::arm::try_lora_rank8(x.data(), w.data(), y.data(), rows, 8, cols, 0.75f),
+            "Rank-8 kernel did not run");
+      check(y == expected, "Rank-8 output differs from scalar FMA");
     }
   }
 }

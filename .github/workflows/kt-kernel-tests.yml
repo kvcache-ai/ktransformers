@@ -71,9 +71,20 @@ jobs:
           cd kt-kernel/test
           python3 run_suite.py --hw cpu --suite default
 
+  arm-neon-rank8:
+    needs: check-changes
+    if: needs.check-changes.outputs.kt_kernel == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test rank-8 LoRA output on Arm NEON
+        run: |
+          c++ -O3 -DNDEBUG -std=c++17 -ffp-contract=off kt-kernel/test/arm/test_lora_rank8.cpp -o "$RUNNER_TEMP/test_lora_rank8"
+          "$RUNNER_TEMP/test_lora_rank8"
+
   # =============================================== finish ====================================================
   pr-test-kt-kernel-finish:
-    needs: [check-changes, per-commit-kt-kernel-cpu]
+    needs: [check-changes, per-commit-kt-kernel-cpu, arm-neon-rank8]
     if: always()
     runs-on: ubuntu-latest
     steps:
