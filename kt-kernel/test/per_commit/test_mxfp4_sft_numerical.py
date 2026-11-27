@@ -685,7 +685,7 @@ def test_mxfp4_sft_tp1_tp2_numerical_lifecycle():
 @pytest.mark.cpu
 def test_mxfp4_inference_regression():
     _require_extension(allow_source_only_skip=True)
-    if kt_kernel_ext.__cpu_variant__ == "arm_sve_bf16":
+    if kt_kernel_ext.__cpu_variant__ in ("arm_sve_bf16", "arm_neon"):
         pytest.skip("ARM SFT builds expose the training operator")
     assert _inference_moe_class() is not None
     print("KT_MXFP4_INFERENCE_SUMMARY=" + json.dumps(_run_inference_regression(), sort_keys=True))
@@ -694,5 +694,5 @@ def test_mxfp4_inference_regression():
 if __name__ == "__main__":
     _require_extension(allow_source_only_skip=False)
     test_mxfp4_sft_tp1_tp2_numerical_lifecycle()
-    if kt_kernel_ext.__cpu_variant__ != "arm_sve_bf16":
+    if kt_kernel_ext.__cpu_variant__ not in ("arm_sve_bf16", "arm_neon"):
         test_mxfp4_inference_regression()

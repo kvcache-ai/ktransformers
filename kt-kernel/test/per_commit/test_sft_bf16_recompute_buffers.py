@@ -29,6 +29,8 @@ except (ImportError, AttributeError):
     ext = None
 
 
+bf16_moe = (getattr(ext.moe, "AMXBF16_SFT_MOE", None) or getattr(ext.moe, "ARM_BF16_SFT_MOE", None)) if ext else None
+
 NAMES = ("gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b")
 E, H, I = 9, 256, 256
 
@@ -63,7 +65,7 @@ def _layer(cpu, *, shared, rank, top_k, dropout, layer, max_len, authoritative=T
     for name, tensor in weights.items():
         setattr(config, name, tensor.data_ptr())
     config.pool = cpu.backend_
-    moe = ext.moe.AMXBF16_SFT_MOE(config)
+    moe = bf16_moe(config)
     moe.load_weights()
     # Legacy callers initialize the full gradient buffers themselves. The
     # authoritative lifecycle must also clear poisoned inactive-expert values.
@@ -192,7 +194,7 @@ CASES = [(1, 1, 1, 8, 1, 0.0), (1, 1, 8, 16, 4, 0.1), (2, 4, 1, 32, 4, 0.1), (2,
 @pytest.mark.cpu
 @pytest.mark.parametrize("case", CASES)
 def test_bf16_recompute_buffers(case):
-    if ext is None or not hasattr(ext.moe, "AMXBF16_SFT_MOE"):
+    if bf16_moe is None:
         pytest.skip("BF16 SFT kernel unavailable")
     run_case(*case)
 
@@ -200,7 +202,7 @@ def test_bf16_recompute_buffers(case):
 @pytest.mark.cpu
 @pytest.mark.parametrize("policy", ("enabled", "legacy"))
 def test_bf16_recompute_workspace_policy(policy):
-    if ext is None or not hasattr(ext.moe, "AMXBF16_SFT_MOE"):
+    if bf16_moe is None:
         pytest.skip("BF16 SFT kernel unavailable")
     # Pool logging is initialized once per process. Exercise each allocation
     # policy in a fresh process, including the legacy gradient lifecycle.

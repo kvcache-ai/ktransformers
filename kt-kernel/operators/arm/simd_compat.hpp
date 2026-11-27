@@ -4,12 +4,16 @@
 #if !defined(__aarch64__)
 #error "The ARM SFT compatibility layer requires AArch64"
 #endif
-#if !defined(__ARM_FEATURE_SVE) || !defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+#if !defined(KT_ARM_SFT_NEON) && (!defined(__ARM_FEATURE_SVE) || !defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC))
 #error "The ARM SFT compatibility layer requires SVE and BF16"
 #endif
 
 #define SIMDE_ENABLE_NATIVE_ALIASES
+#if defined(KT_ARM_SFT_NEON)
+#include <arm_neon.h>
+#else
 #include <arm_sve.h>
+#endif
 #include <asm/hwcap.h>
 #include <simde/x86/avx512.h>
 #include <simde/x86/f16c.h>
@@ -29,10 +33,14 @@
 
 namespace kt::arm {
 
-inline void require_sve_bf16() {
+inline void require_sft_isa() {
+#if defined(KT_ARM_SFT_NEON)
+  if (!(getauxval(AT_HWCAP) & HWCAP_ASIMD)) throw std::runtime_error("ARM SFT requires ASIMD");
+#else
   if (!(getauxval(AT_HWCAP) & HWCAP_SVE) || !(getauxval(AT_HWCAP2) & HWCAP2_SVEBF16)) {
     throw std::runtime_error("ARM SFT requires runtime SVE BF16 support");
   }
+#endif
 }
 
 inline uint16_t to_bf16_rne(float value) {
@@ -43,6 +51,28 @@ inline uint16_t to_bf16_rne(float value) {
   return static_cast<uint16_t>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
+#if defined(KT_ARM_SFT_NEON)
+inline float32x4_t flush_f32(float32x4_t v) {
+  const auto bits = vreinterpretq_u32_f32(v);
+  const auto sub = vceqq_u32(vandq_u32(bits, vdupq_n_u32(0x7f800000u)), vdupq_n_u32(0));
+  return vreinterpretq_f32_u32(vbslq_u32(sub, vandq_u32(bits, vdupq_n_u32(0x80000000u)), bits));
+}
+inline float32x4_t widen_bf16(uint16x4_t v) { return flush_f32(vreinterpretq_f32_u32(vshll_n_u16(v, 16))); }
+inline __m512 dpbf16(__m512 source, __m512bh a, __m512bh b) {
+  auto out = simde__m512_to_private(source);
+  auto ap = simde__m512bh_to_private(a);
+  auto bp = simde__m512bh_to_private(b);
+  for (int lane = 0; lane < 16; lane += 4) {
+    const auto av = vld2_u16(reinterpret_cast<const uint16_t*>(&ap) + 2 * lane);
+    const auto bv = vld2_u16(reinterpret_cast<const uint16_t*>(&bp) + 2 * lane);
+    auto sum = flush_f32(vld1q_f32(reinterpret_cast<float*>(&out) + lane));
+    sum = flush_f32(vfmaq_f32(sum, widen_bf16(av.val[1]), widen_bf16(bv.val[1])));
+    sum = flush_f32(vfmaq_f32(sum, widen_bf16(av.val[0]), widen_bf16(bv.val[0])));
+    vst1q_f32(reinterpret_cast<float*>(&out) + lane, sum);
+  }
+  return simde__m512_from_private(out);
+}
+#else
 inline svfloat32_t flush_fp32(svfloat32_t value) {
   const auto bits = svreinterpret_u32_f32(value);
   const auto exponent = svand_n_u32_x(svptrue_b32(), bits, 0x7f800000u);
@@ -79,6 +109,8 @@ inline __m512 dpbf16(__m512 source, __m512bh a, __m512bh b) {
   }
   return simde__m512_from_private(result);
 }
+
+#endif
 
 // A GEMM tile contains only BF16 dot accumulation. Use the thread's FZ/RNE
 // controls for that scope, then restore both control and exception status.

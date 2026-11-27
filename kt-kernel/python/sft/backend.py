@@ -367,11 +367,13 @@ def get_mxfp4_runtime() -> MXFP4Runtime:
         kernel = MXFP4_KERNEL
     elif cpu_variant == "arm_sve_bf16":
         kernel = "sve-bf16-mxfp4-g32"
+    elif cpu_variant == "arm_neon":
+        kernel = "neon-mxfp4-g32"
     elif cpu_variant == "avx2":
         kernel = MXFP4_AVX2_KERNEL
     else:
         raise RuntimeError(
-            "MXFP4 SFT requires an AVX512-BF16, AVX2 or ARM SVE BF16 extension; "
+            "MXFP4 SFT requires an AVX512-BF16, AVX2 or ARM SFT extension; "
             f"loaded cpu_variant={cpu_variant or 'unknown'!r}"
         )
     moe_extension = getattr(extension, "moe", None)

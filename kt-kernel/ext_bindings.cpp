@@ -565,12 +565,16 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(KT_ARM_SFT)
-  kt::arm::require_sve_bf16();
+  kt::arm::require_sft_isa();
 #endif
   m.def("_bf16_sumsq_ptr", &bf16_sumsq_ptr, py::arg("data_ptr"), py::arg("numel"),
         py::call_guard<py::gil_scoped_release>());
 #if defined(KT_ARM_SFT)
+#if defined(KT_ARM_SFT_NEON)
+  m.attr("__cpu_variant__") = "arm_neon";
+#else
   m.attr("__cpu_variant__") = "arm_sve_bf16";
+#endif
   m.attr("__int8_kernel__") = "unsupported";
 #elif defined(HAVE_AMX)
   m.attr("__cpu_variant__") = "amx";
@@ -981,9 +985,13 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
 #if defined(KT_ARM_SFT)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup, AMX_FP4_MOE_TP>>(moe_module, "MXFP4_SFT_MOE");
-  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "SVE_BF16_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "ARM_BF16_SFT_MOE");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP, true>>(moe_module,
-                                                                                     "SVE_BF16_SFT_MOE_SkipLoRA");
+                                                                                     "ARM_BF16_SFT_MOE_SkipLoRA");
+#if !defined(KT_ARM_SFT_NEON)
+  moe_module.attr("SVE_BF16_SFT_MOE") = moe_module.attr("ARM_BF16_SFT_MOE");
+  moe_module.attr("SVE_BF16_SFT_MOE_SkipLoRA") = moe_module.attr("ARM_BF16_SFT_MOE_SkipLoRA");
+#endif
 #endif
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)

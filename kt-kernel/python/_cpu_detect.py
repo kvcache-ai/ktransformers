@@ -32,9 +32,9 @@ _VARIANT_LEVEL = {
 
 
 def _validate_loaded_variant(detected_variant: str, loaded_variant: str) -> None:
-    # The AArch64 extension verifies HWCAP_SVE and HWCAP2_SVEBF16 on import.
+    # The AArch64 extension verifies its required ISA on import.
     # x86 wheel levels have no ordering relative to an ARM ISA.
-    if loaded_variant == "arm_sve_bf16" and platform.machine().lower() == "aarch64":
+    if loaded_variant in {"arm_sve_bf16", "arm_neon"} and platform.machine().lower() == "aarch64":
         return
     detected_level = _VARIANT_LEVEL.get(detected_variant)
     loaded_level = _VARIANT_LEVEL.get(loaded_variant)

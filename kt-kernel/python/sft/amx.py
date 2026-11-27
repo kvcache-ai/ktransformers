@@ -16,6 +16,7 @@ import glob as _glob
 import torch
 from typing import Optional, List
 
+from kt_kernel_ext import moe as native_moe
 from kt_kernel_ext.moe import MOESFTConfig
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,7 @@ try:
         AMXInt4_SFT_MOE_SkipLoRA,
     )
 
-    _HAS_AMX_SFT_SUPPORT = True
 except (ImportError, AttributeError):
-    _HAS_AMX_SFT_SUPPORT = False
     AMXBF16_SFT_MOE = None
     AMXInt8_SFT_MOE = None
     AMXInt4_SFT_MOE = None
@@ -73,7 +72,7 @@ _AMX_M_STEP = 32
 
 # Mapping from method string to C++ SFT MOE class
 _SFT_METHOD_TO_CLASS = {
-    "AMXBF16_SFT": AMXBF16_SFT_MOE,
+    "AMXBF16_SFT": AMXBF16_SFT_MOE or getattr(native_moe, "ARM_BF16_SFT_MOE", None),
     "AMXFP8_SFT": AMXFP8_SFT_MOE,
     "MXFP4_SFT": MXFP4_SFT_MOE,
     "INT8_SFT": AMXInt8_SFT_MOE,
@@ -81,7 +80,7 @@ _SFT_METHOD_TO_CLASS = {
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
     "RAWINT4_SFT": AMXInt4_KGroup_SFT_MOE,
     "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
-    "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
+    "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA or getattr(native_moe, "ARM_BF16_SFT_MOE_SkipLoRA", None),
     "AMXINT8_SFT_SkipLoRA": AMXInt8_SFT_MOE_SkipLoRA,
     "AMXINT4_SFT_SkipLoRA": AMXInt4_SFT_MOE_SkipLoRA,
 }
@@ -118,11 +117,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         full_weight_grad: bool = False,
         swiglu_limit: float = 0.0,
     ):
-        if not _HAS_AMX_SFT_SUPPORT and not (is_mxfp4_sft_method(method) or is_rawint4_sft_method(method)):
-            raise RuntimeError(
-                "AMX SFT backend not available. kt_kernel_ext was not compiled with AMX SFT support.\n"
-                "Please recompile with AMX SFT enabled."
-            )
+        if method not in _SFT_METHOD_TO_CLASS:
+            raise ValueError(f"Unknown SFT method: {method}. Supported: {list(_SFT_METHOD_TO_CLASS.keys())}")
+
+        moe_class = _SFT_METHOD_TO_CLASS[method]
+        if moe_class is None:
+            raise RuntimeError(f"SFT method '{method}' not available in current build.")
+
         if is_mxfp4_sft_method(method):
             get_mxfp4_runtime()
         if is_rawint4_sft_method(method):
@@ -217,13 +218,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 raise ValueError("RAWINT4 SFT requires a finite non-negative swiglu_limit")
             self.group_size = 32
             self.zero_point = False
-
-        if method not in _SFT_METHOD_TO_CLASS:
-            raise ValueError(f"Unknown SFT method: {method}. Supported: {list(_SFT_METHOD_TO_CLASS.keys())}")
-
-        moe_class = _SFT_METHOD_TO_CLASS[method]
-        if moe_class is None:
-            raise RuntimeError(f"AMX SFT method '{method}' not available in current build.")
 
         self.gate_proj: Optional[torch.Tensor] = None
         self.up_proj: Optional[torch.Tensor] = None
