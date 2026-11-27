@@ -12,16 +12,9 @@
  *   Weight:   FP8 E4M3fn (1 byte/element, row-major [n, k])
  *   Scale:    ue8m0 per-group (group_size=32), converted to FP32 on load
  *   Act:      BF16 (row-major [m, k]), promoted to FP32 per 8-lane chunk
- *   Decode:   256-entry FP32 LUT + _mm256_i32gather_ps  (vs VBMI permutex2var)
+ *   Decode:   AVX2 bit arithmetic (vs VBMI permutex2var)
  *   Dot prod: BF16→FP32 promote + _mm256_fmadd_ps       (vs _mm512_dpbf16_ps)
  *   Activation: swiglu_oai via avx2_bf16_utils.hpp::act_fn (alpha/limit aware)
- *
- * Inner-loop pattern: **deferred-hsum** — accumulate scale·v_g into a vector
- * row accumulator across all k-groups, hsum once per output row. ~10× fewer
- * hsums than per-group hsum used by gptq_int4-moe.hpp (which can't defer
- * because its scale is baked into dequant). MXFP8 has scale separate from
- * dequant, so deferring is math-equivalent: hsum(sum_g s[g]*v_g) =
- * sum_g s[g]*hsum(v_g) since hsum is linear.
  **/
 #ifndef CPUINFER_OPERATOR_AVX2_MXFP8_MOE_H
 #define CPUINFER_OPERATOR_AVX2_MXFP8_MOE_H
@@ -195,12 +188,10 @@ struct GemmKernelAVX2MXFP8 {
     }
 
     // Returns pointer to FP8 byte at (n_begin, k_begin).
-    uint8_t* get_submat(int n_begin, int k_begin) {
-      return b + (size_t)n_begin * k + k_begin;
-    }
+    const uint8_t* get_submat(int n_begin, int k_begin) const { return b + (size_t)n_begin * k + k_begin; }
 
     // Returns pointer to FP32 scale for row n_begin starting at k-group k_begin/group_size.
-    float* get_scale(int n_begin, int k_begin) {
+    const float* get_scale(int n_begin, int k_begin) const {
       return d + (size_t)n_begin * k_group_count + k_begin / k_group_size;
     }
   };
@@ -241,52 +232,56 @@ struct GemmKernelAVX2MXFP8 {
 };
 
 // ============================================================================
-// gemm_mxfp8_kgroup — AVX2 MXFP8 GEMM (BF16 act × FP8 weight + per-K-group scale)
-//
-//   C[m, n] = sum_g scale[n, g] * sum_{i in group g} A[m, k_base+i] * dequant(B[n, k_base+i])
-//
-// Per output row (ni): one vector accumulator `row_acc` lives across all groups;
-// per group, do 4× FMA into a fresh `v` (8 lanes), then `row_acc += s[g] * v`
-// via broadcast+FMA. After all groups, hsum_avx2(row_acc) once for the scalar.
+// AVX2 MXFP8 GEMM: accumulate scaled K groups in SIMD lanes and reduce once.
 // ============================================================================
-static inline void gemm_mxfp8_kgroup(
-    int m, int n, int k,
-    GemmKernelAVX2MXFP8::BufferA& a,
-    GemmKernelAVX2MXFP8::BufferB& b,
-    GemmKernelAVX2MXFP8::BufferC& c,
-    int ith, int nth) {
 
-  ensure_fp8_lut_initialized();  // idempotent; cheap after first call
-
-  auto [n_start, n_end] = ::avx2::split_range(n, ith, nth);
-  if (n_start >= n_end) return;
-  const int kg_count = b.k_group_count;
-
-  for (int ni = n_start; ni < n_end; ni++) {
-    const uint8_t* w_base = b.get_submat(ni, 0);
-    const float* s = b.get_scale(ni, 0);
-
-    for (int mi = 0; mi < m; mi++) {
-      const ggml_bf16_t* a_base = a.data + (size_t)mi * a.k;
-      __m256 row_acc = _mm256_setzero_ps();
-      const uint8_t* w = w_base;
-      const ggml_bf16_t* a_row = a_base;
-
-      for (int g = 0; g < kg_count; g++) {
-        // 4-chunk × 8-lane unroll: 32 elements per k-group
-        __m256 v = _mm256_setzero_ps();
-        v = _mm256_fmadd_ps(fp8x8_to_fp32x8(w +  0), load_bf16_to_fp32(a_row +  0), v);
-        v = _mm256_fmadd_ps(fp8x8_to_fp32x8(w +  8), load_bf16_to_fp32(a_row +  8), v);
-        v = _mm256_fmadd_ps(fp8x8_to_fp32x8(w + 16), load_bf16_to_fp32(a_row + 16), v);
-        v = _mm256_fmadd_ps(fp8x8_to_fp32x8(w + 24), load_bf16_to_fp32(a_row + 24), v);
-        // Defer hsum: broadcast scale, FMA into vector row accumulator.
-        // Math: hsum(Σ_g s[g] * v_g) = Σ_g s[g] * hsum(v_g) (hsum is linear).
-        row_acc = _mm256_fmadd_ps(_mm256_set1_ps(s[g]), v, row_acc);
-        w += 32;
-        a_row += 32;
+template <int Rows>
+static inline void gemm_mxfp8_dot(int groups, const ggml_bf16_t* a, size_t stride, const uint8_t* b,
+                                  const float* scales, float* c, size_t ldc) {
+  __m256 acc[Rows]{};
+  constexpr int group_size = GemmKernelAVX2MXFP8::K_GROUP_SIZE;
+  for (int g = 0; g < groups; ++g) {
+    const int base = g * group_size;
+    __m256 group[Rows]{};
+    // Reuse each decoded weight vector across the activation rows.
+    for (int ki = 0; ki < group_size; ki += 8) {
+      const __m256 w = fp8x8_to_fp32x8(b + base + ki);
+      for (int row = 0; row < Rows; ++row) {
+        group[row] = _mm256_fmadd_ps(w, load_bf16_to_fp32(a + row * stride + base + ki), group[row]);
       }
-      c.data[mi * n + ni] = hsum_avx2(row_acc);
     }
+    const __m256 scale = _mm256_set1_ps(scales[g]);
+    for (int row = 0; row < Rows; ++row) {
+      acc[row] = _mm256_fmadd_ps(scale, group[row], acc[row]);
+    }
+  }
+  for (int row = 0; row < Rows; ++row) {
+    c[row * ldc] = hsum_avx2(acc[row]);
+  }
+}
+
+static inline void gemm_mxfp8_kgroup(int m, int n, int k, const GemmKernelAVX2MXFP8::BufferA& a,
+                                     const GemmKernelAVX2MXFP8::BufferB& b, GemmKernelAVX2MXFP8::BufferC& c, int ith,
+                                     int nth) {
+  if (m <= 0 || n <= 0 || k < 0) return;
+  auto [n_start, n_end] = split_range(n, ith, nth);
+  for (int ni = n_start; ni < n_end; ++ni) {
+    if (k == 0) {
+      for (int mi = 0; mi < m; ++mi) c.data[(size_t)mi * n + ni] = 0.0f;
+      continue;
+    }
+    const uint8_t* weights = b.get_submat(ni, 0);
+    const float* scales = b.get_scale(ni, 0);
+    auto dot = [&]<int Rows>(int mi) {
+      gemm_mxfp8_dot<Rows>(b.k_group_count, a.data + mi * a.k, a.k, weights, scales, c.data + (size_t)mi * n + ni, n);
+    };
+    int mi = 0;
+    for (; mi + 4 <= m; mi += 4) dot.template operator()<4>(mi);
+    if (mi + 2 <= m) {
+      dot.template operator()<2>(mi);
+      mi += 2;
+    }
+    if (mi < m) dot.template operator()<1>(mi);
   }
 }
 
@@ -322,7 +317,6 @@ class AVX2_MXFP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP8_MOE_TP<T>> {
   AVX2_MXFP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
 
   void derived_init() {
-    avx2::ensure_fp8_lut_initialized();  // single-threaded init before any forward
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size != 32 || quant_config.zero_point) {
       throw std::runtime_error("AVX2 MXFP8 MoE requires group_size == 32 and no zero_point");
