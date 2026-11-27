@@ -117,6 +117,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         zero_point: bool = True,
         full_weight_grad: bool = False,
         swiglu_limit: float = 0.0,
+        numa_nodes: list[int] | None = None,
     ):
         if not _HAS_AMX_SFT_SUPPORT and not (is_mxfp4_sft_method(method) or is_rawint4_sft_method(method)):
             raise RuntimeError(
@@ -144,6 +145,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             lora_dropout=lora_dropout,
             max_cache_depth=max_cache_depth,
             full_weight_grad=full_weight_grad,
+            numa_nodes=numa_nodes,
         )
 
         self.method = method

@@ -204,8 +204,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         lora_dropout: float = 0.0,
         max_cache_depth: int = 1,
         full_weight_grad: bool = False,
+        numa_nodes: list[int] | None = None,
     ):
-        self.cpu_infer = self._get_cpu_infer(cpuinfer_threads, threadpool_count)
+        self.cpu_infer = self._get_cpu_infer(cpuinfer_threads, threadpool_count, numa_nodes=numa_nodes)
 
         self._validate_base_config(
             num_experts=num_experts,

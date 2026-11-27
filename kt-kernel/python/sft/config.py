@@ -305,6 +305,7 @@ class KTConfig:
     # Custom wrapping
     kt_wrap_fn: Callable[..., Any] | None = None
     kt_wrap_kwargs: dict[str, Any] | None = None
+    kt_token_redistribution: bool | None = None
 
     @classmethod
     def from_object(cls, obj: Any) -> "KTConfig":
@@ -517,6 +518,8 @@ class KTConfig:
             self.kt_tp_enabled = _env_bool("ACCELERATE_KT_TP_ENABLED", False)
         if self.kt_threadpool_count is None:
             self.kt_threadpool_count = _env_int("ACCELERATE_KT_THREADPOOL_COUNT", 1)
+        if self.kt_token_redistribution is None:
+            self.kt_token_redistribution = _env_bool("ACCELERATE_KT_TOKEN_REDISTRIBUTION", False)
         if self.kt_weight_path is None:
             self.kt_weight_path = os.environ.get("ACCELERATE_KT_WEIGHT_PATH", None)
         if self.kt_non_expert_weight_path is None:
