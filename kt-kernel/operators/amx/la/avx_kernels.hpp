@@ -11,6 +11,10 @@
 #include "llama.cpp/ggml-impl.h"
 #include "utils.hpp"
 
+#if defined(KT_ARM_SFT_NEON)
+#include "../../arm/lora_rank8.hpp"
+#endif
+
 namespace avx {
 
 // Enable/disable kernel tracing (can be controlled at compile time)
@@ -1171,6 +1175,9 @@ inline void transpose_lora_weight(const ggml_bf16_t* __restrict src, ggml_bf16_t
 inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermediate,
                                                 const ggml_bf16_t* __restrict weight_t, ggml_bf16_t* __restrict output,
                                                 int num_tokens, int rank, int output_dim, float scale) {
+#if defined(KT_ARM_SFT_NEON)
+  if (kt::arm::try_lora_rank8(intermediate, weight_t, output, num_tokens, rank, output_dim, scale)) return;
+#endif
 #if AVX_KERNEL_TRACE_ENABLED
 #endif
 
