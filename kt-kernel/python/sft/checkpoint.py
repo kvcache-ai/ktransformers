@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import ExitStack
 from typing import Any
 
 import torch
@@ -125,13 +126,14 @@ def _safe_shard_path(checkpoint_dir: str, filename: Any) -> str:
     return os.path.join(checkpoint_dir, filename)
 
 
-def _inspect_layer_shard(
+def _open_validated_layer_shard(
+    stack: ExitStack,
     checkpoint_dir: str,
     layer_idx: int,
     layer_entry: Any,
     expected_shapes: dict[str, tuple[int, ...]],
     expected_generation: str,
-) -> str:
+) -> Any:
     from safetensors import safe_open
 
     if not isinstance(layer_entry, dict):
@@ -157,37 +159,38 @@ def _inspect_layer_shard(
         )
 
     try:
-        with safe_open(shard_path, framework="pt", device="cpu") as handle:
-            keys = set(handle.keys())
-            expected_keys = set(_PROJECTION_NAMES)
-            if keys != expected_keys:
-                raise RuntimeError(
-                    f"Layer {layer_idx}: KT Full checkpoint keys mismatch: "
-                    f"got {sorted(keys)}, expected {sorted(expected_keys)}"
-                )
-            metadata = handle.metadata() or {}
-            if metadata.get("format") != FULL_WEIGHT_CHECKPOINT_FORMAT:
-                raise RuntimeError(f"Layer {layer_idx}: invalid KT Full checkpoint shard format metadata")
-            if metadata.get("version") != str(FULL_WEIGHT_CHECKPOINT_VERSION):
-                raise RuntimeError(f"Layer {layer_idx}: invalid KT Full checkpoint shard version metadata")
-            if metadata.get("generation") != expected_generation:
-                raise RuntimeError(f"Layer {layer_idx}: shard generation metadata does not match the index")
-            if metadata.get("layer_idx") != str(layer_idx):
-                raise RuntimeError(f"Layer {layer_idx}: shard layer metadata does not match the index")
+        # A new checkpoint generation can unlink this path after the header check.
+        handle = stack.enter_context(safe_open(shard_path, framework="pt", device="cpu"))
+        keys = set(handle.keys())
+        expected_keys = set(_PROJECTION_NAMES)
+        if keys != expected_keys:
+            raise RuntimeError(
+                f"Layer {layer_idx}: KT Full checkpoint keys mismatch: "
+                f"got {sorted(keys)}, expected {sorted(expected_keys)}"
+            )
+        metadata = handle.metadata() or {}
+        if metadata.get("format") != FULL_WEIGHT_CHECKPOINT_FORMAT:
+            raise RuntimeError(f"Layer {layer_idx}: invalid KT Full checkpoint shard format metadata")
+        if metadata.get("version") != str(FULL_WEIGHT_CHECKPOINT_VERSION):
+            raise RuntimeError(f"Layer {layer_idx}: invalid KT Full checkpoint shard version metadata")
+        if metadata.get("generation") != expected_generation:
+            raise RuntimeError(f"Layer {layer_idx}: shard generation metadata does not match the index")
+        if metadata.get("layer_idx") != str(layer_idx):
+            raise RuntimeError(f"Layer {layer_idx}: shard layer metadata does not match the index")
 
-            for name in _PROJECTION_NAMES:
-                tensor_slice = handle.get_slice(name)
-                shape = tuple(tensor_slice.get_shape())
-                dtype = tensor_slice.get_dtype()
-                if shape != expected_shapes[name]:
-                    raise RuntimeError(
-                        f"Layer {layer_idx} {name} shape mismatch: " f"got {shape}, expected {expected_shapes[name]}"
-                    )
-                if dtype != _DTYPE_NAME:
-                    raise RuntimeError(f"Layer {layer_idx} {name} dtype mismatch: got {dtype}, expected {_DTYPE_NAME}")
+        for name in _PROJECTION_NAMES:
+            tensor_slice = handle.get_slice(name)
+            shape = tuple(tensor_slice.get_shape())
+            dtype = tensor_slice.get_dtype()
+            if shape != expected_shapes[name]:
+                raise RuntimeError(
+                    f"Layer {layer_idx} {name} shape mismatch: got {shape}, expected {expected_shapes[name]}"
+                )
+            if dtype != _DTYPE_NAME:
+                raise RuntimeError(f"Layer {layer_idx} {name} dtype mismatch: got {dtype}, expected {_DTYPE_NAME}")
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Layer {layer_idx}: failed to inspect KT Full checkpoint shard: {exc}") from exc
-    return shard_path
+    return handle
 
 
 def save_full_weight_checkpoint(wrappers: list[Any], output_dir: str) -> bool:
@@ -313,8 +316,6 @@ def load_full_weight_layer(
     expected_shapes: dict[str, tuple[int, ...]],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Load and validate one logical layer for initial KT backend construction."""
-    from safetensors import safe_open
-
     checkpoint_dir = resolve_full_weight_checkpoint(checkpoint_path)
     if checkpoint_dir is None:
         raise FileNotFoundError(f"No {FULL_WEIGHT_INDEX_NAME} found at {checkpoint_path}")
@@ -322,24 +323,21 @@ def load_full_weight_layer(
     entry = index["layers"].get(str(int(layer_idx)))
     if entry is None:
         raise RuntimeError(f"Layer {layer_idx}: missing from KT Full checkpoint index")
-    shard_path = _inspect_layer_shard(
-        checkpoint_dir,
-        int(layer_idx),
-        entry,
-        expected_shapes,
-        index["generation"],
-    )
-    with safe_open(shard_path, framework="pt", device="cpu") as handle:
-        tensors = tuple(handle.get_tensor(name).contiguous() for name in _PROJECTION_NAMES)
-    return tensors
+    with ExitStack() as stack:
+        handle = _open_validated_layer_shard(
+            stack,
+            checkpoint_dir,
+            int(layer_idx),
+            entry,
+            expected_shapes,
+            index["generation"],
+        )
+        return tuple(handle.get_tensor(name).contiguous() for name in _PROJECTION_NAMES)
 
 
 def _load_full_weight_checkpoint_rank0(full_wrappers: list[Any], checkpoint_dir: str) -> int:
-    from safetensors import safe_open
-
     wrapper_map: dict[int, Any] = {}
     parameter_map: dict[int, dict[str, torch.nn.Parameter]] = {}
-    shard_map: dict[int, str] = {}
     index = _read_index(checkpoint_dir)
 
     for wrapper in full_wrappers:
@@ -366,28 +364,31 @@ def _load_full_weight_checkpoint_rank0(full_wrappers: list[Any], checkpoint_dir:
         unexpected = sorted(saved_layers - expected_layers)
         raise RuntimeError(f"KT Full checkpoint layer set mismatch: missing={missing}, unexpected={unexpected}")
 
-    for layer_idx, wrapper in wrapper_map.items():
-        shard_map[layer_idx] = _inspect_layer_shard(
-            checkpoint_dir,
-            layer_idx,
-            index["layers"][str(layer_idx)],
-            _expected_shapes(wrapper),
-            index["generation"],
-        )
+    with ExitStack() as stack:
+        shards = {
+            layer_idx: _open_validated_layer_shard(
+                stack,
+                checkpoint_dir,
+                layer_idx,
+                index["layers"][str(layer_idx)],
+                _expected_shapes(wrapper),
+                index["generation"],
+            )
+            for layer_idx, wrapper in wrapper_map.items()
+        }
 
-    try:
-        with torch.no_grad():
-            for layer_idx in sorted(wrapper_map):
-                with safe_open(shard_map[layer_idx], framework="pt", device="cpu") as handle:
+        try:
+            with torch.no_grad():
+                for layer_idx in sorted(wrapper_map):
                     for name in _PROJECTION_NAMES:
-                        parameter_map[layer_idx][name].copy_(handle.get_tensor(name))
-        for wrapper in wrapper_map.values():
-            wrapper.wrapper._base_weights_dirty = True
-            wrapper.wrapper._kt_full_checkpoint_load_failed = False
-    except Exception:
-        for wrapper in wrapper_map.values():
-            wrapper.wrapper._kt_full_checkpoint_load_failed = True
-        raise
+                        parameter_map[layer_idx][name].copy_(shards[layer_idx].get_tensor(name))
+            for wrapper in wrapper_map.values():
+                wrapper.wrapper._base_weights_dirty = True
+                wrapper.wrapper._kt_full_checkpoint_load_failed = False
+        except Exception:
+            for wrapper in wrapper_map.values():
+                wrapper.wrapper._kt_full_checkpoint_load_failed = True
+            raise
     return len(wrapper_map)
 
 
