@@ -21,6 +21,9 @@
 // limitations under the License.
 
 #include "sgemm.h"
+#ifdef llamafile_sgemm
+#undef llamafile_sgemm
+#endif
 // #include <cosmo.h>
 // #include <cpuid.h>
 // #include <libc/sysv/consts/hwcap.h>
@@ -154,6 +157,13 @@ static const struct GemmFuncs {
         //     sgemm = llamafile_sgemm_arm80;
         //     mixmul = llamafile_mixmul_arm80;
         // }
+#elif defined(__riscv) && __riscv_xlen == 64
+        // RISC-V Vector Extension (RVV 1.0) backend.  The rv64 sgemm/mixmul
+        // TUs (tinyblas_cpu_sgemm_amd_rv64.cpp / tinyblas_cpu_mixmul_amd_rv64.cpp)
+        // instantiate the shared templates with the generic symbol names.
+        sgemm = llamafile_sgemm_rv64;
+        mixmul = llamafile_mixmul_rv64;
+        iqk_mixmul = iqk_mul_mat_moe_unsupported;
 #else
         sgemm = llamafile_sgemm_unsupported;
         mixmul = llamafile_mixmul_unsupported;

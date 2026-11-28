@@ -688,6 +688,54 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   //     .def(py::init<LinearConfig>())
   //     .def("warm_up", &LinearBindings::WarmUpBindings::cpuinfer_interface)
   //     .def("forward", &LinearBindings::ForwardBindings::cpuinfer_interface);
+#if defined(__riscv) && __riscv_xlen == 64 && defined(KT_RVV)
+  {
+    // RISC-V build: Linear was never bound on this branch (only Config was).
+    // Wire the class up following the same Args/inner pattern the MoE bindings
+    // use, so the llamafile_sgemm_rv64 paths become reachable from Python.
+    struct LinearBindings {
+      class WarmUpBindings {
+       public:
+        struct Args {
+          CPUInfer* cpuinfer;
+          Linear* linear;
+        };
+        static void inner(void* args) {
+          Args* args_ = (Args*)args;
+          args_->cpuinfer->enqueue(&Linear::warm_up, args_->linear, args_->cpuinfer->backend_);
+        }
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<Linear> linear) {
+          Args* args = new Args{nullptr, linear.get()};
+          return std::make_pair((intptr_t)&inner, (intptr_t)args);
+        }
+      };
+      class ForwardBindings {
+       public:
+        struct Args {
+          CPUInfer* cpuinfer;
+          Linear* linear;
+          int qlen;
+          const void* input;
+          void* output;
+        };
+        static void inner(void* args) {
+          Args* args_ = (Args*)args;
+          args_->cpuinfer->enqueue(&Linear::forward, args_->linear, args_->qlen, args_->input, args_->output,
+                                   args_->cpuinfer->backend_);
+        }
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<Linear> linear, int qlen,
+                                                                intptr_t input, intptr_t output) {
+          Args* args = new Args{nullptr, linear.get(), qlen, (const void*)input, (void*)output};
+          return std::make_pair((intptr_t)&inner, (intptr_t)args);
+        }
+      };
+    };
+    py::class_<Linear, std::shared_ptr<Linear>>(linear_module, "Linear")
+        .def(py::init<LinearConfig>())
+        .def("warm_up", &LinearBindings::WarmUpBindings::cpuinfer_interface)
+        .def("forward", &LinearBindings::ForwardBindings::cpuinfer_interface);
+  }
+#endif  // __riscv && KT_RVV
 
   auto mlp_module = m.def_submodule("mlp");
   py::class_<MLPConfig>(mlp_module, "MLPConfig")
@@ -702,6 +750,53 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   //     .def(py::init<MLPConfig>())
   //     .def("warm_up", &MLPBindings::WarmUpBindings::cpuinfer_interface)
   //     .def("forward", &MLPBindings::ForwardBindings::cpuinfer_interface);
+#if defined(__riscv) && __riscv_xlen == 64 && defined(KT_RVV)
+  {
+    // RISC-V build: same pattern as Linear above — exposes the
+    // llamafile_sgemm_rv64 branches (F16/BF16/Q8_0/Q4_0) to Python.
+    struct MLPBindings {
+      class WarmUpBindings {
+       public:
+        struct Args {
+          CPUInfer* cpuinfer;
+          MLP* mlp;
+        };
+        static void inner(void* args) {
+          Args* args_ = (Args*)args;
+          args_->cpuinfer->enqueue(&MLP::warm_up, args_->mlp, args_->cpuinfer->backend_);
+        }
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MLP> mlp) {
+          Args* args = new Args{nullptr, mlp.get()};
+          return std::make_pair((intptr_t)&inner, (intptr_t)args);
+        }
+      };
+      class ForwardBindings {
+       public:
+        struct Args {
+          CPUInfer* cpuinfer;
+          MLP* mlp;
+          int qlen;
+          const void* input;
+          void* output;
+        };
+        static void inner(void* args) {
+          Args* args_ = (Args*)args;
+          args_->cpuinfer->enqueue(&MLP::forward, args_->mlp, args_->qlen, args_->input, args_->output,
+                                   args_->cpuinfer->backend_);
+        }
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MLP> mlp, int qlen,
+                                                                intptr_t input, intptr_t output) {
+          Args* args = new Args{nullptr, mlp.get(), qlen, (const void*)input, (void*)output};
+          return std::make_pair((intptr_t)&inner, (intptr_t)args);
+        }
+      };
+    };
+    py::class_<MLP, std::shared_ptr<MLP>>(mlp_module, "MLP")
+        .def(py::init<MLPConfig>())
+        .def("warm_up", &MLPBindings::WarmUpBindings::cpuinfer_interface)
+        .def("forward", &MLPBindings::ForwardBindings::cpuinfer_interface);
+  }
+#endif  // __riscv && KT_RVV
 
   py::class_<GeneralConfig>(m, "GeneralConfig")
       .def(py::init<>())

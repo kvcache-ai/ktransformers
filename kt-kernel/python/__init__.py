@@ -57,17 +57,23 @@ sys.modules[f"{__name__}.kt_kernel_ext"] = _kt_kernel_ext
 # Also expose kt_kernel_ext as an attribute for backward compatibility
 kt_kernel_ext = _kt_kernel_ext
 
-# Import main API
-from .experts import KTMoEWrapper
-from .experts_base import generate_gpu_experts_masks
+# Main API is imported lazily via __getattr__ below: experts/experts_base
+# depend on torch, which is optional for users who only need kt_kernel_ext.
 
 def __getattr__(name):
-    if name == "AMXSFTMoEWrapper":
+    if name in ("KTMoEWrapper", "AMXSFTMoEWrapper"):
+        from . import experts as _experts  # noqa: F401  (imports torch)
+
+        if name == "KTMoEWrapper":
+            return _experts.KTMoEWrapper
         try:
             from .sft.amx import AMXSFTMoEWrapper
             return AMXSFTMoEWrapper
         except (ImportError, AttributeError):
             return None
+    if name == "generate_gpu_experts_masks":
+        from .experts_base import generate_gpu_experts_masks
+        return generate_gpu_experts_masks
     raise AttributeError(f"module 'kt_kernel' has no attribute {name!r}")
 
 # Read version from package metadata (preferred) or fallback to project root

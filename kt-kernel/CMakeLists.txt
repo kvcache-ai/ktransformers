@@ -79,8 +79,19 @@ elseif(USE_CONDA_TOOLCHAIN)
     set(CMAKE_C_COMPILER   ${CONDA_CC}  CACHE FILEPATH "C compiler" FORCE)
     set(CMAKE_CXX_COMPILER ${CONDA_CXX} CACHE FILEPATH "C++ compiler" FORCE)
 else()
-    # Prefer system compilers explicitly to avoid accidentally picking conda wrappers from PATH
-    if(EXISTS "/usr/bin/gcc" AND EXISTS "/usr/bin/g++")
+    # RISC-V: the default system gcc may be too old for RVV (e.g. gcc 12 on
+    # openEuler 24.03 lacks riscv_vector.h); honor env CC/CXX if the user
+    # selected gcc-toolset-14 before configuring.
+    if(DEFINED CACHE{CMAKE_C_COMPILER} AND DEFINED CACHE{CMAKE_CXX_COMPILER})
+        # user passed -DCMAKE_{C,CXX}_COMPILER on the command line: keep them
+    elseif(DEFINED ENV{CC} AND EXISTS "$ENV{CC}" AND DEFINED ENV{CXX} AND EXISTS "$ENV{CXX}")
+        set(CMAKE_C_COMPILER   "$ENV{CC}" CACHE FILEPATH "C compiler" FORCE)
+        set(CMAKE_CXX_COMPILER "$ENV{CXX}" CACHE FILEPATH "C++ compiler" FORCE)
+    elseif(DEFINED ENV{KT_RV_TOOLCHAIN_PREFIX} AND EXISTS "$ENV{KT_RV_TOOLCHAIN_PREFIX}/g++")
+        set(CMAKE_C_COMPILER   "$ENV{KT_RV_TOOLCHAIN_PREFIX}/gcc" CACHE FILEPATH "C compiler" FORCE)
+        set(CMAKE_CXX_COMPILER "$ENV{KT_RV_TOOLCHAIN_PREFIX}/g++" CACHE FILEPATH "C++ compiler" FORCE)
+    elseif(EXISTS "/usr/bin/gcc" AND EXISTS "/usr/bin/g++")
+        # Prefer system compilers explicitly to avoid accidentally picking conda wrappers from PATH
         set(CMAKE_C_COMPILER   "/usr/bin/gcc" CACHE FILEPATH "C compiler" FORCE)
         set(CMAKE_CXX_COMPILER "/usr/bin/g++" CACHE FILEPATH "C++ compiler" FORCE)
     endif()
@@ -177,6 +188,11 @@ add_compile_definitions(FMT_HEADER_ONLY)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 if(NOT KTRANSFORMERS_USE_SYCL)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+    # llama.cpp b3173+'s vec.h #errors under -ffinite-math-only; relax just
+    # that sub-flag so ggml-cpu keeps compiling with fast math elsewhere.
+    if(HOST_IS_RISCV)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-finite-math-only")
+    endif()
 endif()
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
@@ -358,6 +374,46 @@ elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
         list(APPEND ARCH_FLAGS -mcpu=native -mtune=native)
         #TODO: Add  targets for Power8/Power9 (Altivec/VSX) and Power10(MMA) and query for big endian systems (ppc64/le/be)
     endif()
+elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(riscv64|riscv)")
+    message(STATUS "RISC-V detected")
+    set(HOST_IS_RISCV TRUE)
+    add_compile_definitions(__riscv)
+    # RVV 1.0 (Vector Extension) is required by the rv64 operator backends.
+    # GCC >= 14 is required as well: the operators use the fixed-point
+    # narrowing intrinsic in its 4-argument form
+    # __riscv_vnclipu_wx_u16mf2(v, shamt, vxrm, vl), while GCC 13 only
+    # provides the older 3-argument form.
+    # gcc-toolset-14's assembler is also needed on openEuler: the system
+    # binutils 2.41 assembler rejects `zaamo` in -march=isa specs derived
+    # from /proc/cpuinfo defaults, while gcc-toolset-14 ships binutils 2.42.
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-march=rv64gcv")
+    if(DEFINED ENV{KT_RV_TOOLCHAIN_PREFIX})
+        string(APPEND CMAKE_REQUIRED_FLAGS " -B$ENV{KT_RV_TOOLCHAIN_PREFIX}")
+    endif()
+    check_cxx_source_compiles("#include <riscv_vector.h>\nint main() { vfloat32m1_t v = __riscv_vfmv_v_f_f32m1(0.0f, __riscv_vsetvlmax_e32m1()); return (int)__riscv_vfmv_f_s_f32m1_f32(v); }" KT_COMPILER_SUPPORTS_RVV)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(NOT KT_COMPILER_SUPPORTS_RVV)
+        message(FATAL_ERROR "RISC-V build requires RVV 1.0 intrinsics (riscv_vector.h). "
+            "On openEuler use gcc-toolset-14 and its bundled assembler, e.g.:\n"
+            "  export CC=/opt/openEuler/gcc-toolset-14/root/usr/bin/gcc\n"
+            "  export CXX=/opt/openEuler/gcc-toolset-14/root/usr/bin/g++\n"
+            "  export KT_RV_TOOLCHAIN_PREFIX=/opt/openEuler/gcc-toolset-14/root/usr/bin")
+    endif()
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+        message(FATAL_ERROR "RISC-V build requires GCC >= 14 for the RVV intrinsic API, "
+            "but ${CMAKE_CXX_COMPILER} reports version ${CMAKE_CXX_COMPILER_VERSION}. "
+            "On openEuler use gcc-toolset-14, e.g.:\n"
+            "  export CC=/opt/openEuler/gcc-toolset-14/root/usr/bin/gcc\n"
+            "  export CXX=/opt/openEuler/gcc-toolset-14/root/usr/bin/g++\n"
+            "  export KT_RV_TOOLCHAIN_PREFIX=/opt/openEuler/gcc-toolset-14/root/usr/bin")
+    endif()
+    message(STATUS "RISC-V toolchain: ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_VERSION} (GCC >= 14 OK)")
+    list(APPEND ARCH_FLAGS -march=rv64gcv)
+    if(DEFINED ENV{KT_RV_TOOLCHAIN_PREFIX})
+        list(APPEND ARCH_FLAGS "-B$ENV{KT_RV_TOOLCHAIN_PREFIX}")
+    endif()
+    message(STATUS "RISC-V target: rv64gcv (RVV 1.0)")
 else()
     message(STATUS "Unknown architecture")
 endif()
@@ -576,9 +632,27 @@ foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
     endif()
 endforeach()
 
+if(HOST_IS_RISCV)
+    # llama.cpp b3173+'s ggml-cpu/vec.h hard-errors when the compiler assumes
+    # finite math (implied by -ffast-math set above).  The flags set after
+    # this point only apply to targets defined later, so explicitly relax the
+    # flag for the llama.cpp subtree via its build-type agnostic var.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-finite-math-only")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-finite-math-only")
+endif()
 add_subdirectory(${KT_LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
+if(HOST_IS_RISCV)
+    # llama.cpp b3173+ no longer propagates its private include dirs; the
+    # llamafile/tt sources include "llama.cpp/ggml-impl.h" style paths that
+    # resolve against third_party/ (line above) plus these two:
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/src)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/include)
+    # kt_ggml_compat.h: b3173+-compat declarations (task type enum, fp16
+    # table, ggml_compute_params) used by cpuinfer.h and the llamafile tree.
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile)
+endif()
 if(KTRANSFORMERS_USE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
@@ -698,6 +772,14 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # message(STATUS "SOURCE_DIR3: ${SOURCE_DIR3}")
+
+# riscv64: RVV MoE operator backends (rv64_*), the RISC-V counterpart of the
+# x86 operators/avx2 directory.  The .hpp files there are header-only and are
+# pulled in via ext_bindings.cpp / rv64_moe_base.hpp; no .cpp needed, but the
+# include path must exist so headers resolve.
+if(HOST_IS_RISCV)
+    add_compile_definitions(KT_RVV=1)
+endif()
 
 # arm64
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)

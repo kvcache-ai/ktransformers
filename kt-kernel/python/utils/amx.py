@@ -30,6 +30,7 @@ AMXFP8_MOE = getattr(_moe_mod, "AMXFP8_MOE", None)
 AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
 AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 AVX2BF16_MOE = getattr(_moe_mod, "AVX2BF16_MOE", None)
+RV64BF16_MOE = getattr(_moe_mod, "RV64BF16_MOE", None)
 AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
 AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
 AVX2RawInt4_MOE = getattr(_moe_mod, "AVX2RawInt4_MOE", None)
@@ -659,7 +660,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI\n"
                 "Please recompile kt_kernel_ext with AVX512 + BF16 + VBMI enabled."
             )
-        if method == "BF16" and not _HAS_BF16_SUPPORT and not _HAS_AVX2_BF16_SUPPORT:
+        if method == "BF16" and not _HAS_BF16_SUPPORT and not _HAS_AVX2_BF16_SUPPORT and RV64BF16_MOE is None:
             raise RuntimeError(
                 "BF16 backend not available. Required ISA:\n"
                 "  - AVX512F + AVX512BW + AVX512_BF16 (for AMX backend), or\n"
@@ -1022,8 +1023,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.moe = _select_sycl_int4_backend()(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
-            # Prefer AMX backend, fall back to AVX2
-            if _HAS_BF16_SUPPORT:
+            # Prefer RV64 backend (RISC-V), then AMX, then AVX2
+            if RV64BF16_MOE is not None:
+                self.moe = RV64BF16_MOE(moe_config)
+            elif _HAS_BF16_SUPPORT:
                 self.moe = AMXBF16_MOE(moe_config)
             else:
                 self.moe = AVX2BF16_MOE(moe_config)

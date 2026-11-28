@@ -164,7 +164,15 @@ class MixMul {
             case GGML_TYPE_F32:
                 if (thought->type != GGML_TYPE_F32)
                     return false;
-#if defined(__AVX512F__)
+#if defined(KT_RVV)
+                // The kernel steps by the runtime VLMAX, not a fixed 4 lanes.
+                if (cols % (long)__riscv_vsetvlmax_e32m1())
+                    return false;
+                return mixmat<4, 1,
+                              tinyBLAS<NCB | NCC, 4, vfloat32m1_t, vfloat32m1_t, float,
+                                       float, TC>,
+                              float, float, TC>();
+#elif defined(__AVX512F__)
                 return mixmat<16, 1, tinyBLAS<NCB | NCC, 16, __m512, __m512, float, float, TC>, float,
                               float, TC>();
 #elif defined(__AVX__) || defined(__AVX2__)
@@ -183,7 +191,14 @@ class MixMul {
             case GGML_TYPE_BF16:
                 if (thought->type != GGML_TYPE_F32 && thought->type != GGML_TYPE_BF16)
                     return false;
-#if defined(__AVX512BF16__)
+#if defined(KT_RVV)
+                if (cols % (long)__riscv_vsetvlmax_e32m1())
+                    return false;
+                return mixmat<4, 1,
+                              tinyBLAS<NCB | NCC, 4, vfloat32m1_t, vfloat32m1_t,
+                                       ggml_bf16_t, ggml_bf16_t, TC>,
+                              ggml_bf16_t, ggml_bf16_t, TC>();
+#elif defined(__AVX512BF16__)
                 if (!FLAG_precise) {
                     return mixmat<
                         32, 1, tinyBLAS<NCB | NCC, 32, __m512, __m512bh, ggml_bf16_t, ggml_bf16_t, TC>,
@@ -213,7 +228,14 @@ class MixMul {
             case GGML_TYPE_F16:
                 if (thought->type != GGML_TYPE_F32 && thought->type != GGML_TYPE_F16)
                     return false;
-#if defined(__AVX512F__)
+#if defined(KT_RVV)
+                if (cols % (long)__riscv_vsetvlmax_e32m1())
+                    return false;
+                return mixmat<4, 1,
+                              tinyBLAS<NCB | NCC, 4, vfloat32m1_t, vfloat32m1_t,
+                                       ggml_fp16_t, ggml_fp16_t, TC>,
+                              ggml_fp16_t, ggml_fp16_t, TC>();
+#elif defined(__AVX512F__)
                 return mixmat<16, 1,
                               tinyBLAS<NCB | NCC, 16, __m512, __m512, ggml_fp16_t, ggml_fp16_t, TC>,
                               ggml_fp16_t, ggml_fp16_t, TC>();
@@ -249,7 +271,10 @@ class MixMul {
             case GGML_TYPE_Q4_0:
                 if (thought->type != GGML_TYPE_F32 && thought->type != GGML_TYPE_Q8_0)
                     return false;
-#if defined(__AVX2__) || defined(__AVX512F__)
+#if defined(KT_RVV)
+                return mixmat<32, 32, tinyBLAS_Q0_RVV<NCB | NCC, block_q4_0, block_q8_0, TC>,
+                              block_q4_0, block_q8_0, TC>();
+#elif defined(__AVX2__) || defined(__AVX512F__)
                 return mixmat<32, 32, tinyBLAS_Q0_AVX2<NCB | NCC, block_q4_0, block_q8_0, TC>,
                               block_q4_0, block_q8_0, TC>();
 #elif defined(__ARM_FEATURE_DOTPROD)
@@ -262,7 +287,10 @@ class MixMul {
             case GGML_TYPE_Q8_0:
                 if (thought->type != GGML_TYPE_F32 && thought->type != GGML_TYPE_Q8_0)
                     return false;
-#if defined(__AVX2__) || defined(__AVX512F__)
+#if defined(KT_RVV)
+                return mixmat<32, 32, tinyBLAS_Q0_RVV<NCB | NCC, block_q8_0, block_q8_0, TC>,
+                              block_q8_0, block_q8_0, TC>();
+#elif defined(__AVX2__) || defined(__AVX512F__)
                 return mixmat<32, 32, tinyBLAS_Q0_AVX2<NCB | NCC, block_q8_0, block_q8_0, TC>,
                               block_q8_0, block_q8_0, TC>();
 #elif defined(__ARM_FEATURE_DOTPROD)

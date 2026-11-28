@@ -8,6 +8,7 @@
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "linear.h"
+#include "kt_ggml_compat.h"
 
 Linear::Linear(LinearConfig config) {
   config_ = config;
