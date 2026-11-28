@@ -66,6 +66,10 @@ class TestMxfp4FusedOpHost(unittest.TestCase):
         with mock.patch.dict(os.environ, {"KT_MXFP4_BLOCKDIM": "32"}):
             self.assertEqual(op._default_blockdim("npu:0"), 32)
 
+    def test_default_async_chunk_is_8(self):
+        if "KT_MXFP4_ASYNC_CHUNK" not in os.environ:
+            self.assertEqual(op._ASYNC_CHUNK, 8)
+
 
 @unittest.skipUnless(_has_npu(), "Requires Ascend NPU with torch_npu")
 class TestMxfp4FusedOpNPU(unittest.TestCase):

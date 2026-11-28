@@ -12,7 +12,7 @@ High-throughput AscendC kernels and Python runtime for streaming MoE prefill on 
   - Builds/caches `libmxfp4fused.so` with `bisheng` on first use.
   - Fixes a latent `out_nz is None` allocation bug where `torch.empty(...)` created an ND tensor and forced `out_nz[c:ce].copy_(nz)` to de-format `FRACTAL_NZ` back to `ND`.
   - Automatically dispatches `convert_proj_blk` / `mxfp4_layer_to_nz_slots_blk` to `mxfp4_fused_blk_nz` when `IN in {2048, 4096}`, `OUT % 32 == 0`, and the target buffer is `FRACTAL_NZ`, with transparent fallback otherwise.
-  - Exposes **`mxfp4_layer_to_nz_slots_blk_async(host_b13, host_b2, H, I, out_w13, out_w2)`**: streams pinned host GGUF blocks through 2 small ping-pong device buffers (`chunk=16` experts, `~281 MiB` total instead of `~3.42 GB` full-layer copies) on a dedicated ACL H2D stream overlapped continuously across `w13 -> w2`, with clean `atexit` stream/event teardown.
+  - Exposes **`mxfp4_layer_to_nz_slots_blk_async(host_b13, host_b2, H, I, out_w13, out_w2)`**: streams pinned host GGUF blocks through 2 small ping-pong device buffers (`chunk=8` experts, `~140.5 MiB` total instead of `~3.42 GB` full-layer copies) on a dedicated ACL H2D stream overlapped continuously across `w13 -> w2`, kicks off Chunk 0 H2D before syncing `compute_stream` to overlap the previous layer's Attention/GMM, and tears down ACL streams/events via `atexit`.
 - `test_mxfp4_fused_op.py`:
   - Host CPU guardrail/LUT unit tests + Ascend 910B bit-exactness, `FRACTAL_NZ` format, and fallback verification suite.
 
@@ -29,7 +29,7 @@ When `KT_MXFP4_DEPOOL=1`, `KT_MXFP4_GGUF_DEDUP=1`, and `KT_MXFP4_BLK_KERNEL=1`:
 |---|---:|---|
 | `KT_MXFP4_DIRECT_NZ` | `1` | Enable direct `FRACTAL_NZ` kernel (`0` forces legacy `mxfp4_fused_blk`). |
 | `KT_MXFP4_BLOCKDIM` | auto (device AIV count, fallback `40`) | AI Vector Core launch count (`40` on 910B4-1 avoids tail waves). |
-| `KT_MXFP4_ASYNC_CHUNK` | `16` | Experts per ping-pong H2D chunk in `mxfp4_layer_to_nz_slots_blk_async`. |
+| `KT_MXFP4_ASYNC_CHUNK` | `8` | Experts per ping-pong H2D chunk in `mxfp4_layer_to_nz_slots_blk_async`. |
 | `KT_MXFP4_SO_DIR` | module dir or user cache | Directory to cache compiled `libmxfp4fused.so`. |
 
 ## Verified Hardware Results (Ascend 910B4-1, DeepSeek-V4-Flash, `E=256, H=4096, I=2048, L=43`)
@@ -39,7 +39,8 @@ When `KT_MXFP4_DEPOOL=1`, `KT_MXFP4_GGUF_DEDUP=1`, and `KT_MXFP4_BLK_KERNEL=1`:
   - Legacy `mxfp4_layer_to_nz_slots_blk`: `402.32 ms`
   - Raw PCIe Gen4 H2D floor (`25.60 GB/s`): `133.68 ms`
   - `mxfp4_fused_blk_nz` kernel-only (`bd=40`): **`131.45 ms`** (`w13=85.28 ms, w2=46.23 ms`)
-  - `mxfp4_layer_to_nz_slots_blk_async` (`bd=40, chunk=16`): **`142.08 ms` (2.83× vs legacy, 94.1% of raw PCIe H2D roofline)**
+  - `mxfp4_layer_to_nz_slots_blk_async` (`bd=40, chunk=16`): `142.08 ms` (`2.83×` vs legacy, 94.1% of raw PCIe H2D roofline)
+  - `mxfp4_layer_to_nz_slots_blk_async` (`bd=40, chunk=8`, early Chunk-0 H2D): **`139.53 ms` (2.91× vs legacy, 95.8% of raw PCIe H2D roofline, −140 MB ping-pong HBM)**
 - **End-to-end ABBA (`base0 -> opt0 -> opt1 -> base1`, 52/52 requests bit-exact `output_ids`)**:
   - `1024 -> 64`: TTFT `19.74 -> 11.13 s` (**−43.6%**, `1.77×`)
   - `4096 -> 64`: TTFT `20.13 -> 11.12 s` (**−44.8%**, `1.81×`)

@@ -309,7 +309,7 @@ def _can_use_blk_nz(OUT, IN, out_nz_format=None):
 
 
 _NZ_CHUNK = int(os.environ.get("KT_MXFP4_NZ_CHUNK", "32"))  # experts/chunk -> bounds HBM transient
-_ASYNC_CHUNK = int(os.environ.get("KT_MXFP4_ASYNC_CHUNK", "16"))  # experts/chunk for async H2D pipeline
+_ASYNC_CHUNK = int(os.environ.get("KT_MXFP4_ASYNC_CHUNK", "8"))  # experts/chunk for async H2D pipeline
 
 
 def convert_proj(codes_dev, scale_dev, IN, blockdim=None, packing="consecutive", out_nz=None):
@@ -576,11 +576,6 @@ def mxfp4_layer_to_nz_slots_blk_async(
     osc13 = st["osc13"]
     osc2 = st["osc2"]
 
-    # Flush PyTorch task queue so previous layer's GMM / resident gather finishes reading slots
-    # before raw ACL kernels overwrite them.
-    torch.npu.current_stream(dev).synchronize()
-    compute_stream = int(torch.npu.current_stream(dev).npu_stream)
-
     P = lambda ptr: ctypes.c_void_p(int(ptr))
     p_lutLo = P(lutLo.data_ptr())
     p_lutHi = P(lutHi.data_ptr())
@@ -615,6 +610,10 @@ def mxfp4_layer_to_nz_slots_blk_async(
                 )
             )
 
+    # Kick off Chunk 0 H2D into dev_bufs[0] BEFORE syncing compute_stream so Chunk 0 H2D overlaps
+    # the previous layer's Attention + GMM + resident gather. Safe because dev_bufs[0] is idle
+    # since the previous layer ended with synchronize_stream(compute_stream), and out_w13/out_w2
+    # are not written until after current_stream.synchronize() below.
     used_kern = [False, False]
     h_ptr0, nbytes0, _, _, _, _, _ = jobs[0]
     _check_acl(
@@ -622,6 +621,11 @@ def mxfp4_layer_to_nz_slots_blk_async(
         "memcpy_async(0)",
     )
     _check_acl(acl.rt.record_event(h2d_done[0], h2d_stream), "record_event(h2d_done[0])")
+
+    # Flush PyTorch task queue so previous layer's GMM / resident gather finishes reading slots
+    # before raw ACL kernels overwrite them.
+    torch.npu.current_stream(dev).synchronize()
+    compute_stream = int(torch.npu.current_stream(dev).npu_stream)
 
     for idx, (_, _, dst_ptr, osc_ptr, ec, out_dim, in_dim) in enumerate(jobs):
         p = idx & 1
