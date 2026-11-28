@@ -122,9 +122,91 @@ struct GemmKernel224BF16 {
   using BufferB = BufferBBF16Impl<GemmKernel224BF16>;
   using BufferC = BufferCFP32Impl<GemmKernel224BF16>;
 
+#if defined(KT_ARM_SFT) && defined(KT_ARM_SFT_NATIVE_GEMM256)
+  // Keep each output lane's high-then-low FMA order while retaining the
+  // accumulators in native SVE registers across the complete K block.
+  template <bool TwoRows>
+  static ALWAYS_INLINE void sve256_rows(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, int row,
+                                        float* c, BufferA* ba, BufferB* bb) {
+    const auto pg = svptrue_b32();
+    const auto hp = svptrue_b16();
+    float* c0 = c + row * N_STEP;
+    float* c1 = c0 + N_STEP;
+    auto c00 = svdup_n_f32(0.0f);
+    auto c01 = svdup_n_f32(0.0f);
+    auto c02 = svdup_n_f32(0.0f);
+    auto c03 = svdup_n_f32(0.0f);
+    auto c10 = svdup_n_f32(0.0f);
+    auto c11 = svdup_n_f32(0.0f);
+    auto c12 = svdup_n_f32(0.0f);
+    auto c13 = svdup_n_f32(0.0f);
+    if (k_block_begin != 0) {
+      c00 = svld1_f32(pg, c0);
+      c01 = svld1_f32(pg, c0 + 8);
+      c02 = svld1_f32(pg, c0 + 16);
+      c03 = svld1_f32(pg, c0 + 24);
+      if constexpr (TwoRows) {
+        c10 = svld1_f32(pg, c1);
+        c11 = svld1_f32(pg, c1 + 8);
+        c12 = svld1_f32(pg, c1 + 16);
+        c13 = svld1_f32(pg, c1 + 24);
+      }
+    }
+    for (int kb = 0; kb < K_BLOCK && k_block_begin + kb < k; kb += K_STEP) {
+      const auto* a32 = reinterpret_cast<const uint32_t*>(ba->get_submat(m, k, m_begin, k_block_begin + kb));
+      const auto* b16 = reinterpret_cast<const uint16_t*>(bb->get_submat(n, k, n_begin, k_block_begin + kb));
+      for (int ki = 0; ki < K_STEP / 2; ++ki) {
+        const auto b0 = svreinterpret_bf16_u16(svld1_u16(hp, b16 + ki * 32));
+        const auto b1 = svreinterpret_bf16_u16(svld1_u16(hp, b16 + ki * 32 + 16));
+        const auto b2 = svreinterpret_bf16_u16(svld1_u16(hp, b16 + (16 + ki) * 32));
+        const auto b3 = svreinterpret_bf16_u16(svld1_u16(hp, b16 + (16 + ki) * 32 + 16));
+        const auto a0 = svreinterpret_bf16_u32(svdup_n_u32(a32[row * 16 + ki]));
+        c00 = svbfmlalb_f32(svbfmlalt_f32(c00, a0, b0), a0, b0);
+        c01 = svbfmlalb_f32(svbfmlalt_f32(c01, a0, b1), a0, b1);
+        c02 = svbfmlalb_f32(svbfmlalt_f32(c02, a0, b2), a0, b2);
+        c03 = svbfmlalb_f32(svbfmlalt_f32(c03, a0, b3), a0, b3);
+        if constexpr (TwoRows) {
+          const auto a1 = svreinterpret_bf16_u32(svdup_n_u32(a32[(row + 1) * 16 + ki]));
+          c10 = svbfmlalb_f32(svbfmlalt_f32(c10, a1, b0), a1, b0);
+          c11 = svbfmlalb_f32(svbfmlalt_f32(c11, a1, b1), a1, b1);
+          c12 = svbfmlalb_f32(svbfmlalt_f32(c12, a1, b2), a1, b2);
+          c13 = svbfmlalb_f32(svbfmlalt_f32(c13, a1, b3), a1, b3);
+        }
+      }
+    }
+    svst1_f32(pg, c0, c00);
+    svst1_f32(pg, c0 + 8, c01);
+    svst1_f32(pg, c0 + 16, c02);
+    svst1_f32(pg, c0 + 24, c03);
+    if constexpr (TwoRows) {
+      svst1_f32(pg, c1, c10);
+      svst1_f32(pg, c1 + 8, c11);
+      svst1_f32(pg, c1 + 16, c12);
+      svst1_f32(pg, c1 + 24, c13);
+    }
+  }
+
+  static void sve256_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
+                            BufferB* bb) {
+    const kt::arm::ScopedBF16FZ fp_control;
+    const int rows = std::min(m - m_begin, M_STEP);
+    int row = 0;
+    for (; row + 1 < rows; row += 2) {
+      sve256_rows<true>(m, n, k, m_begin, n_begin, k_block_begin, row, c, ba, bb);
+    }
+    if (row < rows) sve256_rows<false>(m, n, k, m_begin, n_begin, k_block_begin, row, c, ba, bb);
+  }
+#endif
+
   // Basic AVX kernel for BF16: process entire K_BLOCK
   static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
                          BufferB* bb) {
+#if defined(KT_ARM_SFT) && defined(KT_ARM_SFT_NATIVE_GEMM256)
+    if (svcntw() == 8) {
+      sve256_kernel(m, n, k, m_begin, n_begin, k_block_begin, c, ba, bb);
+      return;
+    }
+#endif
     __m512* c512 = (__m512*)c;
     int m_block_end = std::min(m - m_begin, M_STEP);
 
@@ -154,6 +236,12 @@ struct GemmKernel224BF16 {
   // Optimized AVX kernel: process 4 k_i at once, unroll m rows by 2
   static void avx_kernel_4(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
                            BufferB* bb) {
+#if defined(KT_ARM_SFT) && defined(KT_ARM_SFT_NATIVE_GEMM256)
+    if (svcntw() == 8) {
+      sve256_kernel(m, n, k, m_begin, n_begin, k_block_begin, c, ba, bb);
+      return;
+    }
+#endif
     __m512* c512 = (__m512*)c;
     int m_block_end = std::min(m - m_begin, M_STEP);
 

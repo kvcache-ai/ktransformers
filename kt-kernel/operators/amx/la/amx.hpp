@@ -1,10 +1,22 @@
 #ifndef AMX_HPP
 #define AMX_HPP
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <emmintrin.h>
+#endif
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 #include <stdlib.h>
 #include <sys/syscall.h>
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <tmmintrin.h>
+#endif
 #include <unistd.h>
 
 #include <cassert>

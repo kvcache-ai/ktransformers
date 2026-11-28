@@ -635,14 +635,10 @@ def _require_extension(*, allow_source_only_skip):
         if allow_source_only_skip:
             pytest.skip("built extension does not contain MXFP4_SFT_MOE")
         raise AssertionError("built extension is missing required MXFP4_SFT_MOE")
-    if _inference_moe_class() is None:
-        if allow_source_only_skip:
-            pytest.skip("built extension does not contain AMXFP4_KGroup_MOE / AVX2MXFP4_MOE")
-        raise AssertionError("built extension is missing an MXFP4 inference MoE (AMXFP4_KGroup_MOE / AVX2MXFP4_MOE)")
 
 
 @pytest.mark.cpu
-def test_mxfp4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression():
+def test_mxfp4_sft_tp1_tp2_numerical_lifecycle():
     _require_extension(allow_source_only_skip=True)
     base, lora, _ = _make_weights()
     invalid_map = torch.tensor([0, 0, 2, 3], dtype=torch.int64).contiguous()
@@ -666,7 +662,6 @@ def test_mxfp4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression():
             relative_l2_limit=0.01,
             cosine_limit=0.999,
         )
-    inference = _run_inference_regression()
     print(
         "KT_MXFP4_SFT_SUMMARY="
         + json.dumps(
@@ -681,13 +676,23 @@ def test_mxfp4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression():
                     for key, value in tp2.items()
                     if key not in {"output", "grad_input", "grad_weights", "grads"}
                 },
-                "inference": inference,
             },
             sort_keys=True,
         )
     )
 
 
+@pytest.mark.cpu
+def test_mxfp4_inference_regression():
+    _require_extension(allow_source_only_skip=True)
+    if kt_kernel_ext.__cpu_variant__ in ("arm_sve_bf16", "arm_neon"):
+        pytest.skip("ARM SFT builds expose the training operator")
+    assert _inference_moe_class() is not None
+    print("KT_MXFP4_INFERENCE_SUMMARY=" + json.dumps(_run_inference_regression(), sort_keys=True))
+
+
 if __name__ == "__main__":
     _require_extension(allow_source_only_skip=False)
-    test_mxfp4_sft_tp1_tp2_numerical_lifecycle_and_inference_regression()
+    test_mxfp4_sft_tp1_tp2_numerical_lifecycle()
+    if kt_kernel_ext.__cpu_variant__ not in ("arm_sve_bf16", "arm_neon"):
+        test_mxfp4_inference_regression()

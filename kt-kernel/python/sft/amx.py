@@ -35,10 +35,12 @@ try:
     _HAS_AMX_SFT_SUPPORT = True
 except (ImportError, AttributeError):
     _HAS_AMX_SFT_SUPPORT = False
-    AMXBF16_SFT_MOE = None
+    from kt_kernel_ext import moe
+
+    AMXBF16_SFT_MOE = getattr(moe, "ARM_BF16_SFT_MOE", None)
     AMXInt8_SFT_MOE = None
     AMXInt4_SFT_MOE = None
-    AMXBF16_SFT_MOE_SkipLoRA = None
+    AMXBF16_SFT_MOE_SkipLoRA = getattr(moe, "ARM_BF16_SFT_MOE_SkipLoRA", None)
     AMXInt8_SFT_MOE_SkipLoRA = None
     AMXInt4_SFT_MOE_SkipLoRA = None
 
@@ -118,7 +120,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         full_weight_grad: bool = False,
         swiglu_limit: float = 0.0,
     ):
-        if not _HAS_AMX_SFT_SUPPORT and not (is_mxfp4_sft_method(method) or is_rawint4_sft_method(method)):
+        if not _HAS_AMX_SFT_SUPPORT and not (
+            is_mxfp4_sft_method(method)
+            or is_rawint4_sft_method(method)
+            or (method in {"AMXBF16_SFT", "AMXBF16_SFT_SkipLoRA"} and _SFT_METHOD_TO_CLASS[method] is not None)
+        ):
             raise RuntimeError(
                 "AMX SFT backend not available. kt_kernel_ext was not compiled with AMX SFT support.\n"
                 "Please recompile with AMX SFT enabled."

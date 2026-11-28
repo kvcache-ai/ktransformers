@@ -39,7 +39,7 @@ _PREPARATION_NAME = ".kt-v4-cache-owner.json"
 _FP8_DTYPES = {"F8_E4M3", "F8_E4M3FN"}
 
 
-def canonical_non_expert_key(key: str) -> str:
+def canonical_non_expert_key(key: str, *, v41: bool = False) -> str:
     """Map the native April checkpoint to Transformers' V4 module names."""
     if key.startswith("mtp.") or ".experts." in key:
         raise KTArtifactError(f"not a non-expert base-model tensor: {key}")
@@ -56,6 +56,9 @@ def canonical_non_expert_key(key: str) -> str:
     if not key.startswith("layers."):
         raise KTArtifactError(f"unsupported V4 checkpoint key: {key}")
     key = "model." + key
+    if v41:
+        key = key.replace(".attn.indexer.wk.", ".attn.indexer.k_proj.")
+        key = key.replace(".attn.indexer.wq_b.", ".attn.indexer.q_b_proj.")
     replacements = (
         (".attn.", ".self_attn."),
         (".ffn.", ".mlp."),
@@ -80,6 +83,8 @@ def canonical_non_expert_key(key: str) -> str:
         (".ape", ".position_bias"),
     )
     for old, new in replacements:
+        if v41 and (old.startswith(".indexer.") or (old == ".wkv." and ".engram." in key)):
+            continue
         key = key.replace(old, new)
     for native, target in (("hc_attn", "attn_hc"), ("hc_ffn", "ffn_hc")):
         for suffix in ("fn", "base", "scale"):
@@ -87,26 +92,24 @@ def canonical_non_expert_key(key: str) -> str:
     return key
 
 
-def dequantize_fp8_blocks(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Decode 128x128 E4M3 blocks; UE8M0 stores the multiplier, not its inverse."""
+def dequantize_fp8_blocks(weight: torch.Tensor, scale: torch.Tensor, block_size: int = 128) -> torch.Tensor:
+    """Decode square E4M3 blocks; UE8M0 stores the multiplier, not its inverse."""
     if weight.dtype != torch.float8_e4m3fn or scale.dtype != torch.float8_e8m0fnu:
         raise KTArtifactError("expected E4M3 weights and UE8M0 scales")
-    if weight.ndim != 2 or tuple(scale.shape) != tuple(
-        math.ceil(d / 128) for d in weight.shape
-    ):
+    if weight.ndim != 2 or tuple(scale.shape) != tuple(math.ceil(d / block_size) for d in weight.shape):
         raise KTArtifactError("invalid V4 non-expert FP8 weight/scale shape")
     scales = scale.float()
     if not torch.isfinite(scales).all() or not (scales > 0).all():
         raise KTArtifactError("non-finite or non-positive FP8 scales")
     result = torch.empty(weight.shape, dtype=torch.bfloat16)
-    for row in range(0, weight.shape[0], 128):
-        block = weight[row : row + 128].float()
-        multipliers = scales[row // 128].repeat_interleave(128)[: weight.shape[1]]
+    for row in range(0, weight.shape[0], block_size):
+        block = weight[row : row + block_size].float()
+        multipliers = scales[row // block_size].repeat_interleave(block_size)[: weight.shape[1]]
         block.mul_(multipliers)
         if not torch.isfinite(block).all():
             raise KTArtifactError("non-finite FP8 non-expert weight")
-        result[row : row + 128].copy_(block)
-        if not torch.isfinite(result[row : row + 128]).all():
+        result[row : row + block_size].copy_(block)
+        if not torch.isfinite(result[row : row + block_size]).all():
             raise KTArtifactError("FP8 non-expert weight overflows BF16")
     return result
 
@@ -115,13 +118,17 @@ def inspect_native_checkpoint(source: str | os.PathLike[str]) -> dict:
     """Validate expert headers without materializing the 148 GiB expert payload."""
     root = _safe_root(source, "DeepSeek V4 checkpoint")
     config = _read_json(root / "config.json", "DeepSeek V4 config")
-    if config.get("model_type") != "deepseek_v4":
+    v41 = config.get("model_type") == "deepseek_v41"
+    if v41 and config.get("text_config", {}).get("model_type") != "deepseek_v41_text":
+        raise KTArtifactError("expected a V4.1 text backbone")
+    if not v41 and config.get("model_type") != "deepseek_v4":
         raise KTArtifactError("native MXFP4 SFT currently requires DeepSeek V4")
     quant = config.get("quantization_config", {})
     if (
         quant.get("quant_method") != "fp8"
-        or quant.get("fmt") != "e4m3"
-        or quant.get("weight_block_size") != [128, 128]
+        or quant.get("fmt", "e4m3" if v41 else None) != "e4m3"
+        or quant.get("weight_block_size") != ([32, 32] if v41 else [128, 128])
+        or (v41 and quant.get("expert_dtype") != "fp4")
         or quant.get("scale_fmt") != "ue8m0"
     ):
         raise KTArtifactError("expected the native V4 FP8/UE8M0 non-expert checkpoint")
@@ -131,8 +138,9 @@ def inspect_native_checkpoint(source: str | os.PathLike[str]) -> dict:
         not isinstance(v, str) or Path(v).name != v for v in weight_map.values()
     ):
         raise KTArtifactError("invalid native checkpoint shard inventory")
+    text_config = config["text_config"] if v41 else config
     dimensions = [
-        config.get(k)
+        text_config.get(k)
         for k in (
             "num_hidden_layers",
             "n_routed_experts",
@@ -193,10 +201,40 @@ def inspect_native_checkpoint(source: str | os.PathLike[str]) -> dict:
     }
 
 
+def _cache_excludes(key: str, v41: bool) -> bool:
+    if key.startswith("mtp.") or ".experts." in key:
+        return True
+    return v41 and (
+        key.startswith(("vision.", "aligner."))
+        or key in {"image_start", "image_end", "image_newline"}
+        or ".engram.embed." in key
+    )
+
+
+def _engram_parameters(source: dict) -> dict:
+    if source["config"].get("model_type") != "deepseek_v41":
+        return {}
+    cfg = source["config"]["text_config"]
+    entries = {}
+    for layer, rows in zip(cfg["engram_layer_ids"], cfg["engram_num_embeddings"], strict=True):
+        width = cfg["engram_head_dim"]
+        for suffix, attr, cols, dtypes in (
+            ("weight", "weight", width, _FP8_DTYPES),
+            ("scale", "weight_scale_inv", width // 32, {"F8_E8M0"}),
+        ):
+            native = f"layers.{layer}.engram.embed.{suffix}"
+            spec = source["inventory"].get(native, {})
+            if spec.get("shape") != [rows, cols] or spec.get("dtype") not in dtypes:
+                raise KTArtifactError(f"invalid packed Engram table: {native}")
+            entries[f"model.engram_tables.{layer}.{attr}"] = (source["weight_map"][native], native)
+    return entries
+
+
 def _expected_cache_inventory(source: dict) -> dict:
     result = {}
+    v41 = source["config"].get("model_type") == "deepseek_v41"
     for key, spec in source["inventory"].items():
-        if key.startswith("mtp.") or ".experts." in key:
+        if _cache_excludes(key, v41):
             continue
         if key.endswith(".scale"):
             weight = key.removesuffix(".scale") + ".weight"
@@ -211,7 +249,7 @@ def _expected_cache_inventory(source: dict) -> dict:
             dtype = "BF16"
         if dtype not in {"BF16", "F32", "I64"}:
             raise KTArtifactError(f"unsupported non-expert dtype {dtype}: {key}")
-        target = canonical_non_expert_key(key)
+        target = canonical_non_expert_key(key, v41=v41)
         if target in result:
             raise KTArtifactError(f"duplicate converted key: {target}")
         result[target] = {"shape": spec["shape"], "dtype": dtype}
@@ -220,6 +258,7 @@ def _expected_cache_inventory(source: dict) -> dict:
 
 def _convert_non_expert_cache(source: dict, output: Path) -> dict:
     """Write only inside a private staging directory owned by the cache lock."""
+    v41 = source["config"].get("model_type") == "deepseek_v41"
     source_path = source["model_name_or_path"]
     expected = _expected_cache_inventory(source)
     weight_map, records = {}, []
@@ -228,13 +267,9 @@ def _convert_non_expert_cache(source: dict, output: Path) -> dict:
         tensors = {}
         with safe_open(root / shard, framework="pt", device="cpu") as handle:
             for key in handle.keys():
-                if (
-                    key.startswith("mtp.")
-                    or ".experts." in key
-                    or key.endswith(".scale")
-                ):
+                if _cache_excludes(key, v41) or key.endswith(".scale"):
                     continue
-                target = canonical_non_expert_key(key)
+                target = canonical_non_expert_key(key, v41=v41)
                 tensor = handle.get_tensor(key)
                 if source["inventory"][key]["dtype"] in _FP8_DTYPES:
                     scale_key = key.removesuffix(".weight") + ".scale"
@@ -242,9 +277,7 @@ def _convert_non_expert_cache(source: dict, output: Path) -> dict:
                     with safe_open(
                         root / scale_shard, framework="pt", device="cpu"
                     ) as scales:
-                        tensor = dequantize_fp8_blocks(
-                            tensor, scales.get_tensor(scale_key)
-                        )
+                        tensor = dequantize_fp8_blocks(tensor, scales.get_tensor(scale_key), 32 if v41 else 128)
                 elif tensor.is_floating_point() and not torch.isfinite(tensor).all():
                     raise KTArtifactError(f"non-finite source tensor: {key}")
                 tensors[target] = tensor.contiguous()
@@ -427,6 +460,7 @@ def resolve_native_load_plan(kt_config, source_path, explicit_quantization_confi
             raise KTArtifactError(
                 "MXFP4 experts and non-expert cache must use the same native base"
             )
+        external = _engram_parameters(source)
         manifest = _ensure_non_expert_cache(
             source, _config_value(kt_config, "kt_non_expert_weight_path"), verify_payload=rank == 0
         )
@@ -442,7 +476,8 @@ def resolve_native_load_plan(kt_config, source_path, explicit_quantization_confi
             source_model_name_or_path=str(native_root),
             weight_path=str(root),
             checkpoint_files=tuple(str(root / name) for name in files),
-            weight_keys=frozenset(expected),
+            weight_keys=frozenset(expected).union(external),
+            mapped_parameters=external,
             manifest=manifest,
             manifest_path=str(manifest_path),
             routed_weight_path=str(native_root),

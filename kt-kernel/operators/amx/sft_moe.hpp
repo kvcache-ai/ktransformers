@@ -399,6 +399,9 @@ template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = 
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
+#if defined(KT_ARM_SFT)
+  static constexpr int kIntermediateAlignment = T::N_STEP;
+#endif
   static constexpr bool kIsInt8Backend = std::is_same_v<T, amx::GemmKernel224Int8>;
   static constexpr bool kIsFP8Backend = std::is_same_v<T, amx::GemmKernel224FP8>;
   static constexpr bool kIsMXFP4Backend = std::is_same_v<T, amx::GemmKernel224MXFP4SmallKGroup>;
@@ -802,7 +805,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
     if constexpr (kIsMXFP4Backend) {
-#if !defined(__AVX512BF16__)
+#if !(defined(__AVX512BF16__) || defined(KT_ARM_SFT))
       throw std::invalid_argument("MXFP4 SFT requires an AVX512-BF16 build");
 #endif
       if (config.quant_config.group_size != 32 || config.quant_config.zero_point) {

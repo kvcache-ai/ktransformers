@@ -14,7 +14,6 @@
 #include <numa.h>
 
 #include <atomic>
-#include <barrier>
 #include <condition_variable>
 #include <cstdio>
 #include <functional>
@@ -23,17 +22,39 @@
 #include <thread>
 #include <vector>
 
+#include "barrier_compat.h"
+
 // #define PROFILE_BALANCE
+
+#if defined(KT_ARM_SFT)
+// Respect a caller that explicitly interleaves allocations across NUMA nodes.
+inline bool has_interleave_policy() {
+  auto* mask = numa_get_interleave_mask();
+  if (!mask) return false;
+  const bool interleaved = numa_bitmask_weight(mask) != 0;
+  numa_bitmask_free(mask);
+  return interleaved;
+}
+#endif
 
 inline void set_to_numa(int this_numa) {
   struct bitmask* mask = numa_bitmask_alloc(numa_num_configured_nodes());
   numa_bitmask_setbit(mask, this_numa);
+#if defined(KT_ARM_SFT)
+  if (has_interleave_policy()) {
+    numa_run_on_node_mask(mask);
+    numa_bitmask_free(mask);
+    return;
+  }
+#endif
   numa_bind(mask);
   numa_bitmask_free(mask);
 }
 
 inline void set_memory_to_numa(int this_numa) {
-  // printf("Set memory to NUMA %d\n", this_numa);
+#if defined(KT_ARM_SFT)
+  if (has_interleave_policy()) return;
+#endif
   hwloc_topology_t topology;
   hwloc_topology_init(&topology);
   hwloc_topology_load(topology);
@@ -116,7 +137,7 @@ class NumaJobDistributor {
   void init(std::vector<int> numa_ids);
   void init(std::vector<int> numa_ids, std::vector<int> thread_count);
 
-  std::unique_ptr<std::barrier<>> ready_bar;
+  std::unique_ptr<kt::Barrier> ready_bar;
 
   int numa_count;
   std::vector<int> numa_ids;

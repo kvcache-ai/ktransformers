@@ -35,6 +35,7 @@ from .backend import (
     RAWINT4_SFT_METHOD,
     RAWINT4_WEIGHT_LAYOUT,
     get_fp8_runtime,
+    is_arm_sft_build,
     get_int8_runtime,
     get_mxfp4_runtime,
     get_rawint4_checkpoint_contract,
@@ -1358,6 +1359,11 @@ def load_kt_model(
         trust_remote_code=trust_remote_code,
         token=token,
     )
+    use_npu = is_arm_sft_build() and hasattr(torch, "npu") and torch.npu.is_available()
+    if use_npu:
+        # Load the small non-expert shards on the host, then place each module
+        # once. Accelerate's CPU device map denotes permanent offload.
+        loading_kwargs["device_map"] = None
     if model_args is not None:
         for key in ("cache_dir", "revision"):
             value = getattr(model_args, key, None)
@@ -1438,7 +1444,13 @@ def load_kt_model(
 
     moe_config = get_moe_arch_config(config)
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    move_non_experts_to_gpu(model, moe_config, device=f"cuda:{local_rank}")
+    device_type = "npu" if use_npu else "cuda"
+    move_non_experts_to_gpu(
+        model,
+        moe_config,
+        device=f"{device_type}:{local_rank}",
+        shared_experts_on_cpu=bool(getattr(cfg, "kt_shared_experts_on_cpu", False)),
+    )
 
     existing_wrappers = getattr(model, "_kt_wrappers", None)
     if existing_wrappers:

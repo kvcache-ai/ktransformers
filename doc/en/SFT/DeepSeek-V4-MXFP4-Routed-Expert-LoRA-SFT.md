@@ -1,5 +1,7 @@
 # DeepSeek V4 native MXFP4 routed-expert LoRA SFT
 
+For two-device Ascend expert parallelism, see the [NPU MXFP4 LoRA example](../../../kt-kernel/examples/npu_mxfp4/README.md).
+
 This page records the standalone kernel milestone. The subsequent April-model
 integration is documented in [DeepSeek-V4-Flash LoRA E2E](./DeepSeek-V4-Flash-LoRA-E2E.md).
 

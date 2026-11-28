@@ -38,3 +38,11 @@ def test_initialize_rejects_extension_newer_than_host(monkeypatch):
         assert "requires a newer CPU ISA" in str(error)
     else:
         raise AssertionError("AMX extension must be rejected on an AVX512-BF16 host")
+
+
+def test_initialize_reports_neon_build_on_aarch64(monkeypatch):
+    monkeypatch.setattr(cpu_detect.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(cpu_detect, "detect_cpu_features", lambda: "avx2")
+    extension = SimpleNamespace(__cpu_variant__="arm_neon")
+    monkeypatch.setattr(cpu_detect, "load_extension", lambda variant: extension)
+    assert cpu_detect.initialize() == (extension, "arm_neon")

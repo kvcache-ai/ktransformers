@@ -19,6 +19,7 @@ Example:
 """
 
 import os
+import platform
 
 _VARIANT_LEVEL = {
     "avx2": 0,
@@ -31,6 +32,10 @@ _VARIANT_LEVEL = {
 
 
 def _validate_loaded_variant(detected_variant: str, loaded_variant: str) -> None:
+    # The AArch64 extension verifies its required ISA on import.
+    # x86 wheel levels have no ordering relative to an ARM ISA.
+    if loaded_variant in {"arm_sve_bf16", "arm_neon"} and platform.machine().lower() == "aarch64":
+        return
     detected_level = _VARIANT_LEVEL.get(detected_variant)
     loaded_level = _VARIANT_LEVEL.get(loaded_variant)
     if detected_level is None or loaded_level is None:

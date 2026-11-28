@@ -12,7 +12,11 @@
 
 // #define FORWARD_TIME_PROFILE
 
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 
 #include <algorithm>
 #include <chrono>

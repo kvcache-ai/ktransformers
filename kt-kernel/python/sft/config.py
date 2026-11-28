@@ -270,6 +270,7 @@ class KTConfig:
         None  # HF expert checkpoint or KT Full checkpoint directory
     )
     kt_num_gpu_experts: int | None = None
+    kt_shared_experts_on_cpu: bool = False
     kt_skip_expert_loading: bool | None = None
     kt_share_backward_bb: bool | None = None  # defaults off for RAWINT4/MXFP4
     kt_share_cache_pool: bool | None = (

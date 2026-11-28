@@ -1,7 +1,11 @@
 #ifndef AVX_KERNELS_HPP
 #define AVX_KERNELS_HPP
 
+#if defined(KT_ARM_SFT)
+#include "operators/arm/simd_compat.hpp"
+#else
 #include <immintrin.h>
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -1438,7 +1442,7 @@ inline __m512 load_bf16x16_as_fp32(const ggml_bf16_t* ptr) {
 inline void store_optimizer_gradient_bf16(ggml_bf16_t* dst, const float* src, size_t count, bool accumulate,
                                           float scale) {
   size_t i = 0;
-#if defined(__AVX512BF16__)
+#if (defined(__AVX512BF16__) || defined(KT_ARM_SFT))
   const __m512 scale_v = _mm512_set1_ps(scale);
   for (; i + 15 < count; i += 16) {
     __m512 value = _mm512_mul_ps(_mm512_loadu_ps(src + i), scale_v);

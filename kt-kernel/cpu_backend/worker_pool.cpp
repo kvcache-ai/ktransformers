@@ -268,7 +268,7 @@ NumaJobDistributor::NumaJobDistributor(std::vector<int> numa_ids, std::vector<in
 
 void NumaJobDistributor::init(std::vector<int> numa_ids) {
   this->numa_count = numa_ids.size();
-  this->ready_bar = std::unique_ptr<std::barrier<>>(new std::barrier<>(numa_count + 1));
+  this->ready_bar = std::unique_ptr<kt::Barrier>(new kt::Barrier(numa_count + 1));
   this->numa_ids = numa_ids;
   for (size_t i = 0; i < numa_count; i++) {
     status.push_back(nullptr);
@@ -291,7 +291,7 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
   hwloc_topology_load(topology);
 
   this->numa_count = numa_ids.size();
-  this->ready_bar = std::unique_ptr<std::barrier<>>(new std::barrier<>(numa_count + 1));
+  this->ready_bar = std::unique_ptr<kt::Barrier>(new kt::Barrier(numa_count + 1));
   this->numa_ids = numa_ids;
   for (size_t i = 0; i < numa_count; i++) {
     status.push_back(nullptr);
